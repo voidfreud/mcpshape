@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.ruff_cache/
+.hypothesis/
+.mypy_cache/
+.pyright/
+
+# Node (dashboard)
+node_modules/
+
+# OS / editors
+.DS_Store
+.idea/
+.vscode/
+
+# Local
+.env

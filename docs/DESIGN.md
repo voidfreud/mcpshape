@@ -1,0 +1,219 @@
+# mcpshape design brief
+
+Outcome of the design session of 2026-09-06/07, recorded verbatim in `docs/sessions/`. Vocabulary is in `CONTEXT.md`, the
+reasoning behind the hard-to-reverse decisions in `docs/adr/`, and the dated Client and
+FastMCP facts the decisions rest on in `docs/clients.md`. This is the shared understanding
+the implementation starts from.
+
+## Why
+
+MCP servers as shipped are bloated: thirty to fifty tools each, many redundant or broken, with
+long descriptions. Clients such as Claude Code offer no per-tool control, so the choice is
+everything or nothing. Several such servers together dilute the model's attention until MCP
+stops being useful. Nobody had built the obvious fix: a local layer that lets the user decide
+what a model sees, per server, without touching the server.
+
+## Goals
+- Curated, tailored MCP servers for any Client, from any Upstream, with no changes to either.
+- Resource-friendly and minimally invasive: one lazy daemon, nothing running when nothing is used.
+- Runs on a laptop and on a headless server alike.
+- Full FastMCP compliance: every field, property, and value FastMCP supports is displayed
+  and forwarded; the user narrows what is shown, mcpshape does not.
+- Production quality from the first release: packaging, tests, docs, and upgrade path.
+- Minimalistic, elegant, upgradeable, tested through and through.
+- Open source, MIT.
+
+## What it is
+
+A local, per-user daemon that sits between MCP Clients and the MCP servers they use.
+Each Upstream is added once and gets one or more Proxies. A Proxy is a curated MCP
+server of its own: tools hidden, renamed, re-described, capped, hooked, or added,
+before a model sees them. Never a merged endpoint (ADR 0002).
+
+Built on unmodified FastMCP 4.x, pinned to a major, with every FastMCP touchpoint
+behind a thin internal layer so user-facing files and APIs survive FastMCP churn (ADR 0001).
+
+Client-agnostic: the core speaks only MCP and knows no Client. Everything Client-specific,
+limits, config paths, transports, conveniences, lives in a Client Profile (ADR 0003).
+Claude Code is the first and best-integrated Profile, never a special case in the core.
+
+## Decisions
+
+### Topology
+- The CLI edits config files directly and signals the Daemon to reload. The Daemon exposes a
+  small management API only for live state (Catalog, health, logs, call log). Every CLI
+  command that edits or inspects config works when the Daemon is down. The dashboard uses the
+  same API, with as little scaffolding as possible.
+- One Daemon process. One TCP port, loopback by default: `/<upstream>/mcp` and
+  `/<upstream>/<proxy>/mcp` for Proxies (`default` is also reachable at `/<upstream>/mcp`),
+  `/api` for management, `/` for the dashboard. Optional per-Proxy port override.
+- Non-loopback bind requires a static bearer token. Anything beyond is a reverse proxy's job.
+  The dashboard is meant for a browser on the same machine at `localhost:<port>`; reaching it
+  on a headless server is the user's routing, not mcpshape's.
+- Upstreams are reached over stdio (a child process the Daemon spawns), Streamable HTTP, or
+  legacy SSE, with or without OAuth.
+- One Upstream connection, shared by all its Proxies and all Clients. One Proxy serves any
+  number of Clients at once. Nothing is per-Client.
+- Every Upstream gets a Proxy named `default` when it is added.
+- Streamable HTTP is the Client-facing transport. A hidden `serve` stdio shim speaks stdio to
+  the Client, forwards to the Proxy URL, and starts the Daemon if it is not running. It exists for the Clients that accept only stdio (see `docs/clients.md`).
+  `proxy install` writes whichever form the target Client needs.
+
+### Upstream lifecycle
+- Lazy by default: connect on first tool call, disconnect after `idle_timeout`
+  (default 10 min, 0 = never). `warm = true` connects at Daemon start and pings on an interval
+  so a warm Upstream is never falsely reported up. These settings belong to the Upstream,
+  since the connection is the Upstream's and shared by its Proxies.
+- Clients cannot detect that an Upstream behind a Proxy went down and came back, and Claude
+  Code needs a manual reconnect and re-auth to notice. So a Proxy stays up and reachable
+  through every Upstream outage; only individual calls fail while the Upstream is away.
+- `initialize` and `tools/list` are answered from the stored Catalog instantly.
+- Connect failures within the connect timeout return a tool error with a configurable message.
+- Auto-reconnect with capped exponential backoff.
+- Health of every Upstream and Proxy is shown by `ls`, `daemon status`, and the dashboard.
+
+### Catalog and Drift
+- Catalog persisted per Upstream in the state dir. Rescan on Daemon start, on reconnect,
+  and on `upstream sync`.
+- Drift default: new items hidden, vanished items' Overrides kept as orphaned. The default
+  is configurable in the global settings. The CLI prints a one-line notice on every command until
+  the Drift is reviewed. `upstream sync` shows the diff; `--accept` applies it.
+- A Proxy's exposed set changes only on accept, so `tools/list_changed` reaches Clients only
+  then. Most Clients need a reconnect to see it; the CLI and dashboard say so.
+
+### Curation layers on a Proxy
+1. **Overrides** (declarative): per tool: exposed name, title, description, per-argument
+   name/description/default/required/hidden, annotations, hidden. Per resource and prompt:
+   exposed name, description, hidden. Per Proxy: exposed server name and instructions.
+   Not editable: input/output schema types.
+2. **Caps**: ceilings on the length of tool names, tool and argument descriptions, Proxy
+   instructions, and tool output. One global master Cap per kind; an Upstream, a Proxy, or a
+   tool may each only lower what it inherits (global, then Upstream, then Proxy, then tool).
+   Truncation appends a marker; truncated output tells the
+   model how much was cut.
+3. **Hooks**: user Python, before/after per tool, resource, and prompt. Can rewrite args and
+   results, short-circuit, or raise. Reach only their own Upstream.
+4. **Virtual Tools**: user Python tools with a handle to call their own Upstream.
+- Identity is the Catalog name everywhere in config and Hooks. Exposed name is the last step.
+- User code lives in `<proxy>.py` next to `<proxy>.toml`, uses mcpshape's own decorator API
+  (`@hook.before`, `@hook.after`, `@tool`, `upstream.call`), sync or async.
+- Hooks run in-process with no sandbox. Exceptions become tool errors and log lines. A Hook
+  that blocks forever or calls `sys.exit` is not guarded against; this is documented, not solved.
+- Files are watched and the affected Proxy reloaded (`daemon reload` also exists). Load errors
+  mark the Proxy unhealthy: it keeps advertising its last exposed tool set and every call
+  returns a tool error naming the Proxy and reason. Nothing reaches the Upstream. The Daemon
+  never crashes on user code.
+- Per-Proxy `instructions` override is a first-class feature: in Clients that defer tool
+  loading (Claude Code today), instructions are what the model sees first.
+
+### Files
+- XDG layout on both OSes: `~/.config/mcpshape/` (global `config.toml`,
+  `upstreams/<name>/upstream.toml`, `upstreams/<name>/<proxy>.toml` + `<proxy>.py`),
+  `~/.local/state/mcpshape/` (Catalogs, Drift, encrypted OAuth tokens, `log/`).
+  `--config-dir` and env var override.
+- Upstream and Proxy names are user-chosen slugs. Both appear in the Proxy's URL.
+- TOML read and rewritten with `tomlkit` so hand-written comments survive CLI edits.
+  Each file carries a `version` integer for migrations. A JSON Schema is shipped for editor
+  validation via the TOML schema comment. `proxy export` produces strict `mcpServers` JSON
+  (Client config files reject comments) pointing at the Proxy.
+- Secrets: `${ENV_VAR}` references resolved from the Daemon environment or a 0600 secrets file.
+- OAuth for remote Upstreams: CLI opens the browser and receives the loopback callback;
+  dashboard flow second; device-code pairing on headless.
+
+### Client Profiles
+- One Profile per supported Client: config file path and format, transports accepted, whether
+  the stdio shim is needed, the naming scheme the Client applies to tool names, documented
+  limits with source and date, and integration extras. Seed data: `docs/clients.md`.
+- Consumers: `proxy install` (writes the right entry, optionally disables the Client's
+  original entry for that server, warns when names exceed the Client's budget),
+  `upstream scan` (where to look), default Caps, and `doctor` (validates exposed names and
+  schemas against the target Profile's rules).
+- Limits are dated facts; nothing is enforced silently.
+- Initial Profiles: every Client listed in `docs/clients.md`. Only those with documented
+  limits carry real numbers at first.
+- Claude Code Profile defaults, set now: Caps for tool descriptions and Proxy instructions
+  comfortably under the documented 2KB truncation, and `doctor` reminds that critical text
+  goes first because the first sentence carries the routing hint.
+
+### Observability
+- App log with standard levels. Verbose by default during development; configurable down to
+  warnings or errors only. A separate, always-on call log (name, args, duration, outcome,
+  truncated result) feeds the dashboard: in-memory ring buffer plus JSON lines on disk.
+  Size-based rotation under one global size cap across all log files. No database.
+
+### CLI
+```
+mcpshape add <upstream> --stdio '...' | --url ...   convenience for upstream add + default Proxy
+mcpshape ls                                          convenience for upstream ls + proxy ls
+mcpshape upstream   add | ls | show | sync | rm | scan
+mcpshape proxy      new | ls | show | rm | install | export
+mcpshape tool       hide | show | rename | describe | trim | cap
+mcpshape daemon     up | down | status | logs | reload | install | uninstall
+mcpshape ui
+mcpshape doctor
+```
+- Typer + Rich. Every command answers `-h` and `--help` with one example. `serve` is hidden.
+- `doctor` validates every config file against the shipped schema and loads every user Python
+  file without starting anything, then reports.
+- `tool trim` shows the original description and opens it for editing. It is a replace;
+  automatic truncation is a Cap.
+- `upstream scan` discovers servers in known Client config locations, typical directories,
+  and any directory the user names.
+
+### Autostart and distribution
+- `daemon install` writes a launchd user agent (macOS) or a `systemd --user` unit with linger
+  (Linux). Offered on first `daemon up`.
+- Home is GitHub. Releases go to PyPI; `uv tool install mcpshape` is the install path.
+  Homebrew formula after the first stable release, built from PyPI. Python 3.12 minimum.
+- No telemetry, no update checks, no network calls except to configured Upstreams.
+
+### Engineering
+- uv, ruff (strict), pyright strict, pytest with in-memory FastMCP Upstreams, Hypothesis for
+  config round-trips and Override application over generated Catalogs. A benchmark script for
+  proxy overhead instead of a stress-test suite. GitHub Actions on macOS and Linux.
+  Protected `main`, merges only. Conventional commits, semver. MIT.
+- One repo, modular for clarity. Dashboard as a separate package directory in the same repo,
+  built to static files the Daemon serves.
+- Name: `mcpshape`. The working name `mcpi` is the Minecraft Pi API on PyPI, npm, and GitHub.
+
+## Rejected alternatives
+
+- One process per Proxy: noisier and heavier than one Daemon with supervised connections.
+- One port per Proxy as the default: port bookkeeping; kept only as a per-Proxy override.
+- Two ports (Proxies vs management), or a Unix socket for the management API: no benefit once
+  the dashboard needs loopback TCP anyway.
+- System directories (`/etc`, `/Library`): those are for all-users, pre-login daemons and need root.
+- JSON/JSONC/YAML config: Python has no mature comment-preserving JSONC writer; `tomlkit` is
+  the only mature round-trip library. One format for config, strict JSON only on export.
+- Plaintext secrets in Proxy files, or OS keychain: env references + 0600 file instead;
+  keychain is painful headless and under launchd.
+- Expression mini-language for Hooks: a second thing to design; Python only.
+- Passing new Catalog items through by default: violates "nothing reaches the model unasked".
+- Empty tool list for an unhealthy Proxy: Clients keep cached tool lists and call anyway, so
+  the last exposed set stays advertised and every call errors instead.
+- Serving Overrides without Hooks when user code fails: would silently skip rewrites.
+- pip/pipx as documented install paths: uv only.
+
+## Parked
+- Pinning tools against Client-side deferral (only Claude Code's whole-server flag exists).
+- Per-Proxy "search + call" meta-tools for long-tail Upstreams (FastMCP's Tool Search
+  transform). Progressive disclosure inside a Proxy, opt-in only; never the default.
+- Emitting Client-specific `_meta` hints from a Profile when the Client documents them.
+- Cross-Proxy calls from user code: would become the merged endpoint by another route.
+- Programmatic tool-list Hooks.
+- Virtual Upstreams (tools wrapping non-MCP things); composite tools beyond Virtual Tools.
+- OS keychain for secrets.
+- Windows: "not required at this stage".
+- Dashboard framework choice: separate design session. Constraints: lightweight, nothing the
+  backend already does, CLI parity via the management API only.
+
+## Out of scope
+- Merging Upstreams into one endpoint. Hosting or running Upstreams remotely.
+
+## To verify before relying on it
+- Claude Code's documented 2KB truncation of instructions and tool descriptions: measure the
+  exact cutoff (characters vs bytes) and whether it is per server or a shared pool across
+  servers. Test with a throwaway Upstream. Tighten the Claude Code Profile's default Caps
+  to the measured numbers if they differ.
+- FastMCP 4 behavior when an stdio Upstream is shared across many concurrent Client
+  sessions (assumed fine; confirm under load with the benchmark script).
