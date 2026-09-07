@@ -183,9 +183,11 @@ mcpshape doctor
   merge subject is the pull request title, so a merge carries a checked subject.
 - Protected `main`: pull requests only, one per wave (one issue, or a group of issues, with
   their review commits; a wave that changes only rules or docs has no ticket), merged with a
-  merge commit once CI is green. The merge closes the wave's tickets. The ruleset refuses
-  anything else; nothing is ever committed on `main`. How a branch is kept, and how a pull
-  request is titled, written, and merged, is in `docs/agents/issue-tracker.md`.
+  merge commit once CI is green. The merge closes the wave's tickets, and only the merge: CI
+  refuses a pull request that changes `src/` or `tests/` without a `Closes` line, so no ticket
+  is left to be closed by hand. The ruleset refuses anything else; nothing is ever committed on
+  `main`. How a branch is kept, and how a pull request is titled, written, and merged, is in
+  `docs/agents/issue-tracker.md`.
 - A wave's branch is brought up to date by rebasing onto `main`, never by merging `main` in;
   CI refuses a branch that holds a merge commit.
 - A wave is reviewed on its branch before its pull request opens, on two axes: standards,
