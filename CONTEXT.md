@@ -4,6 +4,8 @@ A local proxy that sits between MCP clients and the MCP servers they use, so the
 
 ## Language
 
+Each entry defines one concept and lists the words that must not name it. An Avoid word is banned as a name for that concept only; it stays usable in its plain sense, and in a Client's own words where the text describes what that Client documents.
+
 **Upstream**:
 An existing MCP server that the user adds once, local or hosted. Has one or more Proxies.
 _Avoid_: the MCP, source server, backend, remote
