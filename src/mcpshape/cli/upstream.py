@@ -23,6 +23,7 @@ from mcpshape.cli.common import (
 from mcpshape.cli.listing import proxy_url, toml_file, upstreams_table
 from mcpshape.model import HttpTransport, SseTransport, StdioTransport, Transport, Upstream
 from mcpshape.names import check_name
+from mcpshape.profiles import clients_needing_reconnect
 from mcpshape.proxy import orphaned_overrides
 
 if TYPE_CHECKING:
@@ -167,8 +168,8 @@ def sync_one(config_dir: Path, state_dir: Path, upstream: Upstream, *, accept: b
     apply_drift_default(config_dir, upstream, drift.added)
     report_orphans(config_dir, upstream, accepted)
     console.print(
-        "Clients connected to its Proxies see the change on their next request; "
-        "most Clients need a reconnect to notice."
+        "Clients connected to its Proxies see the change on their next request. "
+        f"These Clients need a reconnect to notice: {', '.join(clients_needing_reconnect())}."
     )
 
 

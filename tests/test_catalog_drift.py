@@ -281,7 +281,8 @@ def test_accept_applies_the_diff_and_hides_new_items_by_default(config_dir: Conf
         assert '[resources."notes://recent"]' in text
         assert text.count("hidden = true") == 2
     assert "hidden" in result.output
-    assert "reconnect" in result.output
+    assert "need a reconnect" in result.output
+    assert "Cursor" in result.output  # named by its Client Profile
 
 
 def test_accept_with_nothing_pending_says_so(config_dir: ConfigDir) -> None:
