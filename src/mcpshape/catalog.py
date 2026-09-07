@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime  # noqa: TC003  # pydantic resolves annotations at runtime
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -58,15 +58,14 @@ class Catalog(BaseModel):
             case "prompt":
                 return self.prompts
 
-    def keep(self, hidden: frozenset[Item]) -> Catalog:
-        """This Catalog without the ``hidden`` items."""
-        kept = self.model_copy(deep=True)
-        for kind in KINDS:
-            items = kept.items(kind)
-            for name in list(items):
-                if Item(kind, name) in hidden:
-                    del items[name]
-        return kept
+
+def arguments(definition: dict[str, Any]) -> dict[str, Any]:
+    """The input-schema properties of one raw MCP tool definition, by argument name."""
+    schema: object = definition.get("inputSchema")
+    if not isinstance(schema, dict):
+        return {}
+    properties: object = cast("dict[str, Any]", schema).get("properties")
+    return cast("dict[str, Any]", properties) if isinstance(properties, dict) else {}
 
 
 @dataclass(frozen=True, order=True)

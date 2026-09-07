@@ -101,10 +101,12 @@ class CliResult:
     """Only what went to stdout, so a test can parse what a command was asked to print."""
 
 
-def run_cli(cfg: ConfigDir, *args: str) -> CliResult:
-    """Run the mcpshape CLI against ``cfg`` through Typer's runner."""
+def run_cli(cfg: ConfigDir, *args: str, env: dict[str, str] | None = None) -> CliResult:
+    """Run the mcpshape CLI against ``cfg`` through Typer's runner, with ``env`` on top."""
     result = CliRunner().invoke(
-        app, ["--config-dir", str(cfg.path), "--state-dir", str(cfg.state), *args], env=CLI_ENV
+        app,
+        ["--config-dir", str(cfg.path), "--state-dir", str(cfg.state), *args],
+        env={**CLI_ENV, **(env or {})},
     )
     return _result(result)
 

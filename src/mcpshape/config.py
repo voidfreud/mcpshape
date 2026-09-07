@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
 
 import tomlkit
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError, model_validator
 from tomlkit.exceptions import TOMLKitError
 
 from mcpshape.model import (
@@ -24,7 +24,7 @@ from mcpshape.model import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable
+    from collections.abc import Callable, Iterable, Mapping
     from pathlib import Path
 
     from mcpshape.catalog import Item, Kind
@@ -67,28 +67,128 @@ class SettingsFile(_File):
     drift: DriftSettings = Field(default_factory=DriftSettings)
 
 
-class ItemOverride(BaseModel):
-    """How one Catalog item is presented, keyed by its Catalog name."""
+SCHEMA_KEYS = frozenset(
+    {"type", "schema", "input_schema", "inputSchema", "output_schema", "outputSchema", "items"}
+)
+"""Keys that would change a schema type. An Override never does; the brief rules it out."""
+
+
+class _Override(BaseModel):
+    """What every Override shares: an unknown key is refused, a schema key with its own reason."""
 
     model_config = ConfigDict(extra="forbid")
 
     hidden: bool = Field(default=False, description="Do not expose this item at all.")
 
+    @model_validator(mode="before")
+    @classmethod
+    def _refuse_schema_keys(cls, data: object) -> object:
+        given: object = data
+        if isinstance(data, dict):
+            keys = [str(key) for key in cast("dict[object, object]", data)]
+            if found := sorted(key for key in keys if key in SCHEMA_KEYS):
+                msg = (
+                    f"{', '.join(found)}: schema types cannot be changed by an Override; "
+                    "rename, re-describe, default, or hide instead"
+                )
+                raise ValueError(msg)
+        return given
 
-Overrides = dict[str, ItemOverride]
+
+class ArgumentOverride(_Override):
+    """How one argument of a tool is presented, keyed by its name in the Catalog."""
+
+    name: str | None = Field(default=None, description="Exposed argument name.")
+    description: str | None = Field(default=None, description="Replaces the description.")
+    default: Any | None = Field(
+        default=None,
+        description=(
+            "Default the Client sees, and what is sent when the Client omits the argument. "
+            "Required for a hidden argument the Upstream requires."
+        ),
+    )
+    required: bool | None = Field(
+        default=None, description="Whether the Client must give it. Moot for a hidden argument."
+    )
+
+
+class Annotations(BaseModel):
+    """Tool annotations set by the user; an unset hint keeps what the Upstream advertises."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    read_only: bool | None = Field(default=None, description="The tool changes nothing.")
+    destructive: bool | None = Field(default=None, description="The tool may destroy data.")
+    idempotent: bool | None = Field(default=None, description="Repeating a call changes nothing.")
+    open_world: bool | None = Field(default=None, description="The tool reaches outside systems.")
+
+    def as_mcp(self) -> dict[str, bool]:
+        """The hints as MCP names them on the wire, unset ones left out."""
+        hints = {
+            "readOnlyHint": self.read_only,
+            "destructiveHint": self.destructive,
+            "idempotentHint": self.idempotent,
+            "openWorldHint": self.open_world,
+        }
+        return {key: value for key, value in hints.items() if value is not None}
+
+
+class ToolOverride(_Override):
+    """How one tool is presented, keyed by its Catalog name."""
+
+    name: str | None = Field(default=None, description="Exposed tool name.")
+    title: str | None = Field(default=None, description="Replaces the title.")
+    description: str | None = Field(default=None, description="Replaces the description.")
+    annotations: Annotations | None = Field(default=None, description="Hints to set.")
+    args: dict[str, ArgumentOverride] = Field(
+        default_factory=dict, description="Argument Overrides by Catalog argument name."
+    )
+
+
+class ResourceOverride(_Override):
+    """How one resource or resource template is presented, keyed by its Catalog URI."""
+
+    uri: str | None = Field(
+        default=None,
+        description=(
+            "Exposed URI, or URI template with the same parameters. Clients read it by this."
+        ),
+    )
+    name: str | None = Field(default=None, description="Replaces the display name.")
+    description: str | None = Field(default=None, description="Replaces the description.")
+
+
+class PromptOverride(_Override):
+    """How one prompt is presented, keyed by its Catalog name."""
+
+    name: str | None = Field(default=None, description="Exposed prompt name.")
+    description: str | None = Field(default=None, description="Replaces the description.")
+
+
+ItemOverride = ToolOverride | ResourceOverride | PromptOverride
 
 
 class ProxyFile(_File):
     """``<proxy>.toml``: one curation of an Upstream."""
 
-    tools: Overrides = Field(default_factory=dict, description="Overrides by tool name.")
-    resources: Overrides = Field(
+    name: str | None = Field(
+        default=None, description="Server name Clients see; default: <upstream>/<proxy>."
+    )
+    instructions: str | None = Field(
+        default=None, description="Replaces the Upstream's instructions."
+    )
+    tools: dict[str, ToolOverride] = Field(
+        default_factory=dict, description="Overrides by tool name."
+    )
+    resources: dict[str, ResourceOverride] = Field(
         default_factory=dict, description="Overrides by resource URI or resource template."
     )
-    prompts: Overrides = Field(default_factory=dict, description="Overrides by prompt name.")
+    prompts: dict[str, PromptOverride] = Field(
+        default_factory=dict, description="Overrides by prompt name."
+    )
 
-    def overrides(self, kind: Kind) -> Overrides:
-        return cast("Overrides", getattr(self, OVERRIDE_SECTION[kind]))
+    def overrides(self, kind: Kind) -> Mapping[str, ItemOverride]:
+        return cast("Mapping[str, ItemOverride]", getattr(self, OVERRIDE_SECTION[kind]))
 
 
 OVERRIDE_SECTION: dict[Kind, str] = {
@@ -322,20 +422,44 @@ def add_proxy(config_dir: Path, upstream: str, proxy: str) -> Path:
     return path
 
 
+def _table_at(document: tomlkit.TOMLDocument, *keys: str) -> Any:  # noqa: ANN401  # tomlkit's containers are untyped
+    """The table under ``keys``, made on the way as ``[a.b.c]`` headers rather than inline."""
+    node: Any = document
+    for index, key in enumerate(keys):
+        if key not in node:
+            node[key] = tomlkit.table(is_super_table=index < len(keys) - 1)
+        node = node[key]
+    return node
+
+
+def set_override(path: Path, item: Item, key: str, value: object, note: str = "") -> None:
+    """Write ``key = value`` on the Override for ``item`` in the Proxy file at ``path``."""
+    _set_key(path, (OVERRIDE_SECTION[item.kind], item.name), key, value, note)
+
+
+def set_argument_override(path: Path, tool: str, argument: str, key: str, value: object) -> None:
+    """Write ``key = value`` on the Override for ``argument`` of ``tool``."""
+    _set_key(path, ("tools", tool, "args", argument), key, value, "")
+
+
+def _set_key(path: Path, keys: tuple[str, ...], key: str, value: object, note: str) -> None:
+    def edit(document: tomlkit.TOMLDocument) -> None:
+        written = tomlkit.item(value)  # pyright: ignore[reportUnknownMemberType]  # tomlkit's item() is untyped
+        if note:
+            written.comment(note)
+        _table_at(document, *keys)[key] = written
+
+    rewrite(path, edit)
+
+
 def hide_items(path: Path, items: Iterable[Item], note: str) -> None:
     """Set ``hidden = true`` on each of ``items`` in the Proxy file at ``path``, with ``note``."""
 
     def edit(document: tomlkit.TOMLDocument) -> None:
         for item in items:
-            section = OVERRIDE_SECTION[item.kind]
-            if section not in document:
-                document[section] = tomlkit.table(is_super_table=True)
-            overrides = document[section]
-            if item.name not in overrides:
-                overrides[item.name] = tomlkit.table()
             flag = tomlkit.item(True)  # noqa: FBT003  # the value being written
             flag.comment(note)
-            overrides[item.name]["hidden"] = flag
+            _table_at(document, OVERRIDE_SECTION[item.kind], item.name)["hidden"] = flag
 
     rewrite(path, edit)
 

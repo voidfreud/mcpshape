@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Annotated, Any, cast
+from typing import TYPE_CHECKING, Annotated
 
 import typer
 from rich.markup import escape
@@ -12,7 +12,7 @@ from mcpshape import catalog, config
 from mcpshape.cli.common import client_profile, console, state, unscanned_note
 from mcpshape.names import InvalidNameError, check_name
 from mcpshape.profiles import Profile, entry_name
-from mcpshape.proxy import exposed_catalog, orphaned_overrides
+from mcpshape.proxy import OverrideError, expose, orphaned_arguments, orphaned_overrides
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -38,36 +38,68 @@ def name_problems(config_dir: Path) -> list[config.Problem]:
     return problems
 
 
-def orphan_warnings(config_dir: Path, state_dir: Path) -> list[config.Problem]:
-    """Overrides whose Catalog item vanished: kept, but worth knowing about."""
-    warnings: list[config.Problem] = []
+@dataclass(frozen=True)
+class Curation:
+    """One Proxy file next to the stored Catalog it curates."""
+
+    path: Path
+    catalog: catalog.Catalog
+    proxy: config.ProxyFile
+
+    def expose(self) -> catalog.Catalog:
+        return expose(self.catalog, self.proxy).catalog
+
+
+def curations(config_dir: Path, state_dir: Path) -> list[Curation]:
+    """Every Proxy file with its Upstream's stored Catalog; unscanned Upstreams are skipped."""
+    found: list[Curation] = []
     for upstream in config.load_upstreams(config_dir):
         stored = catalog.load_catalog(state_dir, upstream.name)
         if stored is None:
             continue
-        for proxy in upstream.proxies:
-            path = config.proxy_file(config_dir, upstream.name, proxy)
-            proxy_file = config.load_proxy(config_dir, upstream.name, proxy)
-            warnings.extend(
-                config.Problem(
-                    path,
-                    f"{config.OVERRIDE_SECTION[item.kind]}.{item.name}",
-                    f"orphaned Override: no {item} in the Catalog",
-                )
-                for item in orphaned_overrides(stored, proxy_file)
+        found += [
+            Curation(
+                config.proxy_file(config_dir, upstream.name, proxy),
+                stored,
+                config.load_proxy(config_dir, upstream.name, proxy),
             )
+            for proxy in upstream.proxies
+        ]
+    return found
+
+
+def override_problems(config_dir: Path, state_dir: Path) -> list[config.Problem]:
+    """Overrides that cannot be applied: the Proxy would keep its last exposed set."""
+    problems: list[config.Problem] = []
+    for curation in curations(config_dir, state_dir):
+        try:
+            curation.expose()
+        except OverrideError as exc:
+            problems.append(config.Problem(curation.path, "", str(exc)))
+    return problems
+
+
+def orphan_warnings(config_dir: Path, state_dir: Path) -> list[config.Problem]:
+    """Overrides whose Catalog item or argument vanished: kept, but worth knowing about."""
+    warnings: list[config.Problem] = []
+    for curation in curations(config_dir, state_dir):
+        warnings.extend(
+            config.Problem(
+                curation.path,
+                f"{config.OVERRIDE_SECTION[item.kind]}.{item.name}",
+                f"orphaned Override: no {item} in the Catalog",
+            )
+            for item in orphaned_overrides(curation.catalog, curation.proxy)
+        )
+        warnings.extend(
+            config.Problem(
+                curation.path,
+                f"tools.{tool}.args.{argument}",
+                f"orphaned argument Override: tool {tool} has no argument {argument!r}",
+            )
+            for tool, argument in orphaned_arguments(curation.catalog, curation.proxy)
+        )
     return warnings
-
-
-def property_names(definition: dict[str, Any]) -> list[str]:
-    """The input-schema property names of one raw MCP tool definition."""
-    schema: object = definition.get("inputSchema")
-    if not isinstance(schema, dict):
-        return []
-    properties: object = cast("dict[str, Any]", schema).get("properties")
-    if not isinstance(properties, dict):
-        return []
-    return sorted(cast("dict[str, Any]", properties))
 
 
 @dataclass
@@ -95,7 +127,7 @@ class Review:
         for tool, definition in exposed.tools.items():
             self.problems.extend(
                 config.Problem(path, f"tools.{tool}", broken)
-                for name in property_names(definition)
+                for name in sorted(catalog.arguments(definition))
                 if (broken := properties.violation(name))
             )
 
@@ -115,10 +147,14 @@ def review(config_dir: Path, state_dir: Path, client: Profile) -> Review:
             found.notes.append(unscanned_note(upstream.name, client))
             continue
         for proxy in upstream.proxies:
+            try:
+                exposed = expose(stored, config.load_proxy(config_dir, upstream.name, proxy))
+            except OverrideError:
+                continue  # reported as a problem already
             found.check_proxy(
                 config.proxy_file(config_dir, upstream.name, proxy),
                 entry_name(upstream.name, proxy),
-                exposed_catalog(stored, config.load_proxy(config_dir, upstream.name, proxy)),
+                exposed.catalog,
             )
     return found
 
@@ -147,16 +183,17 @@ def doctor(ctx: typer.Context, for_client: ForOpt = None) -> None:
     if problems:
         raise typer.Exit(1)
     try:
+        problems = override_problems(config_dir, state_dir)
         warnings = orphan_warnings(config_dir, state_dir)
     except catalog.CatalogError as exc:
-        warnings = [config.Problem(state_dir, "", str(exc))]
+        problems, warnings = [], [config.Problem(state_dir, "", str(exc))]
     if for_client is not None:
         found = review(config_dir, state_dir, client_profile(for_client))
-        problems, warnings = found.problems, warnings + found.warnings
+        problems, warnings = problems + found.problems, warnings + found.warnings
         for note in found.notes:
             console.print(escape(note))
-        for problem in problems:
-            console.print(f"[red]✗[/] {escape(str(problem))}")
+    for problem in problems:
+        console.print(f"[red]✗[/] {escape(str(problem))}")
     for warning in warnings:
         console.print(f"[yellow]![/] {escape(str(warning))}")
     if problems:
