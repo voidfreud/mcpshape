@@ -20,6 +20,14 @@ class StdioTransport(_Transport):
     transport: Literal["stdio"]
     command: str
     args: list[str] = Field(default_factory=list[str])
+    env: dict[str, str] = Field(
+        default_factory=dict[str, str],
+        description=(
+            "Environment variables the child process is given, on top of the small set "
+            "(HOME, LOGNAME, PATH, SHELL, TERM, USER) the MCP SDK passes on. A value may be "
+            "a ${VAR} reference, resolved from the Daemon environment or the secrets file."
+        ),
+    )
 
 
 class HttpTransport(_Transport):

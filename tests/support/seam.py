@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 import pytest
+import uvicorn
 from fastmcp import Client, FastMCP
 from fastmcp.client.transports import StreamableHttpTransport
 from typer.testing import CliRunner, Result  # annotated at runtime
@@ -26,7 +27,7 @@ from tests.support import upstreams
 from tests.support.asgi import asgi_client_factory
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, Callable, Generator
+    from collections.abc import AsyncGenerator, Callable, Generator, Mapping, Sequence
     from pathlib import Path
 
     from starlette.types import ASGIApp
@@ -48,6 +49,22 @@ class ConfigDir:
     _registered: list[str] = field(default_factory=list[str])
     _servers: dict[str, FastMCP] = field(default_factory=dict[str, FastMCP])
 
+    def add_upstream(
+        self,
+        name: str,
+        body: str,
+        lifecycle: dict[str, object] | None = None,
+        proxies: Sequence[str] = ("default",),
+    ) -> None:
+        """Write the Upstream ``name``, whose ``upstream.toml`` says ``body``, and its Proxies."""
+        upstream_dir = self.path / "upstreams" / name
+        upstream_dir.mkdir(parents=True)
+        (upstream_dir / "upstream.toml").write_text(
+            f"version = 1\n{body}" + _lifecycle_table(lifecycle)
+        )
+        for proxy in proxies:
+            (upstream_dir / f"{proxy}.toml").write_text("version = 1\n")
+
     def add_memory_upstream(
         self, name: str, server: FastMCP, lifecycle: dict[str, object] | None = None
     ) -> None:
@@ -55,13 +72,47 @@ class ConfigDir:
         target = upstreams.register(name, server)
         self._registered.append(name)
         self._servers[name] = server
-        upstream_dir = self.path / "upstreams" / name
-        upstream_dir.mkdir(parents=True)
-        (upstream_dir / "upstream.toml").write_text(
-            f'version = 1\ntransport = "memory"\ntarget = "{target}"\n'
-            + _lifecycle_table(lifecycle),
+        self.add_upstream(name, f'transport = "memory"\ntarget = "{target}"\n', lifecycle)
+
+    def add_stdio_upstream(
+        self,
+        name: str,
+        command: str,
+        args: Sequence[str],
+        *,
+        env: Mapping[str, str] | None = None,
+        lifecycle: dict[str, object] | None = None,
+    ) -> None:
+        """Register an Upstream the Daemon reaches by spawning ``command``."""
+        body = (
+            f'transport = "stdio"\ncommand = {json.dumps(command)}\n'
+            f"args = {json.dumps(list(args))}\n"
         )
-        (upstream_dir / "default.toml").write_text("version = 1\n")
+        if env:
+            body += "\n[env]\n" + "".join(f"{key} = {json.dumps(v)}\n" for key, v in env.items())
+        self.add_upstream(name, body, lifecycle)
+
+    def add_url_upstream(
+        self,
+        name: str,
+        url: str,
+        kind: str = "http",
+        lifecycle: dict[str, object] | None = None,
+    ) -> None:
+        """Register an Upstream the Daemon reaches by URL, over Streamable HTTP or legacy SSE."""
+        self.add_upstream(name, f'transport = "{kind}"\nurl = {json.dumps(url)}\n', lifecycle)
+
+    def add_proxy(self, upstream: str, proxy: str) -> None:
+        """Give ``upstream`` one more Proxy, which shares the one connection its Upstream has."""
+        (self.path / "upstreams" / upstream / f"{proxy}.toml").write_text("version = 1\n")
+
+    def write_secrets(self, values: Mapping[str, str], mode: int = 0o600) -> Path:
+        """Write the secrets file the ``${VAR}`` references resolve from, with ``mode``."""
+        path = self.path / "secrets.toml"
+        written = "".join(f"{key} = {json.dumps(value)}\n" for key, value in values.items())
+        path.write_text(f"version = 1\n\n[secrets]\n{written}")
+        path.chmod(mode)
+        return path
 
     def break_upstream(self, name: str) -> None:
         """Take the Upstream's server away, so the next connect to it fails.
@@ -228,6 +279,28 @@ async def serving_daemon(cfg: ConfigDir, clock: Clock | None = None) -> AsyncGen
     finally:
         stop.set()
         await server
+
+
+@contextlib.asynccontextmanager
+async def serving_upstream(server: FastMCP, transport: str = "http") -> AsyncGenerator[str]:
+    """Serve ``server`` on a loopback port as a real Upstream, and yield the URL it answers on.
+
+    In-process, like everything else, but over a socket: a Streamable HTTP or legacy SSE
+    Upstream is reached by URL, which is the point of the test that uses it.
+    """
+    port = free_port()
+    path = "/mcp" if transport == "http" else "/sse"
+    app = server.http_app(path=path, transport=transport)  # pyright: ignore[reportArgumentType]  # the literal FastMCP takes
+    running = uvicorn.Server(
+        uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning", lifespan="on")
+    )
+    serving = asyncio.create_task(running.serve())
+    try:
+        await _wait_for_port(port)
+        yield f"http://127.0.0.1:{port}{path}"
+    finally:
+        running.should_exit = True
+        await serving
 
 
 async def _wait_for_port(port: int, attempts: int = 100) -> None:

@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Annotated
 import typer
 
 from mcpshape import catalog, config
-from mcpshape.adapters.fastmcp import UpstreamTargetError, scan
+from mcpshape.adapters.fastmcp import scan
 from mcpshape.cli import scan as scanning
 from mcpshape.cli.common import (
     HELP_OPTIONS,
@@ -146,8 +146,8 @@ def sync(
 
 def sync_one(config_dir: Path, state_dir: Path, upstream: Upstream, *, accept: bool) -> None:
     try:
-        observed = asyncio.run(scan(upstream.transport))
-    except UpstreamTargetError as exc:
+        observed = asyncio.run(scan(upstream.transport, config.secrets_for(config_dir)))
+    except Exception as exc:  # noqa: BLE001  # however the Upstream failed, the user gets the why
         fail(f"cannot scan {upstream.name}: {exc}")
     result = (
         catalog.accept_scan(state_dir, upstream.name, observed)

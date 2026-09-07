@@ -25,13 +25,7 @@ from starlette.responses import JSONResponse
 from starlette.routing import Mount, Route
 
 from mcpshape import catalog as catalogs
-from mcpshape.adapters.fastmcp import (
-    UpstreamConnection,
-    UpstreamTargetError,
-    proxy_app,
-    scan,
-    server_name,
-)
+from mcpshape.adapters.fastmcp import UpstreamConnection, proxy_app, scan, server_name
 from mcpshape.config import (
     ConfigError,
     load_proxy,
@@ -39,6 +33,7 @@ from mcpshape.config import (
     load_upstreams,
     proxy_code_file,
     proxy_file,
+    secrets_for,
 )
 from mcpshape.hooks import UserCodeError, load_user_code
 from mcpshape.model import DEFAULT_PROXY_NAME, CapError, CapSettings
@@ -53,8 +48,10 @@ if TYPE_CHECKING:
     from starlette.types import Receive, Scope, Send
 
     from mcpshape.adapters.fastmcp import ProxyApp
+    from mcpshape.catalog import Catalog
     from mcpshape.connection import Clock
     from mcpshape.model import Upstream
+    from mcpshape.secrets import Secrets
 
 log = logging.getLogger("mcpshape.daemon")
 
@@ -240,18 +237,24 @@ def _nothing() -> Exposed:
     return Exposed(catalog=_empty(), name=None)
 
 
-async def rescan(state_dir: Path, upstream: Upstream) -> None:
+async def rescan(state_dir: Path, secrets: Secrets, upstream: Upstream) -> None:
     """Scan ``upstream`` into its Catalog on a first scan, else record Drift. Never raises.
 
-    ``record_scan`` holds an OS-level lock across its own read-then-write (#21), which can
-    block for a while behind a concurrent ``upstream sync``; running it in a thread keeps that
-    wait off the Daemon's own event loop, so every other Upstream and Proxy stays responsive.
+    This is the Daemon's own start-up scan, which reaches an Upstream nothing is connected to
+    yet. A reconnect looks again over the connection it already has (story 11). Recording
+    holds the Upstream's lock across its read-then-write (#21), which can wait behind a
+    concurrent ``upstream sync``; a thread keeps that wait off the Daemon's own event loop.
     """
     try:
-        observed = await scan(upstream.transport)
+        observed = await scan(upstream.transport, secrets)
         await asyncio.to_thread(catalogs.record_scan, state_dir, upstream.name, observed)
-    except (UpstreamTargetError, catalogs.CatalogError):
+    except Exception:  # an Upstream that cannot be reached must not keep the Daemon from starting
         log.warning("Upstream %s could not be scanned", upstream.name, exc_info=True)
+
+
+async def record(state_dir: Path, name: str, observed: Catalog) -> None:
+    """Keep what a reconnected Upstream advertises: its first Catalog, or the Drift since."""
+    await asyncio.to_thread(catalogs.record_scan, state_dir, name, observed)
 
 
 def build_app(config_dir: Path, state_dir: Path, clock: Clock | None = None) -> Starlette:
@@ -263,9 +266,10 @@ def build_app(config_dir: Path, state_dir: Path, clock: Clock | None = None) -> 
     """
     upstreams = load_upstreams(config_dir)
     global_caps = load_settings(config_dir).caps
+    secrets = secrets_for(config_dir)
     connections = {
         upstream.name: UpstreamConnection(
-            upstream, clock, on_reconnect=partial(rescan, state_dir, upstream)
+            upstream, secrets, clock, on_catalog=partial(record, state_dir, upstream.name)
         )
         for upstream in upstreams
     }
@@ -289,7 +293,7 @@ def build_app(config_dir: Path, state_dir: Path, clock: Clock | None = None) -> 
     @contextlib.asynccontextmanager
     async def lifespan(_app: Starlette) -> AsyncGenerator[None]:
         for upstream in upstreams:
-            await rescan(state_dir, upstream)
+            await rescan(state_dir, secrets, upstream)
         async with contextlib.AsyncExitStack() as stack:
             for proxy in proxies.values():
                 await proxy.start()

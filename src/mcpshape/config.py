@@ -7,6 +7,7 @@ and ``upstreams/<name>/<proxy>.toml`` per Proxy. Every file carries ``version``.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import partial
 from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
 
 import tomlkit
@@ -27,6 +28,13 @@ from mcpshape.model import (
     Transport,
     Upstream,
 )
+from mcpshape.secrets import (
+    SECRETS_FILE,
+    SecretError,
+    Secrets,
+    check_mode,
+    unset_message,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping
@@ -40,7 +48,7 @@ UPSTREAMS_DIR = "upstreams"
 UPSTREAM_FILE = "upstream.toml"
 SCHEMA_URL_BASE = "https://raw.githubusercontent.com/voidfreud/mcpshape/main/src/mcpshape/schemas/"
 
-FileKind = Literal["settings", "upstream", "proxy"]
+FileKind = Literal["settings", "upstream", "proxy", "secrets"]
 
 
 class _File(BaseModel):
@@ -80,6 +88,18 @@ class SettingsFile(_File):
             "The global master Cap per kind. An Upstream, a Proxy, or a tool may only lower "
             "what it inherits."
         ),
+    )
+
+
+class SecretsFile(_File):
+    """``secrets.toml``: what a ``${VAR}`` reference resolves to when the environment has none.
+
+    Mode 0600, in the config directory. The Daemon environment wins over what is written here.
+    """
+
+    secrets: dict[str, str] = Field(
+        default_factory=dict[str, str],
+        description="Values by variable name, as ${VAR} references in Upstream files name them.",
     )
 
 
@@ -263,6 +283,7 @@ FILE_MODELS: dict[FileKind, TypeAdapter[Any]] = {
     "settings": TypeAdapter(SettingsFile),
     "upstream": TypeAdapter(UpstreamFile),
     "proxy": TypeAdapter(ProxyFile),
+    "secrets": TypeAdapter(SecretsFile),
 }
 
 
@@ -400,11 +421,65 @@ def load_upstreams(config_dir: Path) -> list[Upstream]:
     ]
 
 
+# --- secrets -----------------------------------------------------------------------------------
+
+
+def secrets_file(config_dir: Path) -> Path:
+    return config_dir / SECRETS_FILE
+
+
+def load_secret_values(config_dir: Path) -> dict[str, str]:
+    """What the secrets file holds, or nothing when there is none.
+
+    Raises ``SecretError`` when the file may be read by anyone else, or does not say what it
+    must. Neither message carries a value.
+    """
+    path = secrets_file(config_dir)
+    if not path.is_file():
+        return {}
+    check_mode(path)
+    try:
+        return SecretsFile.model_validate(_load(path, "secrets")).secrets
+    except ConfigError as exc:
+        raise SecretError(str(exc)) from exc
+
+
+def secrets_for(config_dir: Path) -> Secrets:
+    """Where ``${VAR}`` is looked up for the Upstreams under ``config_dir``, read on each use."""
+    return Secrets(partial(load_secret_values, config_dir))
+
+
+def secret_problems(config_dir: Path) -> list[Problem]:
+    """Every reference no environment variable and no secrets entry answers, file by file.
+
+    A secrets file anyone else can read is the first problem, and the only one reported then:
+    nothing was read, so nothing else can be judged.
+    """
+    try:
+        values = load_secret_values(config_dir)
+    except SecretError as exc:
+        return [Problem(secrets_file(config_dir), "", str(exc))]
+    secrets = Secrets(lambda: values)
+    problems: list[Problem] = []
+    for path, kind in all_files(config_dir):
+        if kind != "upstream":
+            continue
+        try:
+            document = read_document(path).unwrap()
+        except ConfigError:
+            continue  # unreadable, which check_file reports on its own
+        if missing := secrets.missing(document):
+            problems.append(Problem(path, "", unset_message(missing)))
+    return problems
+
+
 def all_files(config_dir: Path) -> list[tuple[Path, FileKind]]:
     """Every config file under ``config_dir`` with its kind, for ``doctor``."""
     files: list[tuple[Path, FileKind]] = []
     if (settings := config_dir / SETTINGS_FILE).is_file():
         files.append((settings, "settings"))
+    if (secrets := secrets_file(config_dir)).is_file():
+        files.append((secrets, "secrets"))
     upstreams_dir = config_dir / UPSTREAMS_DIR
     if upstreams_dir.is_dir():
         for directory in sorted(upstreams_dir.iterdir()):

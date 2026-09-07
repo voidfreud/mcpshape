@@ -147,3 +147,21 @@ and the Profile writes the common `mcpServers` + `{"type": "http", "url": ...}` 
   is served by `read()`. `ProxyPrompt.render` returns a `PromptResult` of `Message`s. A
   `call_tool_mcp` on the borrowed client answers a failing or unknown tool with an `isError`
   result carrying the message, not by raising.
+- What an stdio Upstream's child process gets (checked 2026-09-08, 4.0.3 with `mcp` 2.x). The
+  SDK spawns it with `get_default_environment() | transport.env`, and that default is only
+  HOME, LOGNAME, PATH, SHELL, TERM and USER. Nothing else of the Daemon's environment reaches
+  the child, so anything a server needs (`PYTHONPATH`, a token, a proxy setting) has to stand
+  in the Upstream file's `env` block, where a value may be a `${VAR}` reference.
+- `StdioTransport.keep_alive` defaults to `True` and leaves the child process running after
+  the client's context exits, to be reused by the next connection (checked 2026-09-08, 4.0.3).
+  mcpshape passes `keep_alive=False`: the Upstream's own lifecycle decides when a connection
+  is let go, and a kept-alive child would outlive the connection nobody comes back for.
+- A `Client` whose URL nothing answers raises `RuntimeError("Client failed to connect: ...")`
+  out of `__aenter__`; it does not hand back a client that fails per call. `Client.close()` on
+  one that never connected is harmless, which is what lets a connect cancelled by the connect
+  timeout be cleaned up by a callback registered before the connect starts (checked
+  2026-09-08, 4.0.3).
+- The SDK hands the child process `sys.stderr` as its error log, so spawning one under Click's
+  `CliRunner`, whose stdout and stderr have no `fileno`, fails with `Client failed to connect:
+  fileno` (checked 2026-09-08). A stdio Upstream is therefore scanned through the Daemon in
+  tests, not through Typer's runner.

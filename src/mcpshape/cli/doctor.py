@@ -234,6 +234,7 @@ def doctor(ctx: typer.Context, for_client: ForOpt = None) -> None:
     problems = name_problems(config_dir)
     for path, kind in files:
         problems.extend(config.check_file(path, kind))
+    problems.extend(config.secret_problems(config_dir))
     console.print(f"Checked {len(files)} file(s) in {config_dir}")
     for problem in problems:
         console.print(f"[red]✗[/] {escape(str(problem))}")

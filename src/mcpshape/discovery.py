@@ -79,7 +79,9 @@ class Found:
     disabled: bool = False
     """The Client's file switches this server off, by the flag that Client documents."""
     env: tuple[str, ...] = ()
-    """Environment variables the entry sets, which an Upstream file does not carry yet."""
+    """Environment variables the entry sets. Their names are carried over as ``${VAR}``
+    references; the values stay in the Client's file, since a secret never enters an Upstream
+    file."""
 
 
 @dataclass(frozen=True)
@@ -258,6 +260,7 @@ def _transport(entry: dict[str, Any], client: Profile | None) -> Transport | Non
             transport="stdio",
             command=command,
             args=[str(arg) for arg in _as_list(entry.get("args"))],
+            env={name: f"${{{name}}}" for name in sorted(_as_map(entry.get("env")))},
         )
     keys = (client.url_key, *URL_KEYS) if client else URL_KEYS
     url = next((entry[key] for key in keys if isinstance(entry.get(key), str)), None)

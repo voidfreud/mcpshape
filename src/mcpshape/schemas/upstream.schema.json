@@ -283,6 +283,14 @@
           "title": "Args",
           "type": "array"
         },
+        "env": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Environment variables the child process is given, on top of the small set (HOME, LOGNAME, PATH, SHELL, TERM, USER) the MCP SDK passes on. A value may be a ${VAR} reference, resolved from the Daemon environment or the secrets file.",
+          "title": "Env",
+          "type": "object"
+        },
         "version": {
           "const": 1,
           "description": "Format version of this file.",

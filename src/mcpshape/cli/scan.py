@@ -81,8 +81,9 @@ def scan(
         if candidate.found.env:
             console.print(
                 f"[yellow]![/] {escape(candidate.found.name)} sets "
-                f"{', '.join(candidate.found.env)} in its Client's file; an Upstream file does "
-                "not carry environment variables yet, so set them where the Daemon runs."
+                f"{', '.join(candidate.found.env)} in its Client's file. Only the names are "
+                f"carried over, as ${{VAR}} references: set each in the Daemon's environment "
+                f"or in {config.SECRETS_FILE}."
             )
     if list_only:
         console.print("Nothing was added. Drop [bold]--list[/bold] to be asked about each.")

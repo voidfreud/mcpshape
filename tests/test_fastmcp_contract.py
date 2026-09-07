@@ -5,13 +5,14 @@ These tests talk to FastMCP directly, on purpose. Everything else goes through t
 
 from __future__ import annotations
 
+import os
 from typing import TYPE_CHECKING, Any, cast
 
 import fastmcp
 import mcp_types
 import pytest
 from fastmcp import Client, FastMCP
-from fastmcp.client.transports import StreamableHttpTransport
+from fastmcp.client.transports import StdioTransport, StreamableHttpTransport
 from fastmcp.exceptions import ToolError
 from fastmcp.prompts import Message, PromptResult
 from fastmcp.resources import ResourceContent, ResourceResult
@@ -30,7 +31,9 @@ from pydantic import AnyUrl, PrivateAttr
 from starlette.applications import Starlette
 from starlette.routing import Mount
 
+from tests.support import child_upstream
 from tests.support.asgi import asgi_client_factory
+from tests.support.seam import free_port, until
 
 if TYPE_CHECKING:
     from fastmcp.server.context import Context
@@ -395,3 +398,77 @@ async def test_a_borrowed_client_reports_a_failed_or_unknown_call_as_an_error_re
             assert isinstance(content, TextContent)
             assert "no_such_tool" in content.text
         assert client.is_connected()
+
+
+# --- what real Upstream transports rely on ---------------------------------------------------
+
+
+async def test_a_stdio_transport_ends_its_child_process_only_when_keep_alive_is_off() -> None:
+    """Why mcpshape spawns every stdio Upstream with ``keep_alive=False``.
+
+    The Upstream's own lifecycle decides when the connection goes; a kept-alive child would
+    outlive the connection that was let go, and nothing would ever come back for it.
+    """
+    transport = StdioTransport(
+        command=child_upstream.command(),
+        args=child_upstream.args(),
+        env=child_upstream.env(),
+        keep_alive=False,
+    )
+    async with Client(transport) as client:
+        gone = (await client.call_tool("pid", {})).data
+    assert isinstance(gone, int)
+    await until(lambda: not child_upstream.alive(gone), "the child going with the connection")
+
+    kept = StdioTransport(
+        command=child_upstream.command(),
+        args=child_upstream.args(),
+        env=child_upstream.env(),
+        keep_alive=True,
+    )
+    async with Client(kept) as client:
+        staying = (await client.call_tool("pid", {})).data
+    assert isinstance(staying, int)
+    assert child_upstream.alive(staying), "keep_alive leaves the child running"
+    await kept.disconnect()
+    await until(lambda: not child_upstream.alive(staying), "the child a disconnect ends")
+
+
+async def test_a_stdio_child_gets_a_safe_slice_of_the_environment_plus_what_it_is_given(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """What an Upstream's ``env`` block has to carry, and what it does not.
+
+    The MCP SDK passes on HOME, LOGNAME, PATH, SHELL, TERM and USER, and merges the transport's
+    ``env`` on top. Nothing else of the Daemon's environment reaches the child.
+    """
+    monkeypatch.setenv("MCPSHAPE_CONTRACT_UNPASSED", "not for the child")
+    transport = StdioTransport(
+        command=child_upstream.command(),
+        args=child_upstream.args(),
+        env=child_upstream.env(CARRIED="given to the child"),
+        keep_alive=False,
+    )
+
+    async with Client(transport) as client:
+        assert (
+            await client.call_tool("env_value", {"name": "CARRIED"})
+        ).data == "given to the child"
+        assert (await client.call_tool("env_value", {"name": "PATH"})).data == os.environ["PATH"]
+        assert (
+            await client.call_tool("env_value", {"name": "MCPSHAPE_CONTRACT_UNPASSED"})
+        ).data == ""
+
+
+async def test_a_client_raises_when_nothing_serves_the_url() -> None:
+    """A connect that finds nothing raises, which is what a scan and a connect turn into a
+    warning and an unavailable Upstream."""
+    with pytest.raises(RuntimeError, match="failed to connect"):
+        async with Client(StreamableHttpTransport(f"http://127.0.0.1:{free_port()}/mcp")):
+            pass
+
+
+async def test_closing_a_client_that_never_connected_is_harmless() -> None:
+    """The cleanup ``_Link.open`` registers before it connects, so a cancelled connect leaves
+    nothing behind."""
+    await Client(StreamableHttpTransport("http://127.0.0.1:1/mcp")).close()

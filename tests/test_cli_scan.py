@@ -145,14 +145,44 @@ def test_scan_says_when_an_entry_sets_environment_variables(
     config_dir: ConfigDir, home: Path
 ) -> None:
     claude_code(
-        home, github={"command": "npx", "args": ["server-github"], "env": {"GITHUB_TOKEN": "x"}}
+        home,
+        github={
+            "command": "npx",
+            "args": ["server-github"],
+            "env": {"GITHUB_TOKEN": "ghp-not-for-an-upstream-file"},
+        },
     )
 
     result = scan(config_dir, home, "--list")
 
     assert result.exit_code == 0, result.output
     assert "GITHUB_TOKEN" in result.output
-    assert "x" not in result.output.split("GITHUB_TOKEN")[1].split("\n")[0].split(";")[0]
+    assert "secrets.toml" in result.output
+    assert "ghp-not-for-an-upstream-file" not in result.output
+
+
+def test_scan_carries_over_the_names_of_an_env_block_as_references(
+    config_dir: ConfigDir, home: Path
+) -> None:
+    """A secret stays in the Client's file: what is carried over is the name to resolve."""
+    claude_code(
+        home,
+        github={
+            "command": "npx",
+            "args": ["server-github"],
+            "env": {"GITHUB_TOKEN": "ghp-not-for-an-upstream-file"},
+        },
+    )
+
+    result = scan(config_dir, home, "--yes")
+
+    assert result.exit_code == 0, result.output
+    written = upstream_file(config_dir, "github").read_text()
+    assert 'GITHUB_TOKEN = "${GITHUB_TOKEN}"' in written
+    assert "ghp-not-for-an-upstream-file" not in written
+    checked = run_cli(config_dir, "doctor")
+    assert checked.exit_code == 1, checked.output
+    assert "GITHUB_TOKEN" in checked.output
 
 
 def test_scan_reads_a_directory_named_on_the_command_line(

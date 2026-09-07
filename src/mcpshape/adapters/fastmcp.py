@@ -31,7 +31,11 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 
 import mcp_types
 from fastmcp import Client, FastMCP
-from fastmcp.client.transports import StreamableHttpTransport
+from fastmcp.client.transports import (
+    SSETransport,
+    StreamableHttpTransport,
+)
+from fastmcp.client.transports import StdioTransport as StdioClientTransport
 from fastmcp.exceptions import FastMCPError, PromptError, ResourceError, ToolError
 from fastmcp.prompts import Message, PromptResult
 from fastmcp.resources import ResourceContent, ResourceResult
@@ -53,13 +57,14 @@ from mcpshape import hooks
 from mcpshape.catalog import Catalog, Item
 from mcpshape.connection import Connection, UpstreamUnavailableError
 from mcpshape.hooks import Call, UpstreamError, UserCode
-from mcpshape.model import MemoryTransport
+from mcpshape.model import HttpTransport, MemoryTransport, SseTransport, StdioTransport
 from mcpshape.proxy import ArgumentMap, Exposed, cut_output
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Awaitable, Callable, Sequence
     from contextlib import AbstractAsyncContextManager
 
+    from fastmcp.client.transports import ClientTransport
     from fastmcp.prompts import Prompt
     from fastmcp.resources import Resource, ResourceTemplate
     from fastmcp.server.context import Context
@@ -70,6 +75,7 @@ if TYPE_CHECKING:
     from mcpshape.connection import Clock, Status
     from mcpshape.hooks import VirtualTool
     from mcpshape.model import Transport, Upstream
+    from mcpshape.secrets import Secrets
 
 log = logging.getLogger("mcpshape.adapter")
 
@@ -108,8 +114,9 @@ class _Link:
     a Daemon restart.
     """
 
-    def __init__(self, transport: Transport) -> None:
+    def __init__(self, transport: Transport, secrets: Secrets) -> None:
         self._transport = transport
+        self._secrets = secrets
         self._open: AsyncExitStack | None = None
         self._client: Client[Any] | None = None
 
@@ -121,11 +128,21 @@ class _Link:
         return self._client
 
     async def open(self) -> None:
-        target = _resolve(self._transport)
+        """Connect, leaving nothing behind if the attempt is given up on halfway.
+
+        The cleanup is registered before the connect starts, not after it returns: a connect
+        cancelled by the connect timeout inside ``__aenter__`` would otherwise leave a
+        half-spawned child process nobody owns.
+        """
         stack = AsyncExitStack()
-        client: ProxyClient[Any] = ProxyClient(target)
-        self._client = await stack.enter_async_context(client)
         self._open = stack
+        try:
+            client: ProxyClient[Any] = ProxyClient(_target(self._transport, self._secrets))
+            stack.push_async_callback(client.close)
+            self._client = await stack.enter_async_context(client)
+        except BaseException:
+            await self.close()
+            raise
 
     async def close(self) -> None:
         stack, self._open, self._client = self._open, None, None
@@ -149,13 +166,32 @@ class UpstreamConnection:
     def __init__(
         self,
         upstream: Upstream,
+        secrets: Secrets,
         clock: Clock | None = None,
-        on_reconnect: Callable[[], Awaitable[None]] | None = None,
+        on_catalog: Callable[[Catalog], Awaitable[None]] | None = None,
     ) -> None:
-        self._link = _Link(upstream.transport)
+        self._link = _Link(upstream.transport, secrets)
+        self._on_catalog = on_catalog
         self._connection = Connection(
-            upstream.name, self._link, upstream.lifecycle, clock, on_reconnect=on_reconnect
+            upstream.name,
+            self._link,
+            upstream.lifecycle,
+            clock,
+            on_reconnect=None if on_catalog is None else self._rescan,
         )
+
+    async def _rescan(self) -> None:
+        """Look again over the connection that has just come back, opening no second one.
+
+        Borrowing the shared client is what keeps a reconnect from spawning a second child
+        process for an stdio Upstream.
+        """
+        if self._on_catalog is None:
+            return
+        client = self._link.client
+        async with client:
+            observed = await _catalog_of(client)
+        await self._on_catalog(observed)
 
     def status(self) -> Status:
         return self._connection.status()
@@ -203,15 +239,23 @@ def proxy_app(
     return ProxyApp(name=name, asgi=app, lifespan=lifespan, serve=serve, fail=runtime.fail)
 
 
-async def scan(transport: Transport) -> Catalog:
-    """Everything the Upstream behind ``transport`` advertises right now."""
-    target = _resolve(transport)
-    async with Client(target) as client:
-        tools = await _listed(client.list_tools)
-        resources = await _listed(client.list_resources)
-        templates = await _listed(client.list_resource_templates)
-        prompts = await _listed(client.list_prompts)
-        instructions = client.instructions
+async def scan(transport: Transport, secrets: Secrets) -> Catalog:
+    """Everything the Upstream behind ``transport`` advertises right now.
+
+    This opens a connection of its own. An Upstream the Daemon is already connected to is
+    looked at over that connection instead, by ``UpstreamConnection``.
+    """
+    async with Client(_target(transport, secrets)) as client:
+        return await _catalog_of(client)
+
+
+async def _catalog_of(client: Client[Any]) -> Catalog:
+    """What the Upstream ``client`` is connected to advertises right now."""
+    tools = await _listed(client.list_tools)
+    resources = await _listed(client.list_resources)
+    templates = await _listed(client.list_resource_templates)
+    prompts = await _listed(client.list_prompts)
+    instructions = client.instructions
     return Catalog(
         scanned_at=datetime.now(UTC),
         instructions=instructions,
@@ -695,13 +739,27 @@ def _renamed[C: BaseModel](component: C, origin: str, exposed: str, key: str, va
     return component.model_copy(update={key: value})
 
 
-def _resolve(transport: Transport) -> FastMCP[Any]:
-    match transport:
-        case MemoryTransport():
-            return _import_server(transport.module, transport.attribute)
-        case _:
-            msg = f"{transport.transport} Upstreams are not supported yet"
-            raise UpstreamTargetError(msg)
+def _target(transport: Transport, secrets: Secrets) -> ClientTransport | FastMCP[Any]:
+    """How FastMCP reaches this Upstream, with every ``${VAR}`` in it resolved.
+
+    An stdio Upstream is a child process of the Daemon: ``keep_alive`` is off, because when
+    the connection is let go the process goes with it (the Upstream's lifecycle decides that,
+    not FastMCP).
+    """
+    match secrets.expanded(transport):
+        case StdioTransport() as stdio:
+            return StdioClientTransport(
+                command=stdio.command,
+                args=list(stdio.args),
+                env=dict(stdio.env) or None,
+                keep_alive=False,
+            )
+        case HttpTransport() as http:
+            return StreamableHttpTransport(http.url)
+        case SseTransport() as sse:
+            return SSETransport(sse.url)
+        case MemoryTransport() as memory:
+            return _import_server(memory.module, memory.attribute)
 
 
 def _import_server(module: str, attribute: str) -> FastMCP[Any]:
