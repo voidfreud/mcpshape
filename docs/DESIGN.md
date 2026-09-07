@@ -97,6 +97,11 @@ Claude Code is the first and best-integrated Profile, never a special case in th
 - Identity is the Catalog name everywhere in config and Hooks. Exposed name is the last step.
 - User code lives in `<proxy>.py` next to `<proxy>.toml`, uses mcpshape's own decorator API
   (`@hook.before`, `@hook.after`, `@tool`, `upstream.call`), sync or async.
+- Settled while landing #9: an `after` Hook runs on every result the Proxy is about to send,
+  a short-circuited one included; an error the Upstream reports skips the `after` Hooks and
+  reaches the Client as is; a Virtual Tool's exposed name is its identity, so Hooks keyed by
+  it run around it, and a Virtual Tool named like an exposed Catalog tool is a load error, not
+  a shadow; `upstream.call`, `read`, and `get` go straight to the Upstream, past the Hooks.
 - Hooks run in-process with no sandbox. Exceptions become tool errors and log lines. A Hook
   that blocks forever or calls `sys.exit` is not guarded against; this is documented, not solved.
 - Files are watched and the affected Proxy reloaded (`daemon reload` also exists). Load errors
