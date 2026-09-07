@@ -178,7 +178,8 @@ mcpshape doctor
 - Tests drive the system through one seam: a temp config directory, the Daemon app in-process,
   in-memory Upstreams, a FastMCP Client over ASGI, and the CLI via Typer's runner. Tests never
   import internal modules to assert on their state. Exceptions: the stdio shim (real subprocess),
-  autostart unit writers (golden files), and the FastMCP adapter contract tests.
+  autostart unit writers (golden files), the FastMCP adapter contract tests, and
+  `tests/test_boundaries.py`, which reads source files to enforce the import rule below.
 - Only the FastMCP adapter module imports FastMCP (ADR 0001). A FastMCP behavior that
   mcpshape's code relies on is pinned in `tests/test_fastmcp_contract.py`; a docstring or
   `docs/clients.md` alone does not count.
