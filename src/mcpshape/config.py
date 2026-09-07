@@ -16,6 +16,8 @@ from tomlkit.exceptions import TOMLKitError
 from mcpshape.model import (
     DEFAULT_PROXY_NAME,
     HttpTransport,
+    LifecycleOverrides,
+    LifecycleSettings,
     MemoryTransport,
     SseTransport,
     StdioTransport,
@@ -65,6 +67,10 @@ class SettingsFile(_File):
 
     daemon: DaemonSettings = Field(default_factory=DaemonSettings)
     drift: DriftSettings = Field(default_factory=DriftSettings)
+    lifecycle: LifecycleSettings = Field(
+        default_factory=LifecycleSettings,
+        description="Defaults for every Upstream connection; an Upstream file may override.",
+    )
 
 
 SCHEMA_KEYS = frozenset(
@@ -200,19 +206,28 @@ OVERRIDE_SECTION: dict[Kind, str] = {
 """The Proxy file section that holds Overrides for each kind of Catalog item."""
 
 
-class StdioUpstreamFile(_File, StdioTransport):
+class _UpstreamFile(_File):
+    """What every Upstream file carries besides the transport that discriminates it."""
+
+    lifecycle: LifecycleOverrides = Field(
+        default_factory=LifecycleOverrides,
+        description="This Upstream's lifecycle settings, over the defaults in config.toml.",
+    )
+
+
+class StdioUpstreamFile(_UpstreamFile, StdioTransport):
     pass
 
 
-class HttpUpstreamFile(_File, HttpTransport):
+class HttpUpstreamFile(_UpstreamFile, HttpTransport):
     pass
 
 
-class SseUpstreamFile(_File, SseTransport):
+class SseUpstreamFile(_UpstreamFile, SseTransport):
     pass
 
 
-class MemoryUpstreamFile(_File, MemoryTransport):
+class MemoryUpstreamFile(_UpstreamFile, MemoryTransport):
     pass
 
 
@@ -325,13 +340,23 @@ def load_proxy(config_dir: Path, upstream: str, proxy: str) -> ProxyFile:
     return ProxyFile.model_validate(_load(path, "proxy"))
 
 
-def load_upstream(config_dir: Path, name: str) -> Upstream:
+def load_upstream(
+    config_dir: Path, name: str, defaults: LifecycleSettings | None = None
+) -> Upstream:
+    """The Upstream ``name``, with its lifecycle settings over the global defaults."""
     path = upstream_dir(config_dir, name) / UPSTREAM_FILE
     if not path.is_file():
         msg = f"no Upstream named {name!r} in {config_dir}"
         raise ConfigError(msg)
-    transport: Transport = FILE_MODELS["upstream"].validate_python(_load(path, "upstream"))
-    return Upstream(name=name, transport=transport, proxies=list_proxies(config_dir, name))
+    file: _UpstreamFile = FILE_MODELS["upstream"].validate_python(_load(path, "upstream"))
+    if defaults is None:
+        defaults = load_settings(config_dir).lifecycle
+    return Upstream(
+        name=name,
+        transport=cast("Transport", file),
+        proxies=list_proxies(config_dir, name),
+        lifecycle=file.lifecycle.over(defaults),
+    )
 
 
 def load_upstreams(config_dir: Path) -> list[Upstream]:
@@ -339,8 +364,9 @@ def load_upstreams(config_dir: Path) -> list[Upstream]:
     upstreams_dir = config_dir / UPSTREAMS_DIR
     if not upstreams_dir.is_dir():
         return []
+    defaults = load_settings(config_dir).lifecycle
     return [
-        load_upstream(config_dir, path.name)
+        load_upstream(config_dir, path.name, defaults)
         for path in sorted(upstreams_dir.iterdir())
         if (path / UPSTREAM_FILE).is_file()
     ]

@@ -119,6 +119,16 @@ and the Profile writes the common `mcpServers` + `{"type": "http", "url": ...}` 
   in-memory by default, persistence must be supplied.
 - Protocol is sessionless by default in 4.x; server-initiated sampling and roots are removed,
   elicitation is gated.
+- `ping` exists only in the legacy protocol era (checked 2026-09-07, 4.0.3). A plain `Client`
+  over an in-memory server negotiates `2026-07-28` and answers `Method not found` to
+  `client.ping()`; a `ProxyClient` negotiates `2025-11-25`, where `ping` answers. mcpshape
+  checks a warm Upstream over its `ProxyClient`, so it gets the era that has it.
+- A `Client` reference-counts its session: entering an already-entered client reuses the
+  session and leaving that inner context keeps it open. That is what lets one Upstream
+  connection be held open and borrowed by every call (checked 2026-09-07, 4.0.3).
+- A client factory handed to `ProxyTool`/`ProxyResource`/`ProxyPrompt` may be async, and an
+  exception it raises is handled like any tool failure: a `ToolError` reaches the caller as an
+  `isError` result carrying its message, leaving the Client's own session untouched.
 - No server-wide broadcast of `tools/list_changed` (checked 2026-09-07, 4.0.3). The only sender
   is the per-request `Context.send_notification`, which on the 2026-07-28 protocol rides the
   request's own stream. That protocol delivers list-changed events through

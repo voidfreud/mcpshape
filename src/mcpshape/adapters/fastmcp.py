@@ -2,8 +2,9 @@
 
 The rest of mcpshape sees three things: ``scan``, which turns an Upstream into a Catalog,
 ``proxy_app``, an ASGI app per Proxy that serves lists from what it is handed and forwards
-calls to the Upstream under Catalog names, and ``run_stdio_bridge``, the stdio shim's other
-half.
+calls to the Upstream under Catalog names through ``UpstreamConnection``, one Upstream's
+shared client behind its lifecycle state machine, and ``run_stdio_bridge``, the stdio shim's
+other half.
 
 FastMCP's proxy components keep the backend name when they are copied under a new one, which
 is how a renamed tool, resource, or prompt still reaches its Catalog item. The server name is
@@ -14,7 +15,8 @@ server name changes is rebuilt by its owner; ``ProxyApp.name`` says what it was 
 from __future__ import annotations
 
 import importlib
-from contextlib import asynccontextmanager
+import logging
+from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, cast
@@ -22,6 +24,7 @@ from typing import TYPE_CHECKING, Any, cast
 import mcp_types
 from fastmcp import Client, FastMCP
 from fastmcp.client.transports import StreamableHttpTransport
+from fastmcp.exceptions import ToolError
 from fastmcp.server import create_proxy
 from fastmcp.server.providers.base import Provider
 from fastmcp.server.providers.proxy import (
@@ -37,6 +40,7 @@ from pydantic import AnyUrl, PrivateAttr
 from mcpshape.catalog import Catalog, Item
 from mcpshape.model import MemoryTransport
 from mcpshape.proxy import ArgumentMap, Exposed
+from mcpshape.upstream import Connection, UpstreamUnavailableError
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Awaitable, Callable, Sequence
@@ -51,8 +55,12 @@ if TYPE_CHECKING:
     from starlette.types import ASGIApp
 
     from mcpshape.model import Transport, Upstream
+    from mcpshape.upstream import Clock, Status
 
 MCP_PATH = "/mcp"
+
+type ClientFactory = Callable[[], Awaitable[Client[Any]]]
+"""What FastMCP calls to reach the Upstream for one call, read, or get."""
 
 
 class UpstreamTargetError(Exception):
@@ -73,16 +81,90 @@ class ProxyApp:
     serve: Callable[[Exposed], None]
 
 
+class _Link:
+    """One Upstream's client, opened and closed on its ``Connection``'s word.
+
+    The Upstream's target is resolved on every open, not once at build time: a Proxy is served
+    whether or not its Upstream can be reached, and an Upstream that comes back does so without
+    a Daemon restart.
+    """
+
+    def __init__(self, transport: Transport) -> None:
+        self._transport = transport
+        self._open: AsyncExitStack | None = None
+        self._client: Client[Any] | None = None
+
+    @property
+    def client(self) -> Client[Any]:
+        if self._client is None:
+            msg = "the Upstream connection is not open"
+            raise UpstreamTargetError(msg)
+        return self._client
+
+    async def open(self) -> None:
+        target = _resolve(self._transport)
+        stack = AsyncExitStack()
+        client: ProxyClient[Any] = ProxyClient(target)
+        self._client = await stack.enter_async_context(client)
+        self._open = stack
+
+    async def close(self) -> None:
+        stack, self._open, self._client = self._open, None, None
+        if stack is not None:
+            await stack.aclose()
+
+    async def ping(self) -> None:
+        if not await self.client.ping():
+            msg = "the Upstream did not answer a ping"
+            raise UpstreamTargetError(msg)
+
+
+class UpstreamConnection:
+    """One Upstream's connection: the client every Proxy of it calls through (story 74).
+
+    The Daemon builds one per Upstream and hands it to each of that Upstream's Proxies. What
+    the Proxies get is ``client``: the factory FastMCP calls for every call, read, and get,
+    which is what wakes a cold Upstream and what turns an outage into a readable tool error.
+    """
+
+    def __init__(
+        self,
+        upstream: Upstream,
+        clock: Clock | None = None,
+        on_reconnect: Callable[[], Awaitable[None]] | None = None,
+    ) -> None:
+        self._link = _Link(upstream.transport)
+        self._connection = Connection(
+            upstream.name, self._link, upstream.lifecycle, clock, on_reconnect=on_reconnect
+        )
+
+    def status(self) -> Status:
+        return self._connection.status()
+
+    def running(self) -> AbstractAsyncContextManager[None]:
+        """Warm, time, and finally let the connection go, for the life of the Daemon."""
+        return self._connection.running()
+
+    async def client(self) -> Client[Any]:
+        try:
+            await self._connection.acquire()
+        except UpstreamUnavailableError as exc:
+            # A tool error, not a transport failure: the Client keeps its session and only
+            # this call fails. An outage is a warning in the log, never an error.
+            raise ToolError(str(exc), log_level=logging.WARNING) from exc
+        return self._link.client
+
+
 def server_name(upstream: Upstream, proxy_name: str, exposed: Exposed) -> str:
     """The name the Proxy's server announces: the user's, else ``<upstream>/<proxy>``."""
     return exposed.name or f"{upstream.name}/{proxy_name}"
 
 
-def proxy_app(upstream: Upstream, proxy_name: str, exposed: Exposed) -> ProxyApp:
-    """The Proxy ``proxy_name`` of ``upstream``, exposing ``exposed`` and forwarding calls."""
-    target = _resolve(upstream.transport)
-    base: ProxyClient[Any] = ProxyClient(target)
-    provider = _CatalogProvider(base.new)
+def proxy_app(
+    upstream: Upstream, proxy_name: str, exposed: Exposed, connection: UpstreamConnection
+) -> ProxyApp:
+    """The Proxy ``proxy_name`` of ``upstream``, exposing ``exposed`` over ``connection``."""
+    provider = _CatalogProvider(connection.client)
     name = server_name(upstream, proxy_name, exposed)
     server = FastMCP(name=name)
     server.add_provider(provider)
@@ -163,7 +245,7 @@ class _CatalogProvider(Provider):
     FastMCP keeps the Catalog name as the backend name to forward with.
     """
 
-    def __init__(self, client_factory: Callable[[], Client[Any]]) -> None:
+    def __init__(self, client_factory: ClientFactory) -> None:
         super().__init__()
         self._client_factory = client_factory
         self._tools: list[Tool] = []
@@ -215,9 +297,7 @@ class _CatalogProvider(Provider):
         ]
 
     @staticmethod
-    def _tool(
-        factory: Callable[[], Client[Any]], exposed: Exposed, name: str, raw: dict[str, Any]
-    ) -> Tool:
+    def _tool(factory: ClientFactory, exposed: Exposed, name: str, raw: dict[str, Any]) -> Tool:
         origin = exposed.origin(Item("tool", name))
         built = _CuratedTool.from_mcp_tool(  # pyright: ignore[reportUnknownMemberType]  # FastMCP's factory type is unparameterised
             factory, mcp_types.Tool.model_validate({**raw, "name": origin})

@@ -8,8 +8,11 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, cast
 
 import fastmcp
+import mcp_types
+import pytest
 from fastmcp import Client, FastMCP
 from fastmcp.client.transports import StreamableHttpTransport
+from fastmcp.exceptions import ToolError
 from fastmcp.server import create_proxy
 from fastmcp.server.providers.proxy import (
     ProxyClient,
@@ -28,6 +31,8 @@ from tests.support.asgi import asgi_client_factory
 if TYPE_CHECKING:
     from fastmcp.server.context import Context
     from fastmcp.tools.base import ToolResult
+
+UNAVAILABLE = "the Upstream is not reachable right now"
 
 
 def echo_server() -> FastMCP[Any]:
@@ -174,3 +179,45 @@ async def test_a_server_announces_the_name_it_was_built_with_and_live_instructio
     server.instructions = "second"
     async with Client(server) as client:
         assert client.instructions == "second"
+
+
+async def test_a_proxy_client_serves_many_calls_on_one_session_and_answers_a_ping() -> None:
+    """One Upstream connection is shared: mcpshape holds a client open and calls borrow it.
+
+    ``ping`` is what a warm Upstream is checked with. A ``ProxyClient`` negotiates the legacy
+    protocol era, which is the era that has ``ping``; a plain modern-era ``Client`` answers
+    ``Method not found`` (see docs/clients.md).
+    """
+    client: ProxyClient[Any] = ProxyClient(echo_server())
+
+    async with client:
+        assert await client.ping()
+        async with client:
+            assert (await client.call_tool("echo", {"text": "hi"})).data == "hi"
+        assert client.is_connected(), "leaving a borrowed context must keep the session"
+    assert not client.is_connected()
+
+
+async def test_a_client_factory_may_be_async_and_fail_a_call_with_a_readable_tool_error() -> None:
+    """How a connect failure reaches the caller: an error result, not a broken session."""
+
+    async def factory() -> Client[Any]:
+        raise ToolError(UNAVAILABLE)
+
+    server = FastMCP("proxy")
+    server.add_tool(
+        ProxyTool.from_mcp_tool(  # pyright: ignore[reportUnknownMemberType]  # FastMCP's factory type is unparameterised
+            factory, mcp_types.Tool(name="echo", input_schema={"type": "object"})
+        )
+    )
+
+    async with Client(server) as client:
+        result = await client.call_tool("echo", {}, raise_on_error=False)
+        assert result.is_error
+        content = result.content[0]
+        assert isinstance(content, TextContent)
+        assert UNAVAILABLE in content.text
+
+        with pytest.raises(ToolError, match=UNAVAILABLE):
+            await client.call_tool("echo", {})
+        assert [tool.name for tool in await client.list_tools()] == ["echo"]

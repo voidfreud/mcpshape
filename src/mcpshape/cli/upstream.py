@@ -21,7 +21,8 @@ from mcpshape.cli.common import (
     reporting_errors,
     state,
 )
-from mcpshape.cli.listing import proxy_url, toml_file, upstreams_table
+from mcpshape.cli.listing import print_upstreams, proxy_url, toml_file
+from mcpshape.cli.live import read_live
 from mcpshape.model import HttpTransport, SseTransport, StdioTransport, Transport, Upstream
 from mcpshape.names import check_name
 from mcpshape.profiles import clients_needing_reconnect
@@ -105,7 +106,7 @@ def ls(ctx: typer.Context) -> None:
     if not upstreams:
         console.print("No Upstreams yet. Add one with [bold]mcpshape add[/bold].")
         return
-    console.print(upstreams_table(config_dir, upstreams))
+    print_upstreams(config_dir, upstreams, read_live(config_dir))
 
 
 @app.command("show", epilog=example("upstream show github"))
@@ -117,7 +118,7 @@ def show(ctx: typer.Context, name: NameArg) -> None:
     path = config.upstream_dir(config_dir, name) / config.UPSTREAM_FILE
     console.print(f"[bold]{path}[/bold]")
     console.print(toml_file(path))
-    console.print(upstreams_table(config_dir, [upstream]))
+    print_upstreams(config_dir, [upstream], read_live(config_dir))
 
 
 @app.command("sync", epilog=example("upstream sync github --accept"))
