@@ -282,4 +282,3 @@ def remove_proxy(config_dir: Path, upstream: str, proxy: str) -> None:
         msg = f"no Proxy {upstream}/{proxy}"
         raise ConfigError(msg)
     path.unlink()
-    path.with_suffix(".py").unlink(missing_ok=True)

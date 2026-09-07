@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 from rich.syntax import Syntax
 from rich.table import Table
 
-from mcpshape.config import load_settings, load_upstreams, proxy_file, upstream_dir
+from mcpshape.config import load_settings, proxy_file
 from mcpshape.model import DEFAULT_PROXY_NAME
 
 if TYPE_CHECKING:
@@ -63,18 +63,3 @@ def proxies_table(config_dir: Path, upstreams: list[Upstream]) -> Table:
 
 def toml_file(path: Path) -> Syntax:
     return Syntax(path.read_text(), "toml", background_color="default")
-
-
-def all_upstreams(config_dir: Path) -> list[Upstream]:
-    return load_upstreams(config_dir)
-
-
-__all__ = [
-    "all_upstreams",
-    "describe_transport",
-    "proxies_table",
-    "proxy_url",
-    "toml_file",
-    "upstream_dir",
-    "upstreams_table",
-]

@@ -20,7 +20,6 @@ class StdioTransport(_Transport):
     transport: Literal["stdio"]
     command: str
     args: list[str] = Field(default_factory=list[str])
-    env: dict[str, str] = Field(default_factory=dict[str, str])
 
 
 class HttpTransport(_Transport):

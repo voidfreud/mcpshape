@@ -8,14 +8,16 @@ from typing import Annotated
 import typer
 
 from mcpshape import config
-from mcpshape.cli.common import HELP_OPTIONS, console, example, fail, reporting_errors, state
-from mcpshape.cli.listing import (
-    all_upstreams,
-    proxy_url,
-    toml_file,
-    upstream_dir,
-    upstreams_table,
+from mcpshape.cli.common import (
+    HELP_OPTIONS,
+    confirm_or_abort,
+    console,
+    example,
+    fail,
+    reporting_errors,
+    state,
 )
+from mcpshape.cli.listing import proxy_url, toml_file, upstreams_table
 from mcpshape.model import HttpTransport, SseTransport, StdioTransport, Transport
 from mcpshape.names import check_name
 
@@ -87,7 +89,7 @@ def ls(ctx: typer.Context) -> None:
     """List every Upstream with its Proxies."""
     config_dir = state(ctx).config_dir
     with reporting_errors():
-        upstreams = all_upstreams(config_dir)
+        upstreams = config.load_upstreams(config_dir)
     if not upstreams:
         console.print("No Upstreams yet. Add one with [bold]mcpshape add[/bold].")
         return
@@ -100,7 +102,7 @@ def show(ctx: typer.Context, name: NameArg) -> None:
     config_dir = state(ctx).config_dir
     with reporting_errors():
         upstream = config.load_upstream(config_dir, name)
-    path = upstream_dir(config_dir, name) / config.UPSTREAM_FILE
+    path = config.upstream_dir(config_dir, name) / config.UPSTREAM_FILE
     console.print(f"[bold]{path}[/bold]")
     console.print(toml_file(path))
     console.print(upstreams_table(config_dir, [upstream]))
@@ -113,7 +115,6 @@ def rm(ctx: typer.Context, name: NameArg, *, yes: YesOpt = False) -> None:
     with reporting_errors():
         upstream = config.load_upstream(config_dir, name)
         proxies = ", ".join(upstream.proxies)
-        if not yes and not typer.confirm(f"Remove Upstream {name} and its Proxies ({proxies})?"):
-            raise typer.Abort
+        confirm_or_abort(f"Remove Upstream {name} and its Proxies ({proxies})?", yes=yes)
         config.remove_upstream(config_dir, name)
     console.print(f"Removed Upstream [bold]{name}[/bold]")

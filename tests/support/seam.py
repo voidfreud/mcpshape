@@ -27,6 +27,8 @@ if TYPE_CHECKING:
     from starlette.types import ASGIApp
 
 BASE_URL = "http://mcpshape.test"
+# A wide, plain terminal so help text and tables render the same on every machine and CI.
+CLI_ENV = {"COLUMNS": "200", "NO_COLOR": "1"}
 
 
 @dataclass
@@ -94,11 +96,11 @@ class CliResult:
 
 def run_cli(cfg: ConfigDir, *args: str) -> CliResult:
     """Run the mcpshape CLI against ``cfg`` through Typer's runner."""
-    result = CliRunner().invoke(app, ["--config-dir", str(cfg.path), *args])
+    result = CliRunner().invoke(app, ["--config-dir", str(cfg.path), *args], env=CLI_ENV)
     return CliResult(exit_code=result.exit_code, output=result.output)
 
 
 def run_cli_with_env(env: dict[str, str], *args: str) -> CliResult:
     """Run the CLI without ``--config-dir``, letting ``env`` decide where config lives."""
-    result = CliRunner().invoke(app, list(args), env=env)
+    result = CliRunner().invoke(app, list(args), env={**CLI_ENV, **env})
     return CliResult(exit_code=result.exit_code, output=result.output)

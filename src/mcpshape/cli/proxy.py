@@ -9,6 +9,7 @@ import typer
 from mcpshape import config
 from mcpshape.cli.common import (
     HELP_OPTIONS,
+    confirm_or_abort,
     console,
     example,
     fail,
@@ -16,7 +17,7 @@ from mcpshape.cli.common import (
     reporting_errors,
     state,
 )
-from mcpshape.cli.listing import all_upstreams, proxies_table, proxy_url, toml_file
+from mcpshape.cli.listing import proxies_table, proxy_url, toml_file
 from mcpshape.names import check_name
 
 app = typer.Typer(
@@ -54,7 +55,9 @@ def ls(
     config_dir = state(ctx).config_dir
     with reporting_errors():
         upstreams = (
-            [config.load_upstream(config_dir, upstream)] if upstream else all_upstreams(config_dir)
+            [config.load_upstream(config_dir, upstream)]
+            if upstream
+            else config.load_upstreams(config_dir)
         )
     if not upstreams:
         console.print("No Proxies yet. Add an Upstream with [bold]mcpshape add[/bold].")
@@ -80,7 +83,6 @@ def rm(ctx: typer.Context, ref: RefArg, *, yes: YesOpt = False) -> None:
     config_dir = state(ctx).config_dir
     upstream, proxy = parse_proxy_ref(ref)
     with reporting_errors():
-        if not yes and not typer.confirm(f"Remove Proxy {upstream}/{proxy}?"):
-            raise typer.Abort
+        confirm_or_abort(f"Remove Proxy {upstream}/{proxy}?", yes=yes)
         config.remove_proxy(config_dir, upstream, proxy)
     console.print(f"Removed Proxy [bold]{upstream}/{proxy}[/bold]")

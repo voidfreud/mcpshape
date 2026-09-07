@@ -104,13 +104,6 @@
           "title": "Args",
           "type": "array"
         },
-        "env": {
-          "additionalProperties": {
-            "type": "string"
-          },
-          "title": "Env",
-          "type": "object"
-        },
         "version": {
           "const": 1,
           "description": "Format version of this file.",

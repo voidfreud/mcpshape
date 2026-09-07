@@ -46,6 +46,12 @@ def reporting_errors() -> Generator[None]:
         fail(str(exc))
 
 
+def confirm_or_abort(prompt: str, *, yes: bool) -> None:
+    """Ask before a destructive step unless ``--yes`` was given."""
+    if not yes and not typer.confirm(prompt):
+        raise typer.Abort
+
+
 def example(text: str) -> str:
     """The help epilog every command carries."""
     return f"Example: [bold]mcpshape {text}[/bold]"
