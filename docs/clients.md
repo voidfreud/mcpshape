@@ -60,6 +60,46 @@ data for Client Profiles. Checked 2026-09-06/07 against primary documentation.
 - Goose: YAML `extensions:` block. Cline: `cline_mcp_settings.json`.
   Continue: `config.yaml`. OpenCode: `opencode.json`.
 
+### Config file shapes (checked 2026-09-07, primary docs)
+What `proxy install` has to write. Where nothing is listed here, no primary source was found
+and the Profile writes the common `mcpServers` + `{"type": "http", "url": ...}` form.
+- VS Code: the top-level key of `.vscode/mcp.json` is `servers`, not `mcpServers`; an HTTP
+  entry is `{"type": "http", "url": "..."}`.
+  (code.visualstudio.com/docs/agents/reference/mcp-configuration)
+- Zed: a `context_servers` entry needs only `command`/`args`/`env`; no `source` field is
+  required. Its docs now also show a remote entry taking `url` (plus optional `headers`),
+  which contradicts "stdio only" above. Unconfirmed against a second reading, so the Zed
+  Profile still writes the shim entry; settle this before changing it.
+  (zed.dev/docs/ai/mcp, and `docs/src/ai/mcp.md` in zed-industries/zed)
+- OpenCode: the top-level key of `opencode.json` is `mcp`; a remote entry is
+  `{"type": "remote", "url": "...", "enabled": true}`. (opencode.ai/docs/mcp-servers/)
+- Continue: `mcpServers` in `config.yaml` is a **list** of objects, each carrying its own
+  `name`; a remote entry is `name`, `type: streamable-http`, `url`. (docs.continue.dev)
+- Goose: `extensions:` is a map keyed by extension name; a remote entry is
+  `type: streamable_http`, `name`, `enabled: true`, and **`uri:`**, not `url`.
+  (block/goose `documentation/docs/guides/config-files.md`)
+- Codex CLI: a streamable-HTTP server under `[mcp_servers.<name>]` takes `url`, with optional
+  `bearer_token_env_var` and `http_headers`. No extra flag is documented as required.
+  (developers.openai.com/codex/mcp)
+- Windsurf and Gemini CLI: their remote entry shapes are not documented in anything checked.
+- Filled in from general knowledge, not from a primary source, so that `proxy install` has a
+  default path: `~/.gemini/settings.json`, `~/.config/zed/settings.json`,
+  `~/.config/goose/config.yaml`, `~/.continue/config.yaml`, and Claude Desktop's
+  `~/Library/Application Support/Claude/claude_desktop_config.json`. Cline's
+  `cline_mcp_settings.json` lives in editor storage, so its Profile carries no default path.
+
+### Disabling a Client's own entry (checked 2026-09-07)
+- Cline is the only Client that documents a per-server off switch inside its MCP config file:
+  `"disabled": true`, a sibling of `command`/`args`/`url` in the server object.
+  (docs.cline.bot/mcp/mcp-overview)
+- Claude Code has `disabledMcpjsonServers` and `enabledMcpjsonServers`, arrays of server
+  names, but they live in `.claude/settings.json`, not in the MCP config file.
+  (code.claude.com/docs/en/settings-reference)
+- Cursor, VS Code, and Windsurf: not substantiated. Cursor and VS Code tie enable/disable to
+  a UI toggle whose state is stored outside the config file; Windsurf documents only an
+  admin-level `disabledTools` array, which is per tool. Third-party posts claiming a
+  `"disabled"` key for these three do not hold up against the vendors' own text.
+
 ## FastMCP 4.0.3
 - Requires Python 3.10+. Ships with `httpx2` (the `httpx` 2.x package name) and `mcp` 2.x. Public API changed 2.x to 3.0 (Feb 2026) and 3.0 to 4.0 (Aug 2026).
 - `create_proxy` accepts URL, path, or `mcpServers` dict; forwards tools, resources, prompts,
