@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any, cast
 from fastmcp import FastMCP
 from fastmcp.server import create_proxy
 
-from mcpshape.model import MemoryTarget
+from mcpshape.model import MemoryTransport
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Callable
@@ -21,7 +21,7 @@ if TYPE_CHECKING:
 
     from starlette.types import ASGIApp
 
-    from mcpshape.model import Upstream, UpstreamTarget
+    from mcpshape.model import Transport, Upstream
 
 MCP_PATH = "/mcp"
 
@@ -38,10 +38,10 @@ class ProxyApp:
     lifespan: Callable[[], AbstractAsyncContextManager[None]]
 
 
-def proxy_app(upstream: Upstream) -> ProxyApp:
-    """A Proxy of ``upstream`` that forwards everything the Upstream advertises."""
-    server = _resolve(upstream.target)
-    proxy = create_proxy(server, name=upstream.name)
+def proxy_app(upstream: Upstream, proxy_name: str) -> ProxyApp:
+    """The Proxy ``proxy_name`` of ``upstream``, forwarding everything the Upstream advertises."""
+    server = _resolve(upstream.transport)
+    proxy = create_proxy(server, name=f"{upstream.name}/{proxy_name}")
     app = proxy.http_app(path=MCP_PATH)
 
     @asynccontextmanager
@@ -52,10 +52,13 @@ def proxy_app(upstream: Upstream) -> ProxyApp:
     return ProxyApp(asgi=app, lifespan=lifespan)
 
 
-def _resolve(target: UpstreamTarget) -> FastMCP[Any]:
-    match target:
-        case MemoryTarget(module=module, attribute=attribute):
-            return _import_server(module, attribute)
+def _resolve(transport: Transport) -> FastMCP[Any]:
+    match transport:
+        case MemoryTransport():
+            return _import_server(transport.module, transport.attribute)
+        case _:
+            msg = f"{transport.transport} Upstreams are not supported yet"
+            raise UpstreamTargetError(msg)
 
 
 def _import_server(module: str, attribute: str) -> FastMCP[Any]:

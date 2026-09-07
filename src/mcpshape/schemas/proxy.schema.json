@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/voidfreud/mcpshape/main/src/mcpshape/schemas/proxy.schema.json",
+  "title": "ProxyFile",
+  "additionalProperties": false,
+  "description": "``<proxy>.toml``: one curation of an Upstream.",
+  "properties": {
+    "version": {
+      "const": 1,
+      "description": "Format version of this file.",
+      "title": "Version",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "version"
+  ],
+  "type": "object"
+}
