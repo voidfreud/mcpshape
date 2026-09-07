@@ -10,6 +10,7 @@ the environment the Upstream file asks for, and that a connect given up on leave
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import signal
 from typing import TYPE_CHECKING
@@ -147,6 +148,37 @@ async def test_an_upstream_whose_reference_is_unset_never_connects_and_names_the
     assert "secrets.toml" in reason
 
 
+async def test_what_a_failed_connect_says_names_the_reference_and_never_its_value(
+    config_dir: ConfigDir, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A command or URL carrying a resolved value turns up in what a failure says; the status,
+    the log, and the terminal get the reference back instead.
+
+    The Upstream is scanned while it works, so its Proxy has a Catalog to serve and a call
+    reaches the connect that fails.
+    """
+    config_dir.add_stdio_upstream("child", child_upstream.command(), child_upstream.args())
+    async with running_daemon(config_dir):
+        pass
+    config_dir.write_secrets({"SECRET_CMD": STORED})
+    file = config_dir.path / "upstreams" / "child" / "upstream.toml"
+    file.write_text(
+        file.read_text().replace(json.dumps(child_upstream.command()), '"${SECRET_CMD}"')
+    )
+
+    with caplog.at_level("WARNING", logger="mcpshape"):
+        async with running_daemon(config_dir) as daemon, daemon.client("/child/mcp") as client:
+            result = await client.call_tool("add", {"a": 1, "b": 1}, raise_on_error=False)
+            assert result.is_error
+            await daemon.awaiting_state("child", "unavailable")
+            error = await upstream_error(await daemon.status(), "child")
+
+    assert "${SECRET_CMD}" in error
+    assert STORED not in error
+    assert STORED not in caplog.text
+    assert "${SECRET_CMD}" in caplog.text  # the start-up scan, and the connect the call woke
+
+
 # --- stdio: the lifecycle, on a real process ---------------------------------------------------
 
 
@@ -263,7 +295,7 @@ async def test_an_sse_upstream_is_reached_by_url(config_dir: ConfigDir) -> None:
 
 
 async def test_a_url_upstream_that_is_not_there_fails_only_calls(config_dir: ConfigDir) -> None:
-    message = "The remote server is not up; nothing was written."
+    message = "The Upstream is not up; nothing was written."
     async with serving_upstream(calculator()) as url:
         config_dir.add_url_upstream("calc", url, "http", {"unavailable_message": message})
         await cli(config_dir, "upstream", "sync", "calc")

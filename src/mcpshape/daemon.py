@@ -252,7 +252,7 @@ async def rescan(state_dir: Path, secrets: Secrets, upstream: Upstream) -> None:
         log.warning("Upstream %s could not be scanned", upstream.name, exc_info=True)
 
 
-async def record(state_dir: Path, name: str, observed: Catalog) -> None:
+async def record_observation(state_dir: Path, name: str, observed: Catalog) -> None:
     """Keep what a reconnected Upstream advertises: its first Catalog, or the Drift since."""
     await asyncio.to_thread(catalogs.record_scan, state_dir, name, observed)
 
@@ -269,7 +269,10 @@ def build_app(config_dir: Path, state_dir: Path, clock: Clock | None = None) -> 
     secrets = secrets_for(config_dir)
     connections = {
         upstream.name: UpstreamConnection(
-            upstream, secrets, clock, on_catalog=partial(record, state_dir, upstream.name)
+            upstream,
+            secrets,
+            clock,
+            on_catalog=partial(record_observation, state_dir, upstream.name),
         )
         for upstream in upstreams
     }

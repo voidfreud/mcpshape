@@ -63,6 +63,20 @@ class Secrets:
         """Every variable ``data`` refers to that neither the environment nor the file answers."""
         return _missing(data, self._values())
 
+    def concealed(self, text: str, model: BaseModel) -> str:
+        """``text`` with every value a reference in ``model`` resolved to written as the reference.
+
+        For what an Upstream says when reaching it fails: a URL or a command carrying a resolved
+        value can turn up in that message, and the message goes to the log, the status, and
+        the terminal.
+        """
+        values = self._values()
+        names = sorted(_references(model.model_dump()), key=lambda name: -len(values.get(name, "")))
+        for name in names:
+            if value := values.get(name):
+                text = text.replace(value, f"${{{name}}}")
+        return text
+
     def _values(self) -> dict[str, str]:
         stored = dict(self._stored()) if self._stored is not None else {}
         return {**stored, **os.environ}

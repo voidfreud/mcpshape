@@ -452,8 +452,10 @@ def secrets_for(config_dir: Path) -> Secrets:
 def secret_problems(config_dir: Path) -> list[Problem]:
     """Every reference no environment variable and no secrets entry answers, file by file.
 
-    A secrets file anyone else can read is the first problem, and the only one reported then:
-    nothing was read, so nothing else can be judged.
+    Only the transport is looked at, since that is where a reference is resolved: when the
+    Upstream is reached, not when its file is loaded, so a value edited while the Daemon runs
+    counts the next time. A secrets file anyone else can read is the first problem, and the
+    only one reported then: nothing was read, so nothing else can be judged.
     """
     try:
         values = load_secret_values(config_dir)
@@ -465,10 +467,10 @@ def secret_problems(config_dir: Path) -> list[Problem]:
         if kind != "upstream":
             continue
         try:
-            document = read_document(path).unwrap()
+            upstream = load_upstream(config_dir, path.parent.name)
         except ConfigError:
             continue  # unreadable, which check_file reports on its own
-        if missing := secrets.missing(document):
+        if missing := secrets.missing(upstream.transport.model_dump()):
             problems.append(Problem(path, "", unset_message(missing)))
     return problems
 

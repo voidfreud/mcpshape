@@ -21,6 +21,7 @@ is this module's ``_Handle`` over the Upstream's shared client.
 from __future__ import annotations
 
 import base64
+import contextlib
 import importlib
 import json
 import logging
@@ -115,8 +116,8 @@ class _Link:
     """
 
     def __init__(self, transport: Transport, secrets: Secrets) -> None:
-        self._transport = transport
-        self._secrets = secrets
+        self.transport = transport
+        self.secrets = secrets
         self._open: AsyncExitStack | None = None
         self._client: Client[Any] | None = None
 
@@ -137,11 +138,13 @@ class _Link:
         stack = AsyncExitStack()
         self._open = stack
         try:
-            client: ProxyClient[Any] = ProxyClient(_target(self._transport, self._secrets))
-            stack.push_async_callback(client.close)
-            self._client = await stack.enter_async_context(client)
+            async with _concealing(self.transport, self.secrets):
+                client: ProxyClient[Any] = ProxyClient(_target(self.transport, self.secrets))
+                stack.push_async_callback(client.close)
+                self._client = await stack.enter_async_context(client)
         except BaseException:
-            await self.close()
+            with contextlib.suppress(Exception):  # what a client that never connected raises
+                await self.close()  # on closing is the connect failure again, already reported
             raise
 
     async def close(self) -> None:
@@ -189,7 +192,7 @@ class UpstreamConnection:
         if self._on_catalog is None:
             return
         client = self._link.client
-        async with client:
+        async with _concealing(self._link.transport, self._link.secrets), client:
             observed = await _catalog_of(client)
         await self._on_catalog(observed)
 
@@ -245,8 +248,23 @@ async def scan(transport: Transport, secrets: Secrets) -> Catalog:
     This opens a connection of its own. An Upstream the Daemon is already connected to is
     looked at over that connection instead, by ``UpstreamConnection``.
     """
-    async with Client(_target(transport, secrets)) as client:
+    async with _concealing(transport, secrets), Client(_target(transport, secrets)) as client:
         return await _catalog_of(client)
+
+
+@asynccontextmanager
+async def _concealing(transport: Transport, secrets: Secrets) -> AsyncGenerator[None]:
+    """Let nothing fail with a resolved value in its message.
+
+    Whatever reaching the Upstream raises is re-raised as ``UpstreamTargetError`` with every
+    resolved ``${VAR}`` written back as the reference, since the message goes on to the log,
+    the status, and the terminal. The original is dropped, as its text is what leaks.
+    """
+    try:
+        yield
+    except Exception as exc:  # noqa: BLE001  # whatever it was, its text must not leak
+        message = secrets.concealed(str(exc) or type(exc).__name__, transport)
+        raise UpstreamTargetError(message) from None
 
 
 async def _catalog_of(client: Client[Any]) -> Catalog:

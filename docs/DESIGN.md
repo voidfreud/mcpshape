@@ -200,6 +200,8 @@ mcpshape doctor
 - Tests drive the system through one seam: a temp config directory, the Daemon app in-process,
   in-memory Upstreams, a FastMCP Client over ASGI, and the CLI via Typer's runner. Tests never
   import internal modules to assert on their state. Exceptions: the stdio shim (real subprocess),
+  real Upstream transports (`tests/test_real_transports.py`: a child process and a loopback
+  server behind the Daemon, since only those show one child shared by every Proxy and session),
   autostart unit writers (golden files), the Adapter contract tests,
   `tests/test_config_roundtrip.py` (the tomlkit round-trip property, at the config module),
   `tests/test_overrides_property.py` (the Override application property, at the proxy module), and
