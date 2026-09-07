@@ -37,6 +37,7 @@ from mcpshape.config import (
     proxy_file,
     secrets_for,
 )
+from mcpshape.connection import SystemClock, TimedOutError, bounded
 from mcpshape.hooks import UserCodeError, load_user_code
 from mcpshape.model import DEFAULT_PROXY_NAME, CapError, CapSettings
 from mcpshape.proxy import Exposed, OverrideError, cap, expose
@@ -299,6 +300,27 @@ async def record_observation(state_dir: Path, name: str, observed: Catalog) -> N
     await asyncio.to_thread(catalogs.record_scan, state_dir, name, observed)
 
 
+async def _bounded_rescan(
+    state_dir: Path, secrets: Secrets, upstream: Upstream, clock: Clock
+) -> None:
+    """``rescan``, bounded by ``upstream``'s own ``connect_timeout`` on ``clock`` (#20).
+
+    An Upstream whose connect hangs must not hold up the Daemon's start, nor any other
+    Upstream's: this is awaited concurrently with every other Upstream's bounded rescan, and a
+    scan that times out is logged and skipped, exactly like one that fails outright.
+    """
+    try:
+        await bounded(
+            rescan(state_dir, secrets, upstream), upstream.lifecycle.connect_timeout, clock
+        )
+    except TimedOutError:
+        log.warning(
+            "Upstream %s could not be scanned within its connect_timeout of %.0fs",
+            upstream.name,
+            upstream.lifecycle.connect_timeout,
+        )
+
+
 @dataclass(frozen=True)
 class DaemonApp:
     """Every ASGI app the Daemon serves: the main one, and one per Proxy port override.
@@ -326,6 +348,7 @@ def build_app(
     ``.extra``. ``token``, when given, requires ``Authorization: Bearer <token>`` on every
     request to any of them.
     """
+    running_clock = clock or SystemClock()
     upstreams = load_upstreams(config_dir)
     global_caps = load_settings(config_dir).caps
     secrets = secrets_for(config_dir)
@@ -361,8 +384,12 @@ def build_app(
 
     @contextlib.asynccontextmanager
     async def lifespan(_app: Starlette) -> AsyncGenerator[None]:
-        for upstream in upstreams:
-            await rescan(state_dir, secrets, upstream)
+        await asyncio.gather(
+            *(
+                _bounded_rescan(state_dir, secrets, upstream, running_clock)
+                for upstream in upstreams
+            )
+        )
         async with contextlib.AsyncExitStack() as stack:
             for proxy in proxies.values():
                 await proxy.start()

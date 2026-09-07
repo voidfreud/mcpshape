@@ -7,12 +7,14 @@ taking its in-memory server away, which is all a Client can tell apart anyway.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from typing import TYPE_CHECKING
 
 from fastmcp import Client
 from mcp_types import TextContent
 
-from tests.support.clock import FakeClock
+from mcpshape.connection import Connection
+from tests.support.clock import FakeClock, settle
 from tests.support.seam import (
     RunningDaemon,
     free_port,
@@ -26,6 +28,7 @@ from tests.test_catalog_drift import cli, drift_file, grow, notes
 from tests.test_proxy_seam import calculator
 
 if TYPE_CHECKING:
+    import pytest
     from fastmcp.client.client import CallToolResult
 
     from tests.support.seam import ConfigDir
@@ -178,6 +181,93 @@ async def test_a_connect_that_hangs_is_given_up_on_after_the_connect_timeout(
         assert message in error_text(result)
         assert await daemon.upstream_state("slow") == "unavailable"
         gate.set()
+
+
+async def test_a_hung_upstream_at_start_does_not_block_the_daemon_past_its_connect_timeout(
+    config_dir: ConfigDir,
+) -> None:
+    """#20: the start-up rescan is bounded per Upstream, on the clock the lifecycle runs on.
+
+    Without the fix, ``slow``'s never-set gate hangs the initial scan forever, on no clock at
+    all, so advancing the fake clock would never unblock it and this test would time out.
+    """
+    clock = FakeClock()
+    gate = asyncio.Event()  # never set: the initial scan hangs, exactly like a dead connect
+    config_dir.add_memory_upstream("slow", slow_server(gate), {"connect_timeout": 5})
+    config_dir.add_memory_upstream("calc", calculator())
+
+    stack = contextlib.AsyncExitStack()
+    entering = asyncio.create_task(stack.enter_async_context(running_daemon(config_dir, clock)))
+    await settle()
+    assert not entering.done(), "the Daemon should still be waiting out slow's connect_timeout"
+
+    await clock.advance(6)
+    daemon: RunningDaemon = await asyncio.wait_for(entering, timeout=5)
+    try:
+        async with daemon.client("/calc/mcp") as client:
+            assert (await client.call_tool("add", {"a": 2, "b": 3})).data == 5
+        async with daemon.client("/slow/mcp") as client:
+            # The timed-out scan never recorded a Catalog, so slow's Proxy answers with
+            # nothing yet, exactly like a failed scan; what matters is that it answers at all,
+            # promptly, instead of the whole Daemon hanging on slow's connect.
+            assert await client.list_tools() == []
+    finally:
+        await stack.aclose()
+
+
+async def test_a_keeper_that_raises_is_restarted_up_to_a_cap(
+    config_dir: ConfigDir, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#20: a keeper that hits an unexpected exception keeps supervising, up to a cap.
+
+    ``Connection._plan`` is patched to fail a bounded number of times: the fault the keeper's
+    own guarded paths (ping, connect, shutdown) cannot produce, since those already catch
+    their own exceptions. The Daemon's behaviour is asserted only through ``/api/status``.
+    """
+    clock = FakeClock()
+    config_dir.add_memory_upstream("calc", calculator(), {"idle_timeout": 100})
+
+    # fault injection, not a state assertion: reaching an unguarded exception in the keeper
+    # needs a fault at a point no legitimate Client-driven scenario can reach.
+    real_plan = Connection._plan  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+    failures = iter([True, True])  # two restarts, then it behaves
+
+    def flaky_plan(self: Connection) -> tuple[str, float | None]:
+        if next(failures, False):
+            msg = "injected keeper fault"
+            raise RuntimeError(msg)
+        return real_plan(self)
+
+    monkeypatch.setattr(Connection, "_plan", flaky_plan)
+
+    async with running_daemon(config_dir, clock) as daemon, daemon.client("/calc/mcp") as client:
+        assert (await client.call_tool("add", {"a": 2, "b": 3})).data == 5
+        await settle()
+        assert await daemon.upstream_state("calc") in CONNECTED
+
+        await clock.advance(101)
+        assert await daemon.awaiting_state("calc", "cold") == "cold"
+
+
+async def test_a_keeper_that_raises_past_the_cap_marks_the_upstream_unavailable(
+    config_dir: ConfigDir, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = FakeClock()
+    config_dir.add_memory_upstream("calc", calculator())
+
+    def always_fails(self: Connection) -> tuple[str, float | None]:  # noqa: ARG001
+        msg = "injected keeper fault"
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr(Connection, "_plan", always_fails)
+
+    async with running_daemon(config_dir, clock) as daemon:
+        state = await daemon.awaiting_state("calc", "unavailable")
+        assert state == "unavailable"
+        status = await daemon.status()
+        error = next(u["error"] for u in status["upstreams"] if u["name"] == "calc")
+        assert error is not None
+        assert "keeper" in error
 
 
 async def seconds_in_state(daemon: RunningDaemon, name: str) -> float:
