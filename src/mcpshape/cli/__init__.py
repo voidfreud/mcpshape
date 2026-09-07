@@ -48,8 +48,7 @@ def main(
         config_dir=config_dir or default_config_dir(),
         state_dir=state_dir or default_state_dir(),
     )
-    if ctx.invoked_subcommand != "upstream":
-        drift_notice(ctx.obj.state_dir)
+    ctx.call_on_close(lambda: drift_notice(ctx.obj.state_dir, ctx.obj.reviewed))
 
 
 @app.command(

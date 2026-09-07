@@ -7,7 +7,7 @@ and ``upstreams/<name>/<proxy>.toml`` per Proxy. Every file carries ``version``.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Annotated, Any, Literal
+from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
 
 import tomlkit
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
@@ -88,13 +88,16 @@ class ProxyFile(_File):
     prompts: Overrides = Field(default_factory=dict, description="Overrides by prompt name.")
 
     def overrides(self, kind: Kind) -> Overrides:
-        match kind:
-            case "tool":
-                return self.tools
-            case "resource" | "resource_template":
-                return self.resources
-            case "prompt":
-                return self.prompts
+        return cast("Overrides", getattr(self, OVERRIDE_SECTION[kind]))
+
+
+OVERRIDE_SECTION: dict[Kind, str] = {
+    "tool": "tools",
+    "resource": "resources",
+    "resource_template": "resources",
+    "prompt": "prompts",
+}
+"""The Proxy file section that holds Overrides for each kind of Catalog item."""
 
 
 class StdioUpstreamFile(_File, StdioTransport):
@@ -317,14 +320,6 @@ def add_proxy(config_dir: Path, upstream: str, proxy: str) -> Path:
         raise ConfigError(msg)
     write_document(path, new_document("proxy", {}))
     return path
-
-
-OVERRIDE_SECTION: dict[Kind, str] = {
-    "tool": "tools",
-    "resource": "resources",
-    "resource_template": "resources",
-    "prompt": "prompts",
-}
 
 
 def hide_items(path: Path, items: Iterable[Item], note: str) -> None:

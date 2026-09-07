@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import contextlib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, NoReturn
 
 import typer
@@ -23,19 +23,23 @@ console = Console(soft_wrap=True)
 errors = Console(stderr=True, soft_wrap=True)
 
 
-@dataclass(frozen=True)
+@dataclass
 class State:
     config_dir: Path
     state_dir: Path
+    reviewed: set[str] = field(default_factory=set[str])
+    """Upstreams whose Drift this command showed in full, so the closing notice skips them."""
 
 
 def state(ctx: typer.Context) -> State:
     return ctx.ensure_object(State)
 
 
-def drift_notice(state_dir: Path) -> None:
+def drift_notice(state_dir: Path, reviewed: set[str]) -> None:
     """One line on stderr naming every Upstream with unreviewed Drift, or nothing."""
-    drifts = pending_drift(state_dir)
+    drifts = {
+        name: drift for name, drift in pending_drift(state_dir).items() if name not in reviewed
+    }
     if not drifts:
         return
     where = ", ".join(f"{name} ({drift.summary()})" for name, drift in drifts.items())

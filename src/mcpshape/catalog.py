@@ -60,24 +60,13 @@ class Catalog(BaseModel):
 
     def keep(self, hidden: frozenset[Item]) -> Catalog:
         """This Catalog without the ``hidden`` items."""
-        return self.model_copy(
-            update={
-                _FIELD[kind]: {
-                    name: definition
-                    for name, definition in self.items(kind).items()
-                    if Item(kind, name) not in hidden
-                }
-                for kind in KINDS
-            }
-        )
-
-
-_FIELD: dict[Kind, str] = {
-    "tool": "tools",
-    "resource": "resources",
-    "resource_template": "resource_templates",
-    "prompt": "prompts",
-}
+        kept = self.model_copy(deep=True)
+        for kind in KINDS:
+            items = kept.items(kind)
+            for name in list(items):
+                if Item(kind, name) in hidden:
+                    del items[name]
+        return kept
 
 
 @dataclass(frozen=True, order=True)
@@ -103,19 +92,19 @@ class Drift:
     def __bool__(self) -> bool:
         return bool(self.added or self.removed or self.changed or self.instructions_changed)
 
+    def by_sign(self) -> tuple[tuple[str, tuple[Item, ...]], ...]:
+        """Added, removed, and changed items behind their ``+``, ``-``, and ``~`` marks."""
+        return (("+", self.added), ("-", self.removed), ("~", self.changed))
+
     def summary(self) -> str:
         """``+2 -1 ~1``, the parts that are non-zero, ``instructions`` when they changed."""
-        parts = [
-            f"{sign}{len(items)}"
-            for sign, items in (("+", self.added), ("-", self.removed), ("~", self.changed))
-            if items
-        ]
+        parts = [f"{sign}{len(items)}" for sign, items in self.by_sign() if items]
         if self.instructions_changed:
             parts.append("instructions")
         return " ".join(parts)
 
 
-def diff(stored: Catalog, observed: Catalog) -> Drift:
+def drift_between(stored: Catalog, observed: Catalog) -> Drift:
     added: list[Item] = []
     removed: list[Item] = []
     changed: list[Item] = []
@@ -177,7 +166,7 @@ def load_drift(state_dir: Path, upstream: str) -> Drift | None:
     stored = load_catalog(state_dir, upstream)
     if pending is None or stored is None:
         return None
-    return diff(stored, pending)
+    return drift_between(stored, pending)
 
 
 def pending_drift(state_dir: Path) -> dict[str, Drift]:
@@ -213,7 +202,7 @@ def record_scan(state_dir: Path, upstream: str, observed: Catalog) -> Scan:
     if stored is None:
         _write(catalog_path(state_dir, upstream), observed)
         return Scan(catalog=observed, drift=Drift(), first=True)
-    drift = diff(stored, observed)
+    drift = drift_between(stored, observed)
     if not drift:
         drift_path(state_dir, upstream).unlink(missing_ok=True)
         _write(catalog_path(state_dir, upstream), observed)

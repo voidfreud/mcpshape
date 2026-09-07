@@ -15,7 +15,6 @@ from mcpshape.cli.common import (
     HELP_OPTIONS,
     confirm_or_abort,
     console,
-    drift_notice,
     example,
     fail,
     reporting_errors,
@@ -51,12 +50,6 @@ YesOpt = Annotated[bool, typer.Option("-y", "--yes", help="Do not ask for confir
 AcceptOpt = Annotated[
     bool, typer.Option("--accept", help="Make what the Upstream advertises now the Catalog.")
 ]
-
-
-@app.callback()
-def main(ctx: typer.Context) -> None:
-    if ctx.invoked_subcommand != "sync":
-        drift_notice(state(ctx).state_dir)
 
 
 def transport_from_options(stdio: str | None, url: str | None, *, sse: bool) -> Transport:
@@ -145,6 +138,7 @@ def sync(
             return
         for upstream in upstreams:
             sync_one(config_dir, state_dir, upstream, accept=accept)
+            state(ctx).reviewed.add(upstream.name)
 
 
 def sync_one(config_dir: Path, state_dir: Path, upstream: Upstream, *, accept: bool) -> None:
@@ -208,7 +202,7 @@ def report_orphans(config_dir: Path, upstream: Upstream, accepted: catalog.Catal
 
 
 def print_drift(drift: catalog.Drift) -> None:
-    for sign, items in (("+", drift.added), ("-", drift.removed), ("~", drift.changed)):
+    for sign, items in drift.by_sign():
         for item in items:
             console.print(f"  {sign} {item}")
     if drift.instructions_changed:

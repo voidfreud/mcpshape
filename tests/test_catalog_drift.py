@@ -228,6 +228,22 @@ def test_every_command_prints_one_drift_notice_until_reviewed(config_dir: Config
     assert "Drift" not in run_cli(config_dir, "ls").output
 
 
+def test_sync_of_one_upstream_still_notices_drift_in_another(config_dir: ConfigDir) -> None:
+    notes_server, other_server = notes(), notes()
+    config_dir.add_memory_upstream("notes", notes_server)
+    config_dir.add_memory_upstream("other", other_server)
+    run_cli(config_dir, "upstream", "sync")
+    grow(notes_server)
+    grow(other_server)
+    run_cli(config_dir, "upstream", "sync")
+
+    result = run_cli(config_dir, "upstream", "sync", "notes")
+
+    assert result.exit_code == 0, result.output
+    notice = [line for line in result.output.splitlines() if "Review with:" in line]
+    assert notice == ["Drift in other (+1). Review with: mcpshape upstream sync other"]
+
+
 def test_drift_resolves_itself_when_the_upstream_reverts(config_dir: ConfigDir) -> None:
     server = notes()
     config_dir.add_memory_upstream("notes", server)
