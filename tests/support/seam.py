@@ -13,7 +13,9 @@ from typing import TYPE_CHECKING
 import pytest
 from fastmcp import Client, FastMCP
 from fastmcp.client.transports import StreamableHttpTransport
+from typer.testing import CliRunner
 
+from mcpshape.cli import app
 from mcpshape.daemon import build_app
 from tests.support import upstreams
 from tests.support.asgi import asgi_client_factory
@@ -43,6 +45,7 @@ class ConfigDir:
         (upstream_dir / "upstream.toml").write_text(
             f'version = 1\ntransport = "memory"\ntarget = "{target}"\n',
         )
+        (upstream_dir / "default.toml").write_text("version = 1\n")
 
     def cleanup(self) -> None:
         for name in self._registered:
@@ -79,3 +82,23 @@ async def running_daemon(cfg: ConfigDir) -> AsyncGenerator[RunningDaemon]:
     app = build_app(cfg.path)
     async with app.router.lifespan_context(app):
         yield RunningDaemon(app)
+
+
+@dataclass(frozen=True)
+class CliResult:
+    """What the user saw: exit code and the combined output."""
+
+    exit_code: int
+    output: str
+
+
+def run_cli(cfg: ConfigDir, *args: str) -> CliResult:
+    """Run the mcpshape CLI against ``cfg`` through Typer's runner."""
+    result = CliRunner().invoke(app, ["--config-dir", str(cfg.path), *args])
+    return CliResult(exit_code=result.exit_code, output=result.output)
+
+
+def run_cli_with_env(env: dict[str, str], *args: str) -> CliResult:
+    """Run the CLI without ``--config-dir``, letting ``env`` decide where config lives."""
+    result = CliRunner().invoke(app, list(args), env=env)
+    return CliResult(exit_code=result.exit_code, output=result.output)

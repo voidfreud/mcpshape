@@ -1,0 +1,153 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/voidfreud/mcpshape/main/src/mcpshape/schemas/upstream.schema.json",
+  "title": "mcpshape upstream file",
+  "$defs": {
+    "HttpUpstreamFile": {
+      "additionalProperties": false,
+      "properties": {
+        "transport": {
+          "const": "http",
+          "title": "Transport",
+          "type": "string"
+        },
+        "url": {
+          "title": "Url",
+          "type": "string"
+        },
+        "version": {
+          "const": 1,
+          "description": "Format version of this file.",
+          "title": "Version",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "transport",
+        "url",
+        "version"
+      ],
+      "title": "HttpUpstreamFile",
+      "type": "object"
+    },
+    "MemoryUpstreamFile": {
+      "additionalProperties": false,
+      "properties": {
+        "transport": {
+          "const": "memory",
+          "title": "Transport",
+          "type": "string"
+        },
+        "target": {
+          "pattern": "^[A-Za-z_][\\w.]*:[A-Za-z_]\\w*$",
+          "title": "Target",
+          "type": "string"
+        },
+        "version": {
+          "const": 1,
+          "description": "Format version of this file.",
+          "title": "Version",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "transport",
+        "target",
+        "version"
+      ],
+      "title": "MemoryUpstreamFile",
+      "type": "object"
+    },
+    "SseUpstreamFile": {
+      "additionalProperties": false,
+      "properties": {
+        "transport": {
+          "const": "sse",
+          "title": "Transport",
+          "type": "string"
+        },
+        "url": {
+          "title": "Url",
+          "type": "string"
+        },
+        "version": {
+          "const": 1,
+          "description": "Format version of this file.",
+          "title": "Version",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "transport",
+        "url",
+        "version"
+      ],
+      "title": "SseUpstreamFile",
+      "type": "object"
+    },
+    "StdioUpstreamFile": {
+      "additionalProperties": false,
+      "properties": {
+        "transport": {
+          "const": "stdio",
+          "title": "Transport",
+          "type": "string"
+        },
+        "command": {
+          "title": "Command",
+          "type": "string"
+        },
+        "args": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Args",
+          "type": "array"
+        },
+        "env": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "Env",
+          "type": "object"
+        },
+        "version": {
+          "const": 1,
+          "description": "Format version of this file.",
+          "title": "Version",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "transport",
+        "command",
+        "version"
+      ],
+      "title": "StdioUpstreamFile",
+      "type": "object"
+    }
+  },
+  "discriminator": {
+    "mapping": {
+      "http": "#/$defs/HttpUpstreamFile",
+      "memory": "#/$defs/MemoryUpstreamFile",
+      "sse": "#/$defs/SseUpstreamFile",
+      "stdio": "#/$defs/StdioUpstreamFile"
+    },
+    "propertyName": "transport"
+  },
+  "oneOf": [
+    {
+      "$ref": "#/$defs/StdioUpstreamFile"
+    },
+    {
+      "$ref": "#/$defs/HttpUpstreamFile"
+    },
+    {
+      "$ref": "#/$defs/SseUpstreamFile"
+    },
+    {
+      "$ref": "#/$defs/MemoryUpstreamFile"
+    }
+  ]
+}

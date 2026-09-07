@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/voidfreud/mcpshape/main/src/mcpshape/schemas/settings.schema.json",
+  "title": "SettingsFile",
+  "$defs": {
+    "DaemonSettings": {
+      "additionalProperties": false,
+      "properties": {
+        "host": {
+          "default": "127.0.0.1",
+          "description": "Address the Daemon binds to.",
+          "title": "Host",
+          "type": "string"
+        },
+        "port": {
+          "default": 8321,
+          "description": "Port the Daemon listens on.",
+          "maximum": 65535,
+          "minimum": 1,
+          "title": "Port",
+          "type": "integer"
+        }
+      },
+      "title": "DaemonSettings",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "``config.toml``: global settings.",
+  "properties": {
+    "version": {
+      "const": 1,
+      "description": "Format version of this file.",
+      "title": "Version",
+      "type": "integer"
+    },
+    "daemon": {
+      "$ref": "#/$defs/DaemonSettings"
+    }
+  },
+  "required": [
+    "version"
+  ],
+  "type": "object"
+}

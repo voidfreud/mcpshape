@@ -20,17 +20,22 @@ if TYPE_CHECKING:
 def build_app(config_dir: Path) -> Starlette:
     """The Daemon app for the Upstreams registered under ``config_dir``.
 
-    Each Upstream's ``default`` Proxy is served at ``/<upstream>/mcp`` and at
-    ``/<upstream>/default/mcp``.
+    Every Proxy is served at ``/<upstream>/<proxy>/mcp``; the ``default`` Proxy also at
+    ``/<upstream>/mcp``.
     """
-    proxies = {upstream.name: proxy_app(upstream) for upstream in load_upstreams(config_dir)}
+    proxies = {
+        (upstream.name, proxy_name): proxy_app(upstream, proxy_name)
+        for upstream in load_upstreams(config_dir)
+        for proxy_name in upstream.proxies
+    }
     routes = [
-        route
-        for name, proxy in proxies.items()
-        for route in (
-            Mount(f"/{name}/{DEFAULT_PROXY_NAME}", app=proxy.asgi),
-            Mount(f"/{name}", app=proxy.asgi),
-        )
+        Mount(f"/{name}/{proxy_name}", app=proxy.asgi)
+        for (name, proxy_name), proxy in proxies.items()
+    ]
+    routes += [
+        Mount(f"/{name}", app=proxy.asgi)
+        for (name, proxy_name), proxy in proxies.items()
+        if proxy_name == DEFAULT_PROXY_NAME
     ]
 
     @contextlib.asynccontextmanager
