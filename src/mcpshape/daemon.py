@@ -3,6 +3,11 @@
 Every Proxy serves from its Upstream's accepted Catalog, curated by its Proxy file. Both are
 files the CLI edits, so each Proxy re-reads them when they change, checked on every request.
 Starting the Daemon rescans every Upstream, recording Drift rather than serving it.
+
+One connection per Upstream is built here and shared by all of that Upstream's Proxies and
+every Client (story 74); the lifespan warms it, times it, and lets it go. ``/api/status`` is
+the live state the CLI and, later, the dashboard read: nothing here is configuration, which is
+read from files whether the Daemon runs or not.
 """
 
 from __future__ import annotations
@@ -11,27 +16,66 @@ import asyncio
 import contextlib
 import logging
 from datetime import UTC, datetime
+from functools import partial
 from typing import TYPE_CHECKING
 
+from pydantic import BaseModel, Field
 from starlette.applications import Starlette
-from starlette.routing import Mount
+from starlette.responses import JSONResponse
+from starlette.routing import Mount, Route
 
 from mcpshape import catalog as catalogs
-from mcpshape.adapters.fastmcp import UpstreamTargetError, proxy_app, scan, server_name
+from mcpshape.adapters.fastmcp import (
+    UpstreamConnection,
+    UpstreamTargetError,
+    proxy_app,
+    scan,
+    server_name,
+)
 from mcpshape.config import ConfigError, load_proxy, load_settings, load_upstreams, proxy_file
 from mcpshape.model import DEFAULT_PROXY_NAME
 from mcpshape.proxy import Exposed, OverrideError, expose
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator
+    from collections.abc import AsyncGenerator, Awaitable, Callable
     from pathlib import Path
 
+    from starlette.requests import Request
+    from starlette.routing import BaseRoute
     from starlette.types import Receive, Scope, Send
 
     from mcpshape.adapters.fastmcp import ProxyApp
     from mcpshape.model import Upstream
+    from mcpshape.upstream import Clock
 
 log = logging.getLogger("mcpshape.daemon")
+
+STATUS_PATH = "/api/status"
+"""The one management route so far: live state, which #16 grows into the management API."""
+
+
+class ProxyState(BaseModel):
+    """One Proxy as the Daemon sees it right now."""
+
+    name: str
+    health: str
+    detail: str | None = None
+
+
+class UpstreamState(BaseModel):
+    """One Upstream's connection as the Daemon sees it right now."""
+
+    name: str
+    state: str
+    seconds: float
+    error: str | None = None
+    proxies: list[ProxyState] = Field(default_factory=list[ProxyState])
+
+
+class LiveState(BaseModel):
+    """What ``/api/status`` answers. The CLI reads it back through the same model."""
+
+    upstreams: list[UpstreamState] = Field(default_factory=list[UpstreamState])
 
 
 class _Held:
@@ -75,7 +119,14 @@ class _Proxy:
     the new one is up, and Clients with an old session reconnect.
     """
 
-    def __init__(self, config_dir: Path, state_dir: Path, upstream: Upstream, name: str) -> None:
+    def __init__(
+        self,
+        config_dir: Path,
+        state_dir: Path,
+        upstream: Upstream,
+        name: str,
+        connection: UpstreamConnection,
+    ) -> None:
         self._sources = (
             catalogs.catalog_path(state_dir, upstream.name),
             proxy_file(config_dir, upstream.name, name),
@@ -88,9 +139,12 @@ class _Proxy:
             name,
         )
         self._stamp: tuple[tuple[int, int] | None, ...] | None = None
+        self._connection = connection
         self._lock = asyncio.Lock()
         self._held: _Held | None = None
-        self.app: ProxyApp = proxy_app(upstream, name, _nothing())
+        self.health = "ok"
+        self.detail: str | None = None
+        self.app: ProxyApp = proxy_app(upstream, name, _nothing(), connection)
 
     async def start(self) -> None:
         self._held = _Held(self.app)
@@ -110,10 +164,12 @@ class _Proxy:
                 stored = catalogs.load_catalog(self._state_dir, self._upstream.name) or _empty()
                 proxy = load_proxy(self._config_dir, self._upstream.name, self._name)
                 exposed = expose(stored, proxy)
-            except (catalogs.CatalogError, ConfigError, OverrideError):
+            except (catalogs.CatalogError, ConfigError, OverrideError) as exc:
                 log.warning("Proxy %s keeps its last exposed set", self._label, exc_info=True)
+                self.health, self.detail = "unhealthy", str(exc)
                 return
             self._stamp = stamp
+            self.health, self.detail = "ok", None
             if server_name(self._upstream, self._name, exposed) == self.app.name:
                 self.app.serve(exposed)
                 return
@@ -121,10 +177,14 @@ class _Proxy:
 
     async def _rebuild(self, exposed: Exposed) -> None:
         previous = self._held
-        self.app = proxy_app(self._upstream, self._name, exposed)
+        self.app = proxy_app(self._upstream, self._name, exposed, self._connection)
         await self.start()
         if previous is not None:
             await previous.close()
+
+    async def state(self) -> ProxyState:
+        await self.refresh()
+        return ProxyState(name=self._name, health=self.health, detail=self.detail)
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] == "http":
@@ -157,19 +217,29 @@ async def rescan(state_dir: Path, upstream: Upstream) -> None:
         log.warning("Upstream %s could not be scanned", upstream.name, exc_info=True)
 
 
-def build_app(config_dir: Path, state_dir: Path) -> Starlette:
+def build_app(config_dir: Path, state_dir: Path, clock: Clock | None = None) -> Starlette:
     """The Daemon app for the Upstreams registered under ``config_dir``.
 
     Every Proxy is served at ``/<upstream>/<proxy>/mcp``; the ``default`` Proxy also at
-    ``/<upstream>/mcp``.
+    ``/<upstream>/mcp``; live state at ``/api/status``. ``clock`` is what every lifecycle
+    timer runs on, so tests advance time instead of waiting for it.
     """
     upstreams = load_upstreams(config_dir)
+    connections = {
+        upstream.name: UpstreamConnection(
+            upstream, clock, on_reconnect=partial(rescan, state_dir, upstream)
+        )
+        for upstream in upstreams
+    }
     proxies = {
-        (upstream.name, proxy_name): _Proxy(config_dir, state_dir, upstream, proxy_name)
+        (upstream.name, proxy_name): _Proxy(
+            config_dir, state_dir, upstream, proxy_name, connections[upstream.name]
+        )
         for upstream in upstreams
         for proxy_name in upstream.proxies
     }
-    routes = [
+    routes: list[BaseRoute] = [Route(STATUS_PATH, _status(upstreams, connections, proxies))]
+    routes += [
         Mount(f"/{name}/{proxy_name}", app=proxy) for (name, proxy_name), proxy in proxies.items()
     ]
     routes += [
@@ -182,15 +252,39 @@ def build_app(config_dir: Path, state_dir: Path) -> Starlette:
     async def lifespan(_app: Starlette) -> AsyncGenerator[None]:
         for upstream in upstreams:
             await rescan(state_dir, upstream)
-        for proxy in proxies.values():
-            await proxy.start()
-        try:
+        async with contextlib.AsyncExitStack() as stack:
+            for proxy in proxies.values():
+                await proxy.start()
+                stack.push_async_callback(proxy.stop)
+            for connection in connections.values():
+                await stack.enter_async_context(connection.running())
             yield
-        finally:
-            for proxy in reversed(proxies.values()):
-                await proxy.stop()
 
     return Starlette(routes=routes, lifespan=lifespan)
+
+
+def _status(
+    upstreams: list[Upstream],
+    connections: dict[str, UpstreamConnection],
+    proxies: dict[tuple[str, str], _Proxy],
+) -> Callable[[Request], Awaitable[JSONResponse]]:
+    """The ``/api/status`` endpoint: what every Upstream and Proxy is doing right now."""
+
+    async def state_of(upstream: Upstream) -> UpstreamState:
+        status = connections[upstream.name].status()
+        return UpstreamState(
+            name=upstream.name,
+            state=status.state,
+            seconds=round(status.seconds, 3),
+            error=status.error,
+            proxies=[await proxies[upstream.name, name].state() for name in upstream.proxies],
+        )
+
+    async def endpoint(_request: Request) -> JSONResponse:
+        live = LiveState(upstreams=[await state_of(upstream) for upstream in upstreams])
+        return JSONResponse(live.model_dump(mode="json"))
+
+    return endpoint
 
 
 async def serve(app: Starlette, host: str, port: int, stop: asyncio.Event | None = None) -> None:

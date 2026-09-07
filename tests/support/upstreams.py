@@ -7,10 +7,14 @@ with ``target = "tests.support.upstreams:<name>"``, with no subprocess and no ne
 
 from __future__ import annotations
 
+import contextlib
 from typing import TYPE_CHECKING, Any
 
+from fastmcp import FastMCP
+
 if TYPE_CHECKING:
-    from fastmcp import FastMCP
+    import asyncio
+    from collections.abc import AsyncGenerator
 
 MODULE_PATH = "tests.support.upstreams"
 
@@ -23,3 +27,25 @@ def register(name: str, server: FastMCP[Any]) -> str:
 
 def unregister(name: str) -> None:
     globals().pop(name, None)
+
+
+def slow_server(gate: asyncio.Event) -> FastMCP[Any]:
+    """An Upstream that does not finish connecting until ``gate`` is set.
+
+    A connect that hangs is the failure a connect timeout exists for; a Client cannot tell it
+    apart from a server that never came up.
+    """
+
+    @contextlib.asynccontextmanager
+    async def lifespan(_server: FastMCP[Any]) -> AsyncGenerator[None]:
+        await gate.wait()
+        yield
+
+    server: FastMCP[Any] = FastMCP("slow", lifespan=lifespan)
+
+    def echo(text: str) -> str:
+        """Say it back."""
+        return text
+
+    server.tool(echo)
+    return server

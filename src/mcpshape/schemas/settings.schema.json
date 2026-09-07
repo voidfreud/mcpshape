@@ -40,6 +40,48 @@
       },
       "title": "DriftSettings",
       "type": "object"
+    },
+    "LifecycleSettings": {
+      "additionalProperties": false,
+      "description": "When an Upstream's connection is opened, checked, and let go.\n\nThese belong to the Upstream, since the connection is the Upstream's and is shared by its\nProxies. ``config.toml`` sets the defaults; an Upstream file overrides what it cares about.",
+      "properties": {
+        "warm": {
+          "default": false,
+          "description": "Connect at Daemon start and ping on an interval, instead of waiting for the first call. Warm Upstreams never go idle.",
+          "title": "Warm",
+          "type": "boolean"
+        },
+        "idle_timeout": {
+          "default": 600.0,
+          "description": "Seconds without a call before the connection is let go. 0 keeps it forever.",
+          "minimum": 0,
+          "title": "Idle Timeout",
+          "type": "number"
+        },
+        "connect_timeout": {
+          "default": 10.0,
+          "description": "Seconds a connect attempt may take before it counts as a failure.",
+          "exclusiveMinimum": 0,
+          "title": "Connect Timeout",
+          "type": "number"
+        },
+        "ping_interval": {
+          "default": 30.0,
+          "description": "Seconds between pings of a warm Upstream, so it is never falsely reported up.",
+          "exclusiveMinimum": 0,
+          "title": "Ping Interval",
+          "type": "number"
+        },
+        "unavailable_message": {
+          "default": "The Upstream is not reachable right now, so this call did not run. Nothing changed; try again in a moment.",
+          "description": "The tool error a call is answered with while the Upstream is not connected.",
+          "minLength": 1,
+          "title": "Unavailable Message",
+          "type": "string"
+        }
+      },
+      "title": "LifecycleSettings",
+      "type": "object"
     }
   },
   "additionalProperties": false,
@@ -56,6 +98,10 @@
     },
     "drift": {
       "$ref": "#/$defs/DriftSettings"
+    },
+    "lifecycle": {
+      "$ref": "#/$defs/LifecycleSettings",
+      "description": "Defaults for every Upstream connection; an Upstream file may override."
     }
   },
   "required": [

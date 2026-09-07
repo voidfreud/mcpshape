@@ -20,6 +20,10 @@
           "description": "Format version of this file.",
           "title": "Version",
           "type": "integer"
+        },
+        "lifecycle": {
+          "$ref": "#/$defs/LifecycleOverrides",
+          "description": "This Upstream's lifecycle settings, over the defaults in config.toml."
         }
       },
       "required": [
@@ -28,6 +32,83 @@
         "version"
       ],
       "title": "HttpUpstreamFile",
+      "type": "object"
+    },
+    "LifecycleOverrides": {
+      "additionalProperties": false,
+      "description": "One Upstream's lifecycle settings: whatever it sets wins over the global defaults.",
+      "properties": {
+        "warm": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Connect at Daemon start and ping on an interval, instead of waiting for the first call. Warm Upstreams never go idle.",
+          "title": "Warm"
+        },
+        "idle_timeout": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Seconds without a call before the connection is let go. 0 keeps it forever.",
+          "title": "Idle Timeout"
+        },
+        "connect_timeout": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Seconds a connect attempt may take before it counts as a failure.",
+          "title": "Connect Timeout"
+        },
+        "ping_interval": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Seconds between pings of a warm Upstream, so it is never falsely reported up.",
+          "title": "Ping Interval"
+        },
+        "unavailable_message": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The tool error a call is answered with while the Upstream is not connected.",
+          "title": "Unavailable Message"
+        }
+      },
+      "title": "LifecycleOverrides",
       "type": "object"
     },
     "MemoryUpstreamFile": {
@@ -48,6 +129,10 @@
           "description": "Format version of this file.",
           "title": "Version",
           "type": "integer"
+        },
+        "lifecycle": {
+          "$ref": "#/$defs/LifecycleOverrides",
+          "description": "This Upstream's lifecycle settings, over the defaults in config.toml."
         }
       },
       "required": [
@@ -75,6 +160,10 @@
           "description": "Format version of this file.",
           "title": "Version",
           "type": "integer"
+        },
+        "lifecycle": {
+          "$ref": "#/$defs/LifecycleOverrides",
+          "description": "This Upstream's lifecycle settings, over the defaults in config.toml."
         }
       },
       "required": [
@@ -109,6 +198,10 @@
           "description": "Format version of this file.",
           "title": "Version",
           "type": "integer"
+        },
+        "lifecycle": {
+          "$ref": "#/$defs/LifecycleOverrides",
+          "description": "This Upstream's lifecycle settings, over the defaults in config.toml."
         }
       },
       "required": [
