@@ -264,17 +264,22 @@ def record_scan(state_dir: Path, upstream: str, observed: Catalog) -> Scan:
         return Scan(catalog=stored, drift=drift, first=False)
 
 
-def accept(state_dir: Path, upstream: str) -> tuple[Catalog, Drift]:
-    """Make the pending observation the Catalog. Returns it with the Drift that was applied."""
+def accept_scan(state_dir: Path, upstream: str, observed: Catalog) -> Scan:
+    """Make ``observed`` the Catalog, in one locked step: what ``upstream sync --accept`` does.
+
+    Recording the observation and then accepting whatever is pending would be two locked
+    steps, and a Daemon rescan landing between them would make the accepted Catalog one the
+    user was never shown. What is accepted is exactly what this scan saw.
+
+    Between writing the Catalog and unlinking the pending file a lock-free reader sees the
+    new Catalog with a pending observation identical to it, whose Drift is empty: nothing.
+    """
     with _locked(state_dir, upstream):
-        drift = load_drift(state_dir, upstream)
-        pending = _read(drift_path(state_dir, upstream))
-        if drift is None or pending is None:
-            msg = f"no Drift to accept for {upstream!r}"
-            raise CatalogError(msg)
-        _write(catalog_path(state_dir, upstream), pending)
-        drift_path(state_dir, upstream).unlink()
-        return pending, drift
+        stored = load_catalog(state_dir, upstream)
+        drift = Drift() if stored is None else drift_between(stored, observed)
+        _write(catalog_path(state_dir, upstream), observed)
+        drift_path(state_dir, upstream).unlink(missing_ok=True)
+        return Scan(catalog=observed, drift=drift, first=stored is None)
 
 
 def forget(state_dir: Path, upstream: str) -> None:
