@@ -8,8 +8,11 @@ A local proxy that reshapes what MCP servers expose. Python, built on unmodified
   engineering rules, the workflow included, are under "Engineering".
 - `docs/adr/`: the reasons behind the decisions that must not be undone without a new ADR.
 - `docs/clients.md`: dated facts about Clients and FastMCP; update it, not the brief, when facts change.
-- Spec: GitHub issue #2. Tickets: its sub-issues, with native blocked-by links. Read the ticket
-  before implementing it; the frontier is any open ticket with no open blockers.
+- `docs/sessions/`: the verbatim design transcript. History, not rules; the brief wins where
+  they differ.
+- Spec: GitHub issue #2, the map; its sub-issues are the tickets. How a ticket is chosen,
+  claimed, filed, and closed is in `docs/agents/issue-tracker.md`. Read the ticket before
+  implementing it.
 
 ## Agent skills
 

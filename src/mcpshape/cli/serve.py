@@ -20,7 +20,7 @@ from typing import Annotated
 
 import typer
 
-from mcpshape.adapters.fastmcp import run_stdio_bridge
+from mcpshape.adapters.fastmcp import run_shim
 from mcpshape.cli.common import errors, example, fail, parse_proxy_ref, reporting_errors, state
 from mcpshape.cli.listing import proxy_url
 from mcpshape.config import load_proxy, load_settings
@@ -62,7 +62,7 @@ def serve(ctx: typer.Context, ref: RefArg, proxy_name: ProxyArg = None) -> None:
     ensure_daemon(config_dir, state_dir, daemon.host, daemon.port)
     url = proxy_url(config_dir, upstream, proxy)
     errors.print(f"Serving [bold]{upstream}/{proxy}[/bold] from {url} over stdio.")
-    run_stdio_bridge(url)
+    run_shim(url)
 
 
 def resolve(ref: str, given: str | None) -> tuple[str, str]:
