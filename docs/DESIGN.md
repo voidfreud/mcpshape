@@ -171,7 +171,17 @@ mcpshape doctor
 - uv, ruff (strict), pyright strict, pytest with in-memory FastMCP Upstreams, Hypothesis for
   config round-trips and Override application over generated Catalogs. A benchmark script for
   proxy overhead instead of a stress-test suite. GitHub Actions on macOS and Linux.
-  Protected `main`, merges only. Conventional commits, semver. MIT.
+  Conventional commits, semver. MIT.
+- Protected `main`: pull requests only, one per wave (one issue, or a group of issues, with
+  their review commits), merged with a merge commit once CI is green. The merge closes the
+  wave's tickets. The ruleset refuses anything else; nothing is ever committed on `main`.
+- Tests drive the system through one seam: a temp config directory, the Daemon app in-process,
+  in-memory Upstreams, a FastMCP Client over ASGI, and the CLI via Typer's runner. Tests never
+  import internal modules to assert on their state. Exceptions: the stdio shim (real subprocess),
+  autostart unit writers (golden files), and the FastMCP adapter contract tests.
+- Only the FastMCP adapter module imports FastMCP (ADR 0001). A FastMCP behavior that
+  mcpshape's code relies on is pinned in `tests/test_fastmcp_contract.py`; a docstring or
+  `docs/clients.md` alone does not count.
 - One repo, modular for clarity. Dashboard as a separate package directory in the same repo,
   built to static files the Daemon serves.
 - Name: `mcpshape`. The working name `mcpi` is the Minecraft Pi API on PyPI, npm, and GitHub.
