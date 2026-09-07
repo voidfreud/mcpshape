@@ -17,9 +17,9 @@ Infer the repo from `git remote -v`; `gh` does this automatically when run insid
 
 One pull request per wave: one issue, or a group of issues, with their review commits. The rule is the brief's, under Engineering; this is how a pull request looks here.
 
-- **Branch**: one per wave, off `main`, named `<type>/<slug>`. Brought up to date by rebasing onto `main`, never by merging `main` in. Every commit on it is a Conventional Commit, `type: subject`, and none of them is a merge commit; CI refuses the pull request otherwise (both rules are the brief's).
+- **Branch**: one per wave, off `main`, named `<type>/<slug>`. Brought up to date by rebasing onto `main`, never by merging `main` in. Every commit on it is a Conventional Commit, `type: subject`, and none of them is a merge commit. CI refuses a pull request whose branch name, title, or commits break this (the commit rules are the brief's).
 - **Title**: Conventional Commit form, `type: subject`, the subject in the glossary's words.
-- **Body**, in this order: `## Summary` (what the wave delivers); `## What changed` (by module, with file names); `## Tests` (which files, what they assert, how they drive the seam); `## Review` (the findings the review commits applied); `## Facts recorded` (what went into `docs/clients.md`, when anything did); then `Closes #<n>` for every ticket the wave completes, none for a wave that changes only rules or docs; CI refuses a pull request that changes `src/` or `tests/` without one (the rule is the brief's). A reader who sees only the pull request knows what was built and how it was checked.
+- **Body**: the pull request template (`.github/pull_request_template.md`), every section kept in its order, then `Closes #<n>` for every ticket the wave completes, none for a wave that changes only rules or docs; CI refuses a pull request that changes `src/` or `tests/` without one (the rule is the brief's). A reader who sees only the pull request knows what was built and how it was checked.
 - **Merge**: only once every CI check is green, with `gh pr merge <n> --merge --subject "<type>: <subject> (#<n>)"`, which is also what GitHub's merge button writes, since the repository's default merge subject is the pull request title. The branch is deleted on merge.
 
 ## Pull requests as a triage surface

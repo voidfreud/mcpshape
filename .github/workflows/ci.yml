@@ -5,23 +5,35 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   conventional:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Title and every commit are Conventional Commits, no merge commits on the branch
+      - name: Branch name, title, and every commit follow the rules; a code change names its ticket
         env:
           TITLE: ${{ github.event.pull_request.title }}
+          BRANCH: ${{ github.head_ref }}
           BODY: ${{ github.event.pull_request.body }}
           BASE: ${{ github.event.pull_request.base.sha }}
           HEAD: ${{ github.event.pull_request.head.sha }}
         run: |
           pattern='^(build|chore|ci|docs|feat|fix|perf|refactor|revert|style|test)(\([a-z0-9._/-]+\))?!?: [^ ].*$'
           fail=0
+          if ! printf '%s\n' "$BRANCH" | grep -Eq '^(build|chore|ci|docs|feat|fix|perf|refactor|revert|style|test)/[a-z0-9._-]+$'; then
+            echo "::error::branch is not named <type>/<slug>: $BRANCH"; fail=1
+          fi
           if ! printf '%s\n' "$TITLE" | grep -Eq "$pattern"; then
             echo "::error::pull request title is not a Conventional Commit: $TITLE"; fail=1
           fi
@@ -45,6 +57,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
