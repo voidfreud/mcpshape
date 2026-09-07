@@ -45,7 +45,7 @@ if TYPE_CHECKING:
 
     from mcpshape.model import LifecycleSettings
 
-log = logging.getLogger("mcpshape.upstream")
+log = logging.getLogger("mcpshape.connection")
 
 State = Literal["cold", "connecting", "ready", "idle-pending", "unavailable", "stopping"]
 CONNECTED: tuple[State, ...] = ("ready", "idle-pending")

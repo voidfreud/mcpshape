@@ -322,6 +322,11 @@ def proxy_file(config_dir: Path, upstream: str, proxy: str) -> Path:
     return upstream_dir(config_dir, upstream) / f"{proxy}.toml"
 
 
+def proxy_code_file(config_dir: Path, upstream: str, proxy: str) -> Path:
+    """The Proxy's Python file, next to its TOML: Hooks and Virtual Tools live there."""
+    return upstream_dir(config_dir, upstream) / f"{proxy}.py"
+
+
 def list_proxies(config_dir: Path, upstream: str) -> tuple[str, ...]:
     """Proxy names of ``upstream``, ``default`` first, the rest in name order."""
     names = sorted(
@@ -499,3 +504,4 @@ def remove_proxy(config_dir: Path, upstream: str, proxy: str) -> None:
         msg = f"no Proxy {upstream}/{proxy}"
         raise ConfigError(msg)
     path.unlink()
+    proxy_code_file(config_dir, upstream, proxy).unlink(missing_ok=True)

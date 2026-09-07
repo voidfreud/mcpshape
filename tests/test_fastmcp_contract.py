@@ -13,6 +13,8 @@ import pytest
 from fastmcp import Client, FastMCP
 from fastmcp.client.transports import StreamableHttpTransport
 from fastmcp.exceptions import ToolError
+from fastmcp.prompts import Message, PromptResult
+from fastmcp.resources import ResourceContent, ResourceResult
 from fastmcp.server import create_proxy
 from fastmcp.server.providers.proxy import (
     ProxyClient,
@@ -21,6 +23,8 @@ from fastmcp.server.providers.proxy import (
     ProxyTemplate,
     ProxyTool,
 )
+from fastmcp.tools import FunctionTool, Tool
+from fastmcp.tools.base import ToolResult
 from mcp_types import TextContent, TextResourceContents
 from pydantic import AnyUrl, PrivateAttr
 from starlette.applications import Starlette
@@ -30,7 +34,6 @@ from tests.support.asgi import asgi_client_factory
 
 if TYPE_CHECKING:
     from fastmcp.server.context import Context
-    from fastmcp.tools.base import ToolResult
 
 UNAVAILABLE = "the Upstream is not reachable right now"
 
@@ -221,3 +224,174 @@ async def test_a_client_factory_may_be_async_and_fail_a_call_with_a_readable_too
         with pytest.raises(ToolError, match=UNAVAILABLE):
             await client.call_tool("echo", {})
         assert [tool.name for tool in await client.list_tools()] == ["echo"]
+
+
+# --- what Hooks and Virtual Tools rely on ----------------------------------------------------
+
+
+class Counted(FunctionTool):
+    """A FunctionTool subclass with a private attribute and a ``run`` that wraps the body."""
+
+    _seen: list[dict[str, Any]] = PrivateAttr(default_factory=list[dict[str, Any]])
+
+    async def run(self, arguments: dict[str, Any]) -> ToolResult:
+        self._seen.append(dict(arguments))
+        return await super().run(arguments)
+
+    def convert_result(self, raw_value: Any) -> ToolResult:  # noqa: ANN401  # whatever the body returned
+        if isinstance(raw_value, tuple):
+            return ToolResult(content=[TextContent(type="text", text="converted")])
+        return super().convert_result(raw_value)
+
+    @property
+    def seen(self) -> list[dict[str, Any]]:
+        return self._seen
+
+
+async def test_a_function_tool_subclass_takes_its_schema_from_a_plain_function() -> None:
+    """How a Virtual Tool is built: the user's function, its docstring, and its signature."""
+
+    def close_all(ids: list[int], note: str = ""):  # noqa: ANN202  # no output schema
+        """Close several issues."""
+        return note, len(ids)
+
+    built = Counted.from_function(close_all, run_in_thread=False)
+    assert isinstance(built, Counted)
+    assert built.name == "close_all"
+    assert built.description == "Close several issues."
+    assert built.parameters["properties"]["ids"] == {"type": "array", "items": {"type": "integer"}}
+    assert built.parameters["required"] == ["ids"]
+
+    server = FastMCP("virtual")
+    server.add_tool(built)
+    async with Client(server) as client:
+        listed = (await client.list_tools())[0]
+        assert listed.input_schema == built.parameters
+        result = await client.call_tool("close_all", {"ids": [1, 2]})
+    content = result.content[0]
+    assert isinstance(content, TextContent)
+    assert content.text == "converted", "run() routes the body's return through convert_result()"
+    assert built.seen == [{"ids": [1, 2]}]
+
+
+async def test_a_function_tool_advertises_a_wrapped_output_schema_the_client_checks() -> None:
+    """A FastMCP tool returning one value wraps it as ``result``, and the Client insists on it.
+
+    That mark is what the adapter reads to rebuild structured content after a Hook replaced a
+    result with plain text.
+    """
+    server = FastMCP("wrapped")
+
+    def greet(name: str) -> str:
+        return f"hi {name}"
+
+    server.tool(greet)
+    async with Client(server) as client:
+        schema = (await client.list_tools())[0].output_schema
+    assert schema is not None
+    assert schema["x-fastmcp-wrap-result"] is True
+    assert schema["properties"]["result"]["type"] == "string"
+
+    plain = FastMCP("plain")
+    plain.add_tool(
+        ProxyTool.from_mcp_tool(  # pyright: ignore[reportUnknownMemberType]  # FastMCP's factory type is unparameterised
+            lambda: Client(server),
+            mcp_types.Tool(name="greet", input_schema={"type": "object"}, output_schema=schema),
+        )
+    )
+    async with Client(plain) as client:
+        assert (await client.call_tool("greet", {"name": "Ann"})).data == "hi Ann"
+
+    class Unstructured(Tool):
+        async def run(self, arguments: dict[str, Any]) -> ToolResult:  # noqa: ARG002
+            return ToolResult(content=[TextContent(type="text", text="only text")])
+
+    bare = FastMCP("bare")
+    bare.add_tool(Unstructured(name="greet", parameters={"type": "object"}, output_schema=schema))
+    async with Client(bare) as client:
+        with pytest.raises(RuntimeError, match="did not return structured content"):
+            await client.call_tool("greet", {"name": "Ann"})
+
+
+async def test_a_proxy_template_reads_while_creating_and_a_cached_resource_serves_that() -> None:
+    """The chain for a template read runs in ``create_resource``, and hands back a resource
+    carrying the result the Hooks left as its cached content."""
+    upstream = notes_server()
+    base: ProxyClient[Any] = ProxyClient(upstream)
+    async with Client(upstream) as client:
+        template = (await client.list_resource_templates())[0]
+
+    class Rewritten(ProxyTemplate):
+        async def create_resource(
+            self, uri: str, params: dict[str, Any], context: Context | None = None
+        ) -> ProxyResource:
+            created = await super().create_resource(uri, params, context)
+            read = await created.read()
+            assert isinstance(read, ResourceResult)
+            assert [item.content for item in read.contents] == [f"note {params['id']}"]
+            return ProxyResource(
+                client_factory=self._client_factory,  # pyright: ignore[reportUnknownMemberType]
+                uri=uri,
+                name=self.name,
+                mime_type="text/plain",
+                _cached_content=ResourceResult(contents=[ResourceContent("rewritten")]),
+            )
+
+    server = FastMCP("proxy")
+    server.add_template(Rewritten.from_mcp_template(base.new, template))  # pyright: ignore[reportUnknownMemberType]
+    async with Client(server) as client:
+        contents = (await client.read_resource("notes://7"))[0]
+    assert isinstance(contents, TextResourceContents)
+    assert contents.text == "rewritten"
+
+
+async def test_a_proxy_prompt_renders_to_messages_that_can_be_rebuilt() -> None:
+    upstream = notes_server()
+    base: ProxyClient[Any] = ProxyClient(upstream)
+    async with Client(upstream) as client:
+        prompt = (await client.list_prompts())[0]
+
+    class Rewritten(ProxyPrompt):
+        async def render(self, arguments: dict[str, Any] | None = None) -> PromptResult:
+            rendered = await super().render(arguments or {})
+            assert isinstance(rendered, PromptResult)
+            first = rendered.messages[0]
+            assert isinstance(first.content, TextContent)
+            return PromptResult(
+                [
+                    Message(first.content.text + "!", role=first.role),
+                    Message("Sure.", role="assistant"),
+                ]
+            )
+
+    server = FastMCP("proxy")
+    server.add_prompt(Rewritten.from_mcp_prompt(base.new, prompt))  # pyright: ignore[reportUnknownMemberType]
+    async with Client(server) as client:
+        messages = (await client.get_prompt("greeting", {"name": "Ann"})).messages
+    texts = [(m.role, m.content.text) for m in messages if isinstance(m.content, TextContent)]
+    assert texts == [("user", "Hello Ann!"), ("assistant", "Sure.")]
+
+
+async def test_a_borrowed_client_reports_a_failed_or_unknown_call_as_an_error_result() -> None:
+    """What the ``upstream`` handle sees: an error result carrying the message, either way."""
+    server = FastMCP("failing")
+
+    def explode() -> str:
+        msg = "boom"
+        raise ValueError(msg)
+
+    server.tool(explode)
+    client: ProxyClient[Any] = ProxyClient(server)
+    async with client:
+        async with client:
+            failed = await client.call_tool_mcp("explode", {})
+            assert failed.is_error
+            content = failed.content[0]
+            assert isinstance(content, TextContent)
+            assert "boom" in content.text
+            missing = await client.call_tool_mcp("no_such_tool", {})
+            assert missing.is_error
+            content = missing.content[0]
+            assert isinstance(content, TextContent)
+            assert "no_such_tool" in content.text
+        assert client.is_connected()

@@ -32,7 +32,15 @@ from mcpshape.adapters.fastmcp import (
     scan,
     server_name,
 )
-from mcpshape.config import ConfigError, load_proxy, load_settings, load_upstreams, proxy_file
+from mcpshape.config import (
+    ConfigError,
+    load_proxy,
+    load_settings,
+    load_upstreams,
+    proxy_code_file,
+    proxy_file,
+)
+from mcpshape.hooks import UserCodeError, load_user_code
 from mcpshape.model import DEFAULT_PROXY_NAME
 from mcpshape.proxy import Exposed, OverrideError, expose
 
@@ -45,8 +53,8 @@ if TYPE_CHECKING:
     from starlette.types import Receive, Scope, Send
 
     from mcpshape.adapters.fastmcp import ProxyApp
+    from mcpshape.connection import Clock
     from mcpshape.model import Upstream
-    from mcpshape.upstream import Clock
 
 log = logging.getLogger("mcpshape.daemon")
 
@@ -112,11 +120,13 @@ class _Held:
 
 
 class _Proxy:
-    """One Proxy, re-reading its Catalog and Proxy file whenever either changes on disk.
+    """One Proxy, re-reading its Catalog, Proxy file, and Python file whenever one changes.
 
     A change to what is exposed is served in place. A change to the exposed server name needs
     a new app, since a server's identity is fixed when it is built: the old app is closed after
-    the new one is up, and Clients with an old session reconnect.
+    the new one is up, and Clients with an old session reconnect. A file that cannot be read,
+    applied, or loaded marks the Proxy unhealthy: it keeps advertising its last exposed set
+    and every call errors naming the Proxy and the reason, and nothing reaches the Upstream.
     """
 
     def __init__(
@@ -127,9 +137,11 @@ class _Proxy:
         name: str,
         connection: UpstreamConnection,
     ) -> None:
+        self._code_path = proxy_code_file(config_dir, upstream.name, name)
         self._sources = (
             catalogs.catalog_path(state_dir, upstream.name),
             proxy_file(config_dir, upstream.name, name),
+            self._code_path,
         )
         self._label = f"{upstream.name}/{name}"
         self._config_dir, self._state_dir, self._upstream, self._name = (
@@ -160,15 +172,22 @@ class _Proxy:
             stamp = tuple(_stamp(path) for path in self._sources)
             if stamp == self._stamp:
                 return
+            self._stamp = stamp
             try:
                 stored = catalogs.load_catalog(self._state_dir, self._upstream.name) or _empty()
                 proxy = load_proxy(self._config_dir, self._upstream.name, self._name)
-                exposed = expose(stored, proxy)
-            except (catalogs.CatalogError, ConfigError, OverrideError) as exc:
-                log.warning("Proxy %s keeps its last exposed set", self._label, exc_info=True)
+                code = load_user_code(self._code_path, self._label)
+                exposed = expose(stored, proxy, code)
+            except (catalogs.CatalogError, ConfigError, OverrideError, UserCodeError) as exc:
+                log.warning(
+                    "Proxy %s is unhealthy and keeps its last exposed set: %s",
+                    self._label,
+                    exc,
+                    exc_info=True,
+                )
                 self.health, self.detail = "unhealthy", str(exc)
+                self.app.fail(str(exc))
                 return
-            self._stamp = stamp
             self.health, self.detail = "ok", None
             if server_name(self._upstream, self._name, exposed) == self.app.name:
                 self.app.serve(exposed)

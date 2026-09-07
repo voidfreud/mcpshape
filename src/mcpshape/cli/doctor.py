@@ -10,9 +10,17 @@ from rich.markup import escape
 
 from mcpshape import catalog, config
 from mcpshape.cli.common import client_profile, console, state, unscanned_note
+from mcpshape.hooks import UserCode, UserCodeError, load_user_code
 from mcpshape.names import InvalidNameError, check_name
 from mcpshape.profiles import Profile, entry_name
-from mcpshape.proxy import OverrideError, expose, orphaned_arguments, orphaned_overrides
+from mcpshape.proxy import (
+    Exposed,
+    OverrideError,
+    expose,
+    orphaned_arguments,
+    orphaned_hooks,
+    orphaned_overrides,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -40,38 +48,60 @@ def name_problems(config_dir: Path) -> list[config.Problem]:
 
 @dataclass(frozen=True)
 class Curation:
-    """One Proxy file next to the stored Catalog it curates."""
+    """One Proxy file next to the stored Catalog it curates, and its Python file if any."""
 
     path: Path
+    server: str
+    """The name a Client would file the Proxy under."""
     catalog: catalog.Catalog
     proxy: config.ProxyFile
+    code: UserCode
 
-    def expose(self) -> catalog.Catalog:
-        return expose(self.catalog, self.proxy).catalog
+    def expose(self) -> Exposed:
+        return expose(self.catalog, self.proxy, self.code)
 
 
-def curations(config_dir: Path, state_dir: Path) -> list[Curation]:
+def load_code(config_dir: Path, upstream: str, proxy: str) -> UserCode | config.Problem:
+    """Load the Proxy's Python file without starting anything, or say why it cannot be."""
+    path = config.proxy_code_file(config_dir, upstream, proxy)
+    try:
+        return load_user_code(path, f"{upstream}/{proxy}")
+    except UserCodeError as exc:
+        return config.Problem(path, "", str(exc))
+
+
+def curations(config_dir: Path, state_dir: Path) -> list[Curation | config.Problem]:
     """Every Proxy file with its Upstream's stored Catalog; unscanned Upstreams are skipped."""
-    found: list[Curation] = []
+    found: list[Curation | config.Problem] = []
     for upstream in config.load_upstreams(config_dir):
         stored = catalog.load_catalog(state_dir, upstream.name)
         if stored is None:
             continue
-        found += [
-            Curation(
-                config.proxy_file(config_dir, upstream.name, proxy),
-                stored,
-                config.load_proxy(config_dir, upstream.name, proxy),
+        for proxy in upstream.proxies:
+            code = load_code(config_dir, upstream.name, proxy)
+            if isinstance(code, config.Problem):
+                found.append(code)
+                continue
+            found.append(
+                Curation(
+                    config.proxy_file(config_dir, upstream.name, proxy),
+                    entry_name(upstream.name, proxy),
+                    stored,
+                    config.load_proxy(config_dir, upstream.name, proxy),
+                    code,
+                )
             )
-            for proxy in upstream.proxies
-        ]
     return found
 
 
 def override_problems(config_dir: Path, state_dir: Path) -> list[config.Problem]:
-    """Overrides that cannot be applied: the Proxy would keep its last exposed set."""
+    """What would leave a Proxy unhealthy: Overrides that cannot be applied, user code that
+    cannot be loaded, a Virtual Tool colliding with an exposed tool."""
     problems: list[config.Problem] = []
     for curation in curations(config_dir, state_dir):
+        if isinstance(curation, config.Problem):
+            problems.append(curation)
+            continue
         try:
             curation.expose()
         except OverrideError as exc:
@@ -83,6 +113,8 @@ def orphan_warnings(config_dir: Path, state_dir: Path) -> list[config.Problem]:
     """Overrides whose Catalog item or argument vanished: kept, but worth knowing about."""
     warnings: list[config.Problem] = []
     for curation in curations(config_dir, state_dir):
+        if isinstance(curation, config.Problem):
+            continue
         warnings.extend(
             config.Problem(
                 curation.path,
@@ -98,6 +130,14 @@ def orphan_warnings(config_dir: Path, state_dir: Path) -> list[config.Problem]:
                 f"orphaned argument Override: tool {tool} has no argument {argument!r}",
             )
             for tool, argument in orphaned_arguments(curation.catalog, curation.proxy)
+        )
+        warnings.extend(
+            config.Problem(
+                curation.path.with_suffix(".py"),
+                "",
+                f"orphaned Hook: no {item} in the Catalog, so it never runs",
+            )
+            for item in orphaned_hooks(curation.catalog, curation.code)
         )
     return warnings
 
@@ -115,16 +155,16 @@ class Review:
     warnings: list[config.Problem] = field(default_factory=list[config.Problem])
     notes: list[str] = field(default_factory=list[str])
 
-    def check_proxy(self, path: Path, server: str, exposed: catalog.Catalog) -> None:
+    def check_proxy(self, path: Path, server: str, exposed: Exposed) -> None:
         """Judge one Proxy's exposed tools by the Client's naming scheme and property rule."""
         refused = self.problems if self.client.scheme.overflow == "reject" else self.warnings
         refused.extend(
             config.Problem(path, "", broken)
-            for broken in self.client.name_violations(server, exposed.tools)
+            for broken in self.client.name_violations(server, exposed.tool_names())
         )
         if (properties := self.client.properties) is None:
             return
-        for tool, definition in exposed.tools.items():
+        for tool, definition in exposed.catalog.tools.items():
             self.problems.extend(
                 config.Problem(path, f"tools.{tool}", broken)
                 for name in sorted(catalog.arguments(definition))
@@ -141,21 +181,19 @@ def review(config_dir: Path, state_dir: Path, client: Profile) -> Review:
             f"characters for a tool description and {caps.instructions} for instructions "
             f"({caps.source}). Nothing applies them yet."
         )
-    for upstream in config.load_upstreams(config_dir):
-        stored = catalog.load_catalog(state_dir, upstream.name)
-        if stored is None:
-            found.notes.append(unscanned_note(upstream.name, client))
-            continue
-        for proxy in upstream.proxies:
-            try:
-                exposed = expose(stored, config.load_proxy(config_dir, upstream.name, proxy))
-            except OverrideError:
-                continue  # reported as a problem already
-            found.check_proxy(
-                config.proxy_file(config_dir, upstream.name, proxy),
-                entry_name(upstream.name, proxy),
-                exposed.catalog,
-            )
+    found.notes += [
+        unscanned_note(upstream.name, client)
+        for upstream in config.load_upstreams(config_dir)
+        if catalog.load_catalog(state_dir, upstream.name) is None
+    ]
+    for curation in curations(config_dir, state_dir):
+        if isinstance(curation, config.Problem):
+            continue  # reported as a problem already
+        try:
+            exposed = curation.expose()
+        except OverrideError:
+            continue  # reported as a problem already
+        found.check_proxy(curation.path, curation.server, exposed)
     return found
 
 
