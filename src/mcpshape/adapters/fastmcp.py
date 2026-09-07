@@ -440,8 +440,9 @@ class _CuratedPrompt(ProxyPrompt):
 class _VirtualTool(FunctionTool):
     """A Virtual Tool: the user's function, its schema from its signature, run in the chain.
 
-    Sync functions run inline on the Daemon's loop like every Hook; a blocking one is the
-    user's business, as the design brief says.
+    Its exposed name is its identity, so Hooks keyed by that name run around it like around
+    a Catalog tool. Sync functions run inline on the Daemon's loop like every Hook; a
+    blocking one is the user's business, as the design brief says.
     """
 
     _runtime: _Runtime = PrivateAttr()
@@ -456,18 +457,21 @@ class _VirtualTool(FunctionTool):
         return tool
 
     async def run(self, arguments: dict[str, Any]) -> ToolResult:
-        runtime = self._runtime
-        if runtime.failure is not None:
-            msg = f"Proxy {runtime.label} is unhealthy: {runtime.failure}"
-            raise ToolError(msg, log_level=logging.WARNING)
-        with hooks.bound(runtime.handle):
+        run_body = super().run
+
+        async def forward(call: Call) -> hooks.ToolResult:
             try:
-                return await super().run(arguments)
+                raw = await run_body(call.args)
             except FastMCPError:
                 raise
-            except Exception as exc:
+            except Exception:
                 log.warning("Virtual Tool %s raised", self.name, exc_info=True)
-                raise ToolError(str(exc) or type(exc).__name__, log_level=logging.WARNING) from exc
+                raise
+            return _tool_result_of(raw.content, raw.structured_content)
+
+        call = Call("tool", self.name, dict(arguments))
+        result = await self._runtime.run(call, forward, hooks.ToolResult.of, ToolError)
+        return _to_tool_result(result, self.output_schema)
 
     def convert_result(self, raw_value: Any) -> ToolResult:  # noqa: ANN401  # whatever the user returned
         if isinstance(raw_value, hooks.ToolResult):

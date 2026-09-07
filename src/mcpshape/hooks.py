@@ -23,11 +23,13 @@ A user drops ``<proxy>.py`` next to ``<proxy>.toml`` and writes::
         return "done"
 
 A ``before`` Hook may change ``call.args`` or return a result, which short-circuits the
-Upstream. An ``after`` Hook receives the result and returns the one to send. Raising anywhere
-becomes an error to the Client carrying the exception's message. ``upstream`` reaches the
-Proxy's own Upstream under Catalog names, and nothing else; what it calls does not run the
-Hooks. Hooks run in the Daemon process with no sandbox: a function that blocks forever or
-calls ``sys.exit`` is not guarded against.
+Upstream. An ``after`` Hook receives the result, short-circuited or not, and returns the one
+to send; an error the Upstream reports skips the ``after`` Hooks and reaches the Client as it
+is. Raising anywhere becomes an error to the Client carrying the exception's message. A
+Virtual Tool's exposed name is its identity, so Hooks keyed by it run around it too.
+``upstream`` reaches the Proxy's own Upstream under Catalog names, and nothing else; what it
+calls does not run the Hooks. Hooks run in the Daemon process with no sandbox: a function
+that blocks forever or calls ``sys.exit`` is not guarded against.
 
 Results are mcpshape's own small types over MCP's wire shapes, never FastMCP's (ADR 0001).
 The adapter converts at its edge. This module knows no FastMCP.
@@ -316,26 +318,31 @@ class VirtualTool:
     description: str | None = None
 
 
+Hooks = dict[Item, list[Callable[..., Any]]]
+"""Hooks by the item they are keyed on, in file order."""
+
+
+def _no_hooks() -> dict[When, Hooks]:
+    return {"before": {}, "after": {}}
+
+
 @dataclass
 class UserCode:
     """Everything one Proxy's Python file registered."""
 
-    before: dict[Item, list[Callable[..., Any]]] = field(
-        default_factory=dict[Item, list[Callable[..., Any]]]
-    )
-    after: dict[Item, list[Callable[..., Any]]] = field(
-        default_factory=dict[Item, list[Callable[..., Any]]]
-    )
+    registered: dict[When, Hooks] = field(default_factory=_no_hooks)
     tools: dict[str, VirtualTool] = field(default_factory=dict[str, VirtualTool])
     """Virtual Tools by exposed name, in file order."""
 
     def hooks(self, when: When, call: Call) -> list[Callable[..., Any]]:
-        registered = self.before if when == "before" else self.after
-        return registered.get(Item(call.kind, call.name), [])
+        return self.registered[when].get(Item(call.kind, call.name), [])
+
+    def add(self, when: When, item: Item, fn: Callable[..., Any]) -> None:
+        self.registered[when].setdefault(item, []).append(fn)
 
     def hooked(self) -> set[Item]:
         """Every item any Hook names."""
-        return set(self.before) | set(self.after)
+        return set(self.registered["before"]) | set(self.registered["after"])
 
 
 _loading: ContextVar[UserCode | None] = ContextVar("mcpshape_loading", default=None)
@@ -353,7 +360,7 @@ class _Registrar:
     """``hook.before`` or ``hook.after``: called for a tool, or ``.resource`` / ``.prompt``."""
 
     def __init__(self, when: When) -> None:
-        self._when = when
+        self._when: When = when
 
     def __call__(self, name: str) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
         return self.tool(name)
@@ -369,9 +376,7 @@ class _Registrar:
 
     def _register(self, item: Item) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
         def decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
-            code = _registry()
-            registered = code.before if self._when == "before" else code.after
-            registered.setdefault(item, []).append(fn)
+            _registry().add(self._when, item, fn)
             return fn
 
         return decorator

@@ -137,10 +137,11 @@ class _Proxy:
         name: str,
         connection: UpstreamConnection,
     ) -> None:
+        self._code_path = proxy_code_file(config_dir, upstream.name, name)
         self._sources = (
             catalogs.catalog_path(state_dir, upstream.name),
             proxy_file(config_dir, upstream.name, name),
-            proxy_code_file(config_dir, upstream.name, name),
+            self._code_path,
         )
         self._label = f"{upstream.name}/{name}"
         self._config_dir, self._state_dir, self._upstream, self._name = (
@@ -175,7 +176,7 @@ class _Proxy:
             try:
                 stored = catalogs.load_catalog(self._state_dir, self._upstream.name) or _empty()
                 proxy = load_proxy(self._config_dir, self._upstream.name, self._name)
-                code = load_user_code(self._sources[2], self._label)
+                code = load_user_code(self._code_path, self._label)
                 exposed = expose(stored, proxy, code)
             except (catalogs.CatalogError, ConfigError, OverrideError, UserCodeError) as exc:
                 log.warning(

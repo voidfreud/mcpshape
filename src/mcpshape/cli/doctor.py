@@ -51,6 +51,8 @@ class Curation:
     """One Proxy file next to the stored Catalog it curates, and its Python file if any."""
 
     path: Path
+    server: str
+    """The name a Client would file the Proxy under."""
     catalog: catalog.Catalog
     proxy: config.ProxyFile
     code: UserCode
@@ -83,6 +85,7 @@ def curations(config_dir: Path, state_dir: Path) -> list[Curation | config.Probl
             found.append(
                 Curation(
                     config.proxy_file(config_dir, upstream.name, proxy),
+                    entry_name(upstream.name, proxy),
                     stored,
                     config.load_proxy(config_dir, upstream.name, proxy),
                     code,
@@ -178,24 +181,19 @@ def review(config_dir: Path, state_dir: Path, client: Profile) -> Review:
             f"characters for a tool description and {caps.instructions} for instructions "
             f"({caps.source}). Nothing applies them yet."
         )
-    for upstream in config.load_upstreams(config_dir):
-        stored = catalog.load_catalog(state_dir, upstream.name)
-        if stored is None:
-            found.notes.append(unscanned_note(upstream.name, client))
-            continue
-        for proxy in upstream.proxies:
-            code = load_code(config_dir, upstream.name, proxy)
-            if isinstance(code, config.Problem):
-                continue  # reported as a problem already
-            try:
-                exposed = expose(stored, config.load_proxy(config_dir, upstream.name, proxy), code)
-            except OverrideError:
-                continue  # reported as a problem already
-            found.check_proxy(
-                config.proxy_file(config_dir, upstream.name, proxy),
-                entry_name(upstream.name, proxy),
-                exposed,
-            )
+    found.notes += [
+        unscanned_note(upstream.name, client)
+        for upstream in config.load_upstreams(config_dir)
+        if catalog.load_catalog(state_dir, upstream.name) is None
+    ]
+    for curation in curations(config_dir, state_dir):
+        if isinstance(curation, config.Problem):
+            continue  # reported as a problem already
+        try:
+            exposed = curation.expose()
+        except OverrideError:
+            continue  # reported as a problem already
+        found.check_proxy(curation.path, curation.server, exposed)
     return found
 
 

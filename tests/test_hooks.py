@@ -443,6 +443,35 @@ async def test_the_upstream_handle_reads_gets_and_returns_upstream_results(
     assert passed.structured_content == {"result": "created T ['v']"}
 
 
+async def test_hooks_keyed_by_a_virtual_tools_name_run_around_it(config_dir: ConfigDir) -> None:
+    server, received = tracker()
+    await synced(config_dir, server)
+    user_code(
+        config_dir,
+        """
+        @tool
+        async def close_one(id: int) -> str:
+            \"\"\"Close one issue.\"\"\"
+            await upstream.call("close_issue", id=id)
+            return f"closed #{id}"
+
+        @hook.before("close_one")
+        def bump(call):
+            call.args["id"] += 1
+
+        @hook.after("close_one")
+        def sign(call, result):
+            return result.text + " by proxy"
+        """,
+    )
+
+    async with running_daemon(config_dir) as daemon, daemon.client("/issues/mcp") as client:
+        result = await client.call_tool("close_one", {"id": 1})
+
+    assert received == [("close_issue", {"id": 2})]
+    assert result.data == "closed #2 by proxy"
+
+
 async def test_a_virtual_tool_that_raises_answers_a_tool_error_carrying_its_message(
     config_dir: ConfigDir,
 ) -> None:
