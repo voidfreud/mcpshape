@@ -1,8 +1,9 @@
 """The FastMCP adapter: the only module that imports FastMCP (ADR 0001).
 
-The rest of mcpshape sees two things: ``scan``, which turns an Upstream into a Catalog, and
+The rest of mcpshape sees three things: ``scan``, which turns an Upstream into a Catalog,
 ``proxy_app``, an ASGI app per Proxy that serves lists from what it is handed and forwards
-calls to the Upstream under Catalog names.
+calls to the Upstream under Catalog names, and ``run_stdio_bridge``, the stdio shim's other
+half.
 
 FastMCP's proxy components keep the backend name when they are copied under a new one, which
 is how a renamed tool, resource, or prompt still reaches its Catalog item. The server name is
@@ -20,6 +21,8 @@ from typing import TYPE_CHECKING, Any, cast
 
 import mcp_types
 from fastmcp import Client, FastMCP
+from fastmcp.client.transports import StreamableHttpTransport
+from fastmcp.server import create_proxy
 from fastmcp.server.providers.base import Provider
 from fastmcp.server.providers.proxy import (
     ProxyClient,
@@ -115,6 +118,16 @@ async def scan(transport: Transport) -> Catalog:
         resource_templates={template.uri_template: _raw(template) for template in templates},
         prompts={prompt.name: _raw(prompt) for prompt in prompts},
     )
+
+
+def run_stdio_bridge(url: str) -> None:
+    """Speak MCP over stdio and forward every request to the Proxy served at ``url``.
+
+    The other half of the hidden ``serve`` command, for the Clients that accept stdio only.
+    Runs until the Client closes the pipe. stdout carries the protocol, so the banner FastMCP
+    would otherwise print is off.
+    """
+    create_proxy(StreamableHttpTransport(url)).run(transport="stdio", show_banner=False)
 
 
 async def _listed[T](method: Callable[[], Awaitable[Sequence[T]]]) -> Sequence[T]:

@@ -52,6 +52,22 @@ async def test_create_proxy_forwards_tools_of_an_in_memory_server() -> None:
         assert (await client.call_tool("echo", {"text": "hi"})).data == "hi"
 
 
+async def test_create_proxy_forwards_to_a_streamable_http_backend() -> None:
+    """What the stdio shim is: a proxy whose backend is a Proxy reached over Streamable HTTP."""
+    served = echo_server().http_app(path="/mcp")
+    bridge = create_proxy(
+        StreamableHttpTransport(
+            "http://contract/mcp",
+            httpx_client_factory=asgi_client_factory(served, "http://contract"),
+        ),
+        name="bridge",
+    )
+
+    async with served.router.lifespan_context(served), Client(bridge) as client:
+        assert [tool.name for tool in await client.list_tools()] == ["echo"]
+        assert (await client.call_tool("echo", {"text": "hi"})).data == "hi"
+
+
 async def test_http_app_serves_mcp_under_a_starlette_mount_with_its_own_lifespan() -> None:
     proxy_app = create_proxy(echo_server(), name="proxy").http_app(path="/mcp")
     root = Starlette(routes=[Mount("/nested", app=proxy_app)])

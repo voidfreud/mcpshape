@@ -1,4 +1,4 @@
-"""``mcpshape upstream``: add, ls, show, sync, rm."""
+"""``mcpshape upstream``: add, ls, show, sync, rm, scan."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ import typer
 
 from mcpshape import catalog, config
 from mcpshape.adapters.fastmcp import UpstreamTargetError, scan
+from mcpshape.cli import scan as scanning
 from mcpshape.cli.common import (
     HELP_OPTIONS,
     confirm_or_abort,
@@ -234,3 +235,6 @@ def rm(ctx: typer.Context, name: NameArg, *, yes: YesOpt = False) -> None:
         config.remove_upstream(config_dir, name)
         catalog.forget(state_dir, name)
     console.print(f"Removed Upstream [bold]{name}[/bold]")
+
+
+app.command("scan", epilog=scanning.EPILOG)(scanning.scan)
