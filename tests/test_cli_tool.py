@@ -176,12 +176,38 @@ def test_trim_needs_the_tool_in_the_catalog(config_dir: ConfigDir) -> None:
     assert "nope" in result.output
 
 
-def test_cap_is_not_available_yet(config_dir: ConfigDir) -> None:
+def test_cap_writes_the_tool_cap_overrides_it_is_given(config_dir: ConfigDir) -> None:
     scanned(config_dir)
 
     result = run_cli(
-        config_dir, "tool", "cap", "issues/default", "create_issue", "--description", "80"
+        config_dir,
+        "tool",
+        "cap",
+        "issues/default",
+        "create_issue",
+        "--description",
+        "80",
+        "--name",
+        "20",
+        "--argument-description",
+        "30",
+        "--output",
+        "500",
     )
 
+    assert result.exit_code == 0, result.output
+    text = proxy_file(config_dir).read_text()
+    assert "[tools.create_issue.caps]\n" in text
+    assert "description = 80\n" in text
+    assert "name = 20\n" in text
+    assert "argument_description = 30\n" in text
+    assert "output = 500\n" in text
+
+
+def test_cap_needs_at_least_one_value(config_dir: ConfigDir) -> None:
+    scanned(config_dir)
+
+    result = run_cli(config_dir, "tool", "cap", "issues/default", "create_issue")
+
     assert result.exit_code == 1
-    assert "not available" in result.output
+    assert "at least one" in result.output

@@ -54,7 +54,7 @@ from mcpshape.catalog import Catalog, Item
 from mcpshape.connection import Connection, UpstreamUnavailableError
 from mcpshape.hooks import Call, UpstreamError, UserCode
 from mcpshape.model import MemoryTransport
-from mcpshape.proxy import ArgumentMap, Exposed
+from mcpshape.proxy import ArgumentMap, Exposed, cut_output
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Awaitable, Callable, Sequence
@@ -318,6 +318,7 @@ class _Runtime:
         forward: Callable[[Call], Awaitable[R]],
         of: Callable[[object], R],
         error: type[FastMCPError],
+        cap: Callable[[R], R] | None = None,
     ) -> R:
         """``call`` through the Hooks, with user failures turned into ``error`` for the Client."""
         if self.failure is not None:
@@ -325,11 +326,25 @@ class _Runtime:
             raise error(msg, log_level=logging.WARNING)
         with hooks.bound(self.handle):
             try:
-                return await hooks.run_call(self.code, call, forward, of)
+                return await hooks.run_call(self.code, call, forward, of, cap)
             except FastMCPError:
                 raise
             except Exception as exc:
                 raise error(str(exc) or type(exc).__name__, log_level=logging.WARNING) from exc
+
+
+def _capped_output(limit: int | None) -> Callable[[hooks.ToolResult], hooks.ToolResult] | None:
+    """What ``_Runtime.run`` cuts a tool's answer with, or ``None`` before a Cap is known."""
+    if limit is None:
+        return None
+
+    def apply(result: hooks.ToolResult) -> hooks.ToolResult:
+        cut = cut_output(result.text, limit)
+        if cut != result.text:
+            result.text = cut
+        return result
+
+    return apply
 
 
 class _CuratedTool(ProxyTool):
@@ -338,9 +353,13 @@ class _CuratedTool(ProxyTool):
     _arguments: ArgumentMap = PrivateAttr(default_factory=ArgumentMap)
     _runtime: _Runtime = PrivateAttr()
     _origin: str = PrivateAttr(default="")
+    _output_cap: int | None = PrivateAttr(default=None)
 
-    def curate(self, runtime: _Runtime, origin: str, arguments: ArgumentMap) -> None:
+    def curate(
+        self, runtime: _Runtime, origin: str, arguments: ArgumentMap, output_cap: int | None = None
+    ) -> None:
         self._runtime, self._origin, self._arguments = runtime, origin, arguments
+        self._output_cap = output_cap
 
     async def run(self, arguments: dict[str, Any], context: Context | None = None) -> ToolResult:
         run_upstream = super().run
@@ -353,7 +372,9 @@ class _CuratedTool(ProxyTool):
             return result
 
         call = Call("tool", self._origin, self._arguments.to_catalog(arguments))
-        result = await self._runtime.run(call, forward, hooks.ToolResult.of, ToolError)
+        result = await self._runtime.run(
+            call, forward, hooks.ToolResult.of, ToolError, _capped_output(self._output_cap)
+        )
         return _to_tool_result(result, self.output_schema)
 
 
@@ -446,14 +467,18 @@ class _VirtualTool(FunctionTool):
     """
 
     _runtime: _Runtime = PrivateAttr()
+    _output_cap: int | None = PrivateAttr(default=None)
 
     @classmethod
-    def build(cls, runtime: _Runtime, virtual: VirtualTool) -> _VirtualTool:
+    def build(
+        cls, runtime: _Runtime, virtual: VirtualTool, output_cap: int | None = None
+    ) -> _VirtualTool:
         built = cls.from_function(
             virtual.fn, name=virtual.name, description=virtual.description, run_in_thread=False
         )
         tool = cast("_VirtualTool", built)
         tool._runtime = runtime  # noqa: SLF001  # our own private attribute
+        tool._output_cap = output_cap  # noqa: SLF001  # our own private attribute
         return tool
 
     async def run(self, arguments: dict[str, Any]) -> ToolResult:
@@ -470,7 +495,9 @@ class _VirtualTool(FunctionTool):
             return _tool_result_of(raw.content, raw.structured_content)
 
         call = Call("tool", self.name, dict(arguments))
-        result = await self._runtime.run(call, forward, hooks.ToolResult.of, ToolError)
+        result = await self._runtime.run(
+            call, forward, hooks.ToolResult.of, ToolError, _capped_output(self._output_cap)
+        )
         return _to_tool_result(result, self.output_schema)
 
     def convert_result(self, raw_value: Any) -> ToolResult:  # noqa: ANN401  # whatever the user returned
@@ -594,7 +621,8 @@ class _CatalogProvider(Provider):
         catalog = exposed.catalog
         self._tools = [self._tool(exposed, name, raw) for name, raw in catalog.tools.items()]
         self._tools += [
-            _VirtualTool.build(self._runtime, virtual) for virtual in exposed.code.tools.values()
+            _VirtualTool.build(self._runtime, virtual, exposed.output_caps.get(virtual.name))
+            for virtual in exposed.code.tools.values()
         ]
         self._resources = [
             self._resource(exposed, uri, raw) for uri, raw in catalog.resources.items()
@@ -611,7 +639,12 @@ class _CatalogProvider(Provider):
             self._client_factory, mcp_types.Tool.model_validate({**raw, "name": origin})
         )
         tool = _renamed(cast("_CuratedTool", built), origin, name, "name", name)
-        tool.curate(self._runtime, origin, exposed.arguments.get(name, ArgumentMap()))
+        tool.curate(
+            self._runtime,
+            origin,
+            exposed.arguments.get(name, ArgumentMap()),
+            exposed.output_caps.get(name),
+        )
         return tool
 
     def _resource(self, exposed: Exposed, uri: str, raw: dict[str, Any]) -> Resource:

@@ -127,6 +127,84 @@
       "title": "ArgumentOverride",
       "type": "object"
     },
+    "CapOverrides": {
+      "additionalProperties": false,
+      "description": "One Upstream's or one Proxy's Caps: unset keeps what it inherits, set only ever lowers\nit.",
+      "properties": {
+        "tool_name": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Ceiling on an exposed tool name, in characters.",
+          "title": "Tool Name"
+        },
+        "tool_description": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Ceiling on an exposed tool description, in characters.",
+          "title": "Tool Description"
+        },
+        "argument_description": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Ceiling on an exposed argument description, in characters.",
+          "title": "Argument Description"
+        },
+        "instructions": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Ceiling on the Proxy's exposed instructions, in characters.",
+          "title": "Instructions"
+        },
+        "tool_output": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Ceiling on a tool call's answer, in characters.",
+          "title": "Tool Output"
+        }
+      },
+      "title": "CapOverrides",
+      "type": "object"
+    },
     "PromptOverride": {
       "additionalProperties": false,
       "description": "How one prompt is presented, keyed by its Catalog name.",
@@ -220,6 +298,70 @@
       "title": "ResourceOverride",
       "type": "object"
     },
+    "ToolCapOverrides": {
+      "additionalProperties": false,
+      "description": "One tool's Caps: name, description, argument description, and output. A tool has no\ninstructions of its own, so there is no Cap for that kind at this level.",
+      "properties": {
+        "name": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Ceiling on an exposed tool name, in characters.",
+          "title": "Name"
+        },
+        "description": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Ceiling on an exposed tool description, in characters.",
+          "title": "Description"
+        },
+        "argument_description": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Ceiling on an exposed argument description, in characters.",
+          "title": "Argument Description"
+        },
+        "output": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Ceiling on a tool call's answer, in characters.",
+          "title": "Output"
+        }
+      },
+      "title": "ToolCapOverrides",
+      "type": "object"
+    },
     "ToolOverride": {
       "additionalProperties": false,
       "description": "How one tool is presented, keyed by its Catalog name.",
@@ -288,6 +430,10 @@
           "description": "Argument Overrides by Catalog argument name.",
           "title": "Args",
           "type": "object"
+        },
+        "caps": {
+          "$ref": "#/$defs/ToolCapOverrides",
+          "description": "This tool's Caps, over what it inherits from the Proxy."
         }
       },
       "title": "ToolOverride",
@@ -328,6 +474,10 @@
       "default": null,
       "description": "Replaces the Upstream's instructions.",
       "title": "Instructions"
+    },
+    "caps": {
+      "$ref": "#/$defs/CapOverrides",
+      "description": "This Proxy's Caps, over what it inherits from the Upstream."
     },
     "tools": {
       "additionalProperties": {

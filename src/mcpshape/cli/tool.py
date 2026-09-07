@@ -155,13 +155,51 @@ def trim(ctx: typer.Context, ref: RefArg, tool: ToolArg) -> None:
 
 
 @app.command("cap", epilog=example("tool cap github/default create_issue --description 200"))
-def cap(
-    ctx: typer.Context,  # noqa: ARG001  # the signature of the command to come
+def cap(  # noqa: PLR0913  # every one of these is a documented option of the command
+    ctx: typer.Context,
     ref: RefArg,
     tool: ToolArg,
+    *,
+    name: Annotated[
+        int | None,
+        typer.Option("--name", metavar="CHARS", show_default=False, min=1, help="Exposed name."),
+    ] = None,
     description: Annotated[
-        int | None, typer.Option("--description", metavar="CHARS", show_default=False)
+        int | None,
+        typer.Option(
+            "--description", metavar="CHARS", show_default=False, min=1, help="Description."
+        ),
+    ] = None,
+    argument_description: Annotated[
+        int | None,
+        typer.Option(
+            "--argument-description",
+            metavar="CHARS",
+            show_default=False,
+            min=1,
+            help="Every argument's description.",
+        ),
+    ] = None,
+    output: Annotated[
+        int | None,
+        typer.Option(
+            "--output", metavar="CHARS", show_default=False, min=1, help="What a call answers."
+        ),
     ] = None,
 ) -> None:
-    """Lower the Caps one tool inherits."""
-    fail(f"tool cap is not available in this version (asked for {ref} {tool} {description})")
+    """Lower the Caps one tool inherits: name, description, argument description, output."""
+    given = {
+        "name": name,
+        "description": description,
+        "argument_description": argument_description,
+        "output": output,
+    }
+    changed = {key: value for key, value in given.items() if value is not None}
+    if not changed:
+        fail("give at least one of --name, --description, --argument-description, --output")
+    with reporting_errors():
+        path = target_file(ctx, ref, Target(tool))
+        for key, value in changed.items():
+            config.set_tool_cap(path, tool, key, value)
+    written = ", ".join(f"{key} = {value}" for key, value in changed.items())
+    console.print(f"Set [bold]{written}[/bold] on {tool}'s Caps in {path}")

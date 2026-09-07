@@ -3,6 +3,84 @@
   "$id": "https://raw.githubusercontent.com/voidfreud/mcpshape/main/src/mcpshape/schemas/upstream.schema.json",
   "title": "mcpshape upstream file",
   "$defs": {
+    "CapOverrides": {
+      "additionalProperties": false,
+      "description": "One Upstream's or one Proxy's Caps: unset keeps what it inherits, set only ever lowers\nit.",
+      "properties": {
+        "tool_name": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Ceiling on an exposed tool name, in characters.",
+          "title": "Tool Name"
+        },
+        "tool_description": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Ceiling on an exposed tool description, in characters.",
+          "title": "Tool Description"
+        },
+        "argument_description": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Ceiling on an exposed argument description, in characters.",
+          "title": "Argument Description"
+        },
+        "instructions": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Ceiling on the Proxy's exposed instructions, in characters.",
+          "title": "Instructions"
+        },
+        "tool_output": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Ceiling on a tool call's answer, in characters.",
+          "title": "Tool Output"
+        }
+      },
+      "title": "CapOverrides",
+      "type": "object"
+    },
     "HttpUpstreamFile": {
       "additionalProperties": false,
       "properties": {
@@ -24,6 +102,10 @@
         "lifecycle": {
           "$ref": "#/$defs/LifecycleOverrides",
           "description": "This Upstream's lifecycle settings, over the defaults in config.toml."
+        },
+        "caps": {
+          "$ref": "#/$defs/CapOverrides",
+          "description": "This Upstream's Caps, over the global master Caps in config.toml."
         }
       },
       "required": [
@@ -133,6 +215,10 @@
         "lifecycle": {
           "$ref": "#/$defs/LifecycleOverrides",
           "description": "This Upstream's lifecycle settings, over the defaults in config.toml."
+        },
+        "caps": {
+          "$ref": "#/$defs/CapOverrides",
+          "description": "This Upstream's Caps, over the global master Caps in config.toml."
         }
       },
       "required": [
@@ -164,6 +250,10 @@
         "lifecycle": {
           "$ref": "#/$defs/LifecycleOverrides",
           "description": "This Upstream's lifecycle settings, over the defaults in config.toml."
+        },
+        "caps": {
+          "$ref": "#/$defs/CapOverrides",
+          "description": "This Upstream's Caps, over the global master Caps in config.toml."
         }
       },
       "required": [
@@ -202,6 +292,10 @@
         "lifecycle": {
           "$ref": "#/$defs/LifecycleOverrides",
           "description": "This Upstream's lifecycle settings, over the defaults in config.toml."
+        },
+        "caps": {
+          "$ref": "#/$defs/CapOverrides",
+          "description": "This Upstream's Caps, over the global master Caps in config.toml."
         }
       },
       "required": [

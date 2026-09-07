@@ -475,12 +475,15 @@ async def run_call[R](
     call: Call,
     forward: Callable[[Call], Awaitable[R]],
     of: Callable[[object], R],
+    cap: Callable[[R], R] | None = None,
 ) -> R:
-    """Run ``call`` through its Hooks: before, the Upstream unless short-circuited, after.
+    """Run ``call`` through its Hooks: before, the Upstream unless short-circuited, after, Cap.
 
     ``forward`` reaches the Upstream with the arguments as the ``before`` Hooks left them;
-    ``of`` turns whatever a Hook returns into the result type. A Hook that raises is logged
-    and its exception re-raised for the adapter to turn into the Client's error.
+    ``of`` turns whatever a Hook returns into the result type. ``cap`` is where the tool output
+    Cap slots in: it runs last, on whatever the Hooks leave, short-circuited or not, so what a
+    Client receives never exceeds it either way. A Hook that raises is logged and its exception
+    re-raised for the adapter to turn into the Client's error.
     """
     result: R | None = None
     for fn in code.hooks("before", call):
@@ -494,7 +497,7 @@ async def run_call[R](
         answer = await _invoke(fn, call, call, result)
         if answer is not None:
             result = of(answer)
-    return result
+    return cap(result) if cap is not None else result
 
 
 async def _invoke(fn: Callable[..., Any], call: Call, *args: object) -> object:

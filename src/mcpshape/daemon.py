@@ -41,8 +41,8 @@ from mcpshape.config import (
     proxy_file,
 )
 from mcpshape.hooks import UserCodeError, load_user_code
-from mcpshape.model import DEFAULT_PROXY_NAME
-from mcpshape.proxy import Exposed, OverrideError, expose
+from mcpshape.model import DEFAULT_PROXY_NAME, CapError, CapSettings
+from mcpshape.proxy import Exposed, OverrideError, cap, expose
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Awaitable, Callable
@@ -129,13 +129,14 @@ class _Proxy:
     and every call errors naming the Proxy and the reason, and nothing reaches the Upstream.
     """
 
-    def __init__(
+    def __init__(  # noqa: PLR0913, PLR0917  # every one of these is state the Proxy needs
         self,
         config_dir: Path,
         state_dir: Path,
         upstream: Upstream,
         name: str,
         connection: UpstreamConnection,
+        global_caps: CapSettings,
     ) -> None:
         self._code_path = proxy_code_file(config_dir, upstream.name, name)
         self._sources = (
@@ -150,6 +151,7 @@ class _Proxy:
             upstream,
             name,
         )
+        self._global_caps = global_caps
         self._stamp: tuple[tuple[int, int] | None, ...] | None = None
         self._connection = connection
         self._lock = asyncio.Lock()
@@ -177,8 +179,18 @@ class _Proxy:
                 stored = catalogs.load_catalog(self._state_dir, self._upstream.name) or _empty()
                 proxy = load_proxy(self._config_dir, self._upstream.name, self._name)
                 code = load_user_code(self._code_path, self._label)
-                exposed = expose(stored, proxy, code)
-            except (catalogs.CatalogError, ConfigError, OverrideError, UserCodeError) as exc:
+                upstream_caps = self._upstream.caps.over(
+                    self._global_caps, f"Upstream {self._upstream.name}"
+                )
+                proxy_caps = proxy.caps.over(upstream_caps, f"Proxy {self._label}")
+                exposed = cap(expose(stored, proxy, code), proxy_caps, proxy)
+            except (
+                catalogs.CatalogError,
+                ConfigError,
+                OverrideError,
+                UserCodeError,
+                CapError,
+            ) as exc:
                 log.warning(
                     "Proxy %s is unhealthy and keeps its last exposed set: %s",
                     self._label,
@@ -250,6 +262,7 @@ def build_app(config_dir: Path, state_dir: Path, clock: Clock | None = None) -> 
     timer runs on, so tests advance time instead of waiting for it.
     """
     upstreams = load_upstreams(config_dir)
+    global_caps = load_settings(config_dir).caps
     connections = {
         upstream.name: UpstreamConnection(
             upstream, clock, on_reconnect=partial(rescan, state_dir, upstream)
@@ -258,7 +271,7 @@ def build_app(config_dir: Path, state_dir: Path, clock: Clock | None = None) -> 
     }
     proxies = {
         (upstream.name, proxy_name): _Proxy(
-            config_dir, state_dir, upstream, proxy_name, connections[upstream.name]
+            config_dir, state_dir, upstream, proxy_name, connections[upstream.name], global_caps
         )
         for upstream in upstreams
         for proxy_name in upstream.proxies

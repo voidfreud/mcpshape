@@ -11,6 +11,7 @@ from rich.console import Console
 
 from mcpshape.catalog import CatalogError, pending_drift
 from mcpshape.config import ConfigError
+from mcpshape.model import CapError
 from mcpshape.names import InvalidNameError
 from mcpshape.profiles import Profile, UnknownClientError, profile
 from mcpshape.proxy import OverrideError
@@ -57,10 +58,10 @@ def fail(message: str) -> NoReturn:
 
 @contextlib.contextmanager
 def reporting_errors() -> Generator[None]:
-    """Turn config, Catalog, Override, and name errors into one red line and exit code 1."""
+    """Turn config, Catalog, Override, Cap, and name errors into one red line and exit code 1."""
     try:
         yield
-    except (ConfigError, CatalogError, InvalidNameError, OverrideError) as exc:
+    except (ConfigError, CatalogError, InvalidNameError, OverrideError, CapError) as exc:
         fail(str(exc))
 
 

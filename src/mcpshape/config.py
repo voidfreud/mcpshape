@@ -15,12 +15,15 @@ from tomlkit.exceptions import TOMLKitError
 
 from mcpshape.model import (
     DEFAULT_PROXY_NAME,
+    CapOverrides,
+    CapSettings,
     HttpTransport,
     LifecycleOverrides,
     LifecycleSettings,
     MemoryTransport,
     SseTransport,
     StdioTransport,
+    ToolCapOverrides,
     Transport,
     Upstream,
 )
@@ -70,6 +73,13 @@ class SettingsFile(_File):
     lifecycle: LifecycleSettings = Field(
         default_factory=LifecycleSettings,
         description="Defaults for every Upstream connection; an Upstream file may override.",
+    )
+    caps: CapSettings = Field(
+        default_factory=CapSettings,
+        description=(
+            "The global master Cap per kind. An Upstream, a Proxy, or a tool may only lower "
+            "what it inherits."
+        ),
     )
 
 
@@ -149,6 +159,10 @@ class ToolOverride(_Override):
     args: dict[str, ArgumentOverride] = Field(
         default_factory=dict, description="Argument Overrides by Catalog argument name."
     )
+    caps: ToolCapOverrides = Field(
+        default_factory=ToolCapOverrides,
+        description="This tool's Caps, over what it inherits from the Proxy.",
+    )
 
 
 class ResourceOverride(_Override):
@@ -183,6 +197,10 @@ class ProxyFile(_File):
     instructions: str | None = Field(
         default=None, description="Replaces the Upstream's instructions."
     )
+    caps: CapOverrides = Field(
+        default_factory=CapOverrides,
+        description="This Proxy's Caps, over what it inherits from the Upstream.",
+    )
     tools: dict[str, ToolOverride] = Field(
         default_factory=dict, description="Overrides by tool name."
     )
@@ -212,6 +230,10 @@ class _UpstreamFile(_File):
     lifecycle: LifecycleOverrides = Field(
         default_factory=LifecycleOverrides,
         description="This Upstream's lifecycle settings, over the defaults in config.toml.",
+    )
+    caps: CapOverrides = Field(
+        default_factory=CapOverrides,
+        description="This Upstream's Caps, over the global master Caps in config.toml.",
     )
 
 
@@ -361,6 +383,7 @@ def load_upstream(
         transport=cast("Transport", file),
         proxies=list_proxies(config_dir, name),
         lifecycle=file.lifecycle.over(defaults),
+        caps=file.caps,
     )
 
 
@@ -471,6 +494,11 @@ def set_override(path: Path, item: Item, key: str, value: object, note: str = ""
 def set_argument_override(path: Path, tool: str, argument: str, key: str, value: object) -> None:
     """Write ``key = value`` on the Override for ``argument`` of ``tool``."""
     _set_key(path, ("tools", tool, "args", argument), key, value, "")
+
+
+def set_tool_cap(path: Path, tool: str, key: str, value: object) -> None:
+    """Write ``key = value`` on the Cap Overrides for ``tool``."""
+    _set_key(path, ("tools", tool, "caps"), key, value, "")
 
 
 def _set_key(path: Path, keys: tuple[str, ...], key: str, value: object, note: str) -> None:
