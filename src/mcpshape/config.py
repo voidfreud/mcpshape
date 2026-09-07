@@ -107,7 +107,9 @@ class ArgumentOverride(_Override):
             "Required for a hidden argument the Upstream requires."
         ),
     )
-    required: bool | None = Field(default=None, description="Whether the Client must give it.")
+    required: bool | None = Field(
+        default=None, description="Whether the Client must give it. Moot for a hidden argument."
+    )
 
 
 class Annotations(BaseModel):
@@ -153,7 +155,6 @@ class ResourceOverride(_Override):
         ),
     )
     name: str | None = Field(default=None, description="Replaces the display name.")
-    title: str | None = Field(default=None, description="Replaces the title.")
     description: str | None = Field(default=None, description="Replaces the description.")
 
 
@@ -161,7 +162,6 @@ class PromptOverride(_Override):
     """How one prompt is presented, keyed by its Catalog name."""
 
     name: str | None = Field(default=None, description="Exposed prompt name.")
-    title: str | None = Field(default=None, description="Replaces the title.")
     description: str | None = Field(default=None, description="Replaces the description.")
 
 

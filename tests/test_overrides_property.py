@@ -4,7 +4,8 @@ At the proxy module on purpose (see CLAUDE.md): the property is about the pure a
 and driving thousands of generated Catalogs through in-memory Upstreams would prove nothing
 more. Whatever the Overrides say, an exposed set has unique names per kind, maps every exposed
 item back to exactly one Catalog item, never changes a schema type, and only refuses for the
-two reasons it may: a name collision, or a hidden argument nothing would supply.
+three reasons it may: a name collision, a hidden argument nothing would supply, or a resource
+template exposed with other parameters than it takes.
 """
 
 from __future__ import annotations
@@ -96,7 +97,11 @@ def proxy_files(draw: st.DrawFn, catalog: Catalog) -> ProxyFile:
         if draw(st.booleans())
     } | {
         uri: {
-            "uri": draw(st.none() | names.map(lambda n: f"t://{n}/{{id}}")),
+            "uri": draw(
+                st.none()
+                | names.map(lambda n: f"t://{n}/{{id}}")
+                | names.map(lambda n: f"t://{{{n}}}")
+            ),
             "hidden": draw(st.booleans()),
         }
         for uri in keys["resource_template"]
@@ -123,7 +128,8 @@ def test_exposed_names_are_unique_and_map_back_to_every_visible_catalog_item(
     catalog, proxy = case
     exposed = _exposed_or_reason(catalog, proxy)
     if isinstance(exposed, str):
-        assert "would both be exposed as" in exposed or "needs a default" in exposed
+        reasons = ("would both be exposed as", "needs a default", "the parameters must stay")
+        assert any(reason in exposed for reason in reasons)
         return
 
     for kind in KINDS:

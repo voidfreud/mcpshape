@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime  # noqa: TC003  # pydantic resolves annotations at runtime
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -57,6 +57,15 @@ class Catalog(BaseModel):
                 return self.resource_templates
             case "prompt":
                 return self.prompts
+
+
+def arguments(definition: dict[str, Any]) -> dict[str, Any]:
+    """The input-schema properties of one raw MCP tool definition, by argument name."""
+    schema: object = definition.get("inputSchema")
+    if not isinstance(schema, dict):
+        return {}
+    properties: object = cast("dict[str, Any]", schema).get("properties")
+    return cast("dict[str, Any]", properties) if isinstance(properties, dict) else {}
 
 
 @dataclass(frozen=True, order=True)

@@ -12,8 +12,9 @@ from __future__ import annotations
 import copy
 import re
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
+from mcpshape import catalog as catalogs
 from mcpshape.catalog import KINDS, Item
 from mcpshape.config import ArgumentOverride, PromptOverride, ResourceOverride, ToolOverride
 
@@ -105,12 +106,13 @@ def _curate(
     override: ItemOverride | None,
     arguments: dict[str, ArgumentMap],
 ) -> str:
-    """Rewrite ``definition`` in place per ``override`` and return the exposed name."""
+    """Apply ``override`` to ``definition`` in place and return the exposed name."""
     if override is None:
         return name
-    _replace(definition, override, "title", "description")
+    _replace(definition, override, "description")
     match override:
         case ToolOverride():
+            _replace(definition, override, "title")
             _set_annotations(definition, override)
             argument_map = _curate_arguments(name, definition, override)
             exposed_name = override.name or name
@@ -234,13 +236,5 @@ def orphaned_arguments(catalog: Catalog, proxy: ProxyFile) -> list[tuple[str, st
         for tool, override in proxy.tools.items()
         if tool in catalog.tools
         for argument in override.args
-        if argument not in _properties(catalog.tools[tool])
+        if argument not in catalogs.arguments(catalog.tools[tool])
     ]
-
-
-def _properties(definition: dict[str, Any]) -> dict[str, Any]:
-    schema: object = definition.get("inputSchema")
-    if not isinstance(schema, dict):
-        return {}
-    properties: object = cast("dict[str, Any]", schema).get("properties")
-    return cast("dict[str, Any]", properties) if isinstance(properties, dict) else {}

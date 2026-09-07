@@ -8,7 +8,7 @@ editing the Proxy file. The Daemon does not need to be up.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Annotated, Any, cast
+from typing import TYPE_CHECKING, Annotated
 
 import click
 import typer
@@ -73,7 +73,7 @@ def target_file(ctx: typer.Context, ref: str, target: Target) -> Path:
                 f"[yellow]![/] No tool {target.tool!r} in the Catalog of {upstream}; the "
                 "Override is written anyway and applies if the tool appears"
             )
-        elif target.argument is not None and target.argument not in _arguments(
+        elif target.argument is not None and target.argument not in catalog.arguments(
             stored.tools[target.tool]
         ):
             console.print(
@@ -81,14 +81,6 @@ def target_file(ctx: typer.Context, ref: str, target: Target) -> Path:
                 "Catalog; the Override is written anyway and applies if the argument appears"
             )
     return config.proxy_file(config_dir, upstream, proxy)
-
-
-def _arguments(definition: dict[str, Any]) -> list[str]:
-    schema: object = definition.get("inputSchema")
-    if not isinstance(schema, dict):
-        return []
-    properties: object = cast("dict[str, Any]", schema).get("properties")
-    return list(cast("dict[str, Any]", properties)) if isinstance(properties, dict) else []
 
 
 def write(ctx: typer.Context, ref: str, target: Target, key: str, value: object) -> None:

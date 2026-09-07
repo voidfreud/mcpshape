@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Annotated, Any, cast
+from typing import TYPE_CHECKING, Annotated
 
 import typer
 from rich.markup import escape
@@ -38,17 +38,27 @@ def name_problems(config_dir: Path) -> list[config.Problem]:
     return problems
 
 
-def proxy_files(
-    config_dir: Path, state_dir: Path
-) -> list[tuple[Path, catalog.Catalog, config.ProxyFile]]:
-    """Every Proxy file next to its Upstream's stored Catalog; unscanned Upstreams are skipped."""
-    found: list[tuple[Path, catalog.Catalog, config.ProxyFile]] = []
+@dataclass(frozen=True)
+class Curation:
+    """One Proxy file next to the stored Catalog it curates."""
+
+    path: Path
+    catalog: catalog.Catalog
+    proxy: config.ProxyFile
+
+    def expose(self) -> catalog.Catalog:
+        return expose(self.catalog, self.proxy).catalog
+
+
+def curations(config_dir: Path, state_dir: Path) -> list[Curation]:
+    """Every Proxy file with its Upstream's stored Catalog; unscanned Upstreams are skipped."""
+    found: list[Curation] = []
     for upstream in config.load_upstreams(config_dir):
         stored = catalog.load_catalog(state_dir, upstream.name)
         if stored is None:
             continue
         found += [
-            (
+            Curation(
                 config.proxy_file(config_dir, upstream.name, proxy),
                 stored,
                 config.load_proxy(config_dir, upstream.name, proxy),
@@ -61,46 +71,35 @@ def proxy_files(
 def override_problems(config_dir: Path, state_dir: Path) -> list[config.Problem]:
     """Overrides that cannot be applied: the Proxy would keep its last exposed set."""
     problems: list[config.Problem] = []
-    for path, stored, proxy_file in proxy_files(config_dir, state_dir):
+    for curation in curations(config_dir, state_dir):
         try:
-            expose(stored, proxy_file)
+            curation.expose()
         except OverrideError as exc:
-            problems.append(config.Problem(path, "", str(exc)))
+            problems.append(config.Problem(curation.path, "", str(exc)))
     return problems
 
 
 def orphan_warnings(config_dir: Path, state_dir: Path) -> list[config.Problem]:
     """Overrides whose Catalog item or argument vanished: kept, but worth knowing about."""
     warnings: list[config.Problem] = []
-    for path, stored, proxy_file in proxy_files(config_dir, state_dir):
+    for curation in curations(config_dir, state_dir):
         warnings.extend(
             config.Problem(
-                path,
+                curation.path,
                 f"{config.OVERRIDE_SECTION[item.kind]}.{item.name}",
                 f"orphaned Override: no {item} in the Catalog",
             )
-            for item in orphaned_overrides(stored, proxy_file)
+            for item in orphaned_overrides(curation.catalog, curation.proxy)
         )
         warnings.extend(
             config.Problem(
-                path,
+                curation.path,
                 f"tools.{tool}.args.{argument}",
                 f"orphaned argument Override: tool {tool} has no argument {argument!r}",
             )
-            for tool, argument in orphaned_arguments(stored, proxy_file)
+            for tool, argument in orphaned_arguments(curation.catalog, curation.proxy)
         )
     return warnings
-
-
-def property_names(definition: dict[str, Any]) -> list[str]:
-    """The input-schema property names of one raw MCP tool definition."""
-    schema: object = definition.get("inputSchema")
-    if not isinstance(schema, dict):
-        return []
-    properties: object = cast("dict[str, Any]", schema).get("properties")
-    if not isinstance(properties, dict):
-        return []
-    return sorted(cast("dict[str, Any]", properties))
 
 
 @dataclass
@@ -128,7 +127,7 @@ class Review:
         for tool, definition in exposed.tools.items():
             self.problems.extend(
                 config.Problem(path, f"tools.{tool}", broken)
-                for name in property_names(definition)
+                for name in sorted(catalog.arguments(definition))
                 if (broken := properties.violation(name))
             )
 

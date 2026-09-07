@@ -120,7 +120,7 @@
             }
           ],
           "default": null,
-          "description": "Whether the Client must give it.",
+          "description": "Whether the Client must give it. Moot for a hidden argument.",
           "title": "Required"
         }
       },
@@ -149,19 +149,6 @@
           "default": null,
           "description": "Exposed prompt name.",
           "title": "Name"
-        },
-        "title": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Replaces the title.",
-          "title": "Title"
         },
         "description": {
           "anyOf": [
@@ -215,19 +202,6 @@
           "default": null,
           "description": "Replaces the display name.",
           "title": "Name"
-        },
-        "title": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Replaces the title.",
-          "title": "Title"
         },
         "description": {
           "anyOf": [
