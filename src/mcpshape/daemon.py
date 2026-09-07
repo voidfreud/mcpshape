@@ -229,9 +229,15 @@ def _nothing() -> Exposed:
 
 
 async def rescan(state_dir: Path, upstream: Upstream) -> None:
-    """Scan ``upstream`` into its Catalog on a first scan, else record Drift. Never raises."""
+    """Scan ``upstream`` into its Catalog on a first scan, else record Drift. Never raises.
+
+    ``record_scan`` holds an OS-level lock across its own read-then-write (#21), which can
+    block for a while behind a concurrent ``upstream sync``; running it in a thread keeps that
+    wait off the Daemon's own event loop, so every other Upstream and Proxy stays responsive.
+    """
     try:
-        catalogs.record_scan(state_dir, upstream.name, await scan(upstream.transport))
+        observed = await scan(upstream.transport)
+        await asyncio.to_thread(catalogs.record_scan, state_dir, upstream.name, observed)
     except (UpstreamTargetError, catalogs.CatalogError):
         log.warning("Upstream %s could not be scanned", upstream.name, exc_info=True)
 

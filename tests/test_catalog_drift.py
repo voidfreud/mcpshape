@@ -9,6 +9,8 @@ from typing import TYPE_CHECKING, Any
 from fastmcp import FastMCP
 from mcp_types import TextContent, TextResourceContents
 
+from tests.support import upstreams
+from tests.support.clock import FakeClock
 from tests.support.seam import run_cli, running_daemon
 
 if TYPE_CHECKING:
@@ -381,6 +383,84 @@ def test_accept_preserves_hand_written_comments_in_proxy_files(config_dir: Confi
     assert text.startswith("version = 1  # keep\n")
     assert "# curated by hand\n[tools.add_note]\nhidden = false\n" in text
     assert "[tools.delete_note]\nhidden = true" in text
+
+
+# --- a reconnect rescan racing an accept (#21) ---------------------------------------------------
+
+
+def _tool_named(server: FastMCP[Any], name: str) -> None:
+    """Add a tool called ``name`` to ``server``, so a test can grow it round by round."""
+
+    def _tool() -> None:
+        """Added during a race test."""
+
+    server.tool(_tool, name=name)
+
+
+IDLE_TIMEOUT = 5
+PAST_IDLE = 6
+"""Seconds to move the fake clock on by, comfortably past ``IDLE_TIMEOUT``."""
+
+
+async def test_reconnect_rescan_and_accept_race_end_up_consistent(config_dir: ConfigDir) -> None:
+    """The bug in #21: an unlocked accept can silently drop what a concurrent rescan just saw.
+
+    The reconnect's rescan is parked at the in-memory Upstream's ``tools/list`` handler (the
+    controllable pause the ticket allows), holding a snapshot from before this round's growth;
+    ``upstream sync --accept`` is started only once it is parked, so its own scan sees the
+    growth the rescan missed and parks alongside it holding a newer snapshot. Opening the gate
+    then releases an old observation and a new one to race for real, on whatever order real OS
+    thread scheduling gives their file operations, every round for several rounds to give that
+    race a real chance to land badly.
+
+    Consistency, not one exact interleaving, is what is asserted: after each race, a follow-up
+    scan must find no further Drift and the Catalog must hold every tool the Upstream has
+    advertised so far, which is only true when no observation any of the racing scans made was
+    ever dropped, and the accepted Catalog always matches one of them.
+    """
+    clock = FakeClock()
+    gate = upstreams.Gate()
+    server = notes()
+    config_dir.add_memory_upstream("notes", server, {"idle_timeout": IDLE_TIMEOUT})
+    upstreams.gate_tools_list(server, gate)
+
+    expected_tools = {"add_note"}
+
+    async with running_daemon(config_dir, clock) as daemon, daemon.client("/notes/mcp") as client:
+        assert (await client.call_tool("add_note", {"text": "hi"})).data == "hi"  # first connect
+
+        for round_ in range(40):
+            await clock.advance(PAST_IDLE)
+            await daemon.awaiting_state("notes", "cold")
+
+            gate.shut()
+            waking = asyncio.create_task(client.call_tool("add_note", {"text": "hi"}))
+            await daemon.awaiting_state("notes", "ready", "idle-pending")
+            assert (await waking).data == "hi"
+            await upstreams.until_parked(gate, 1)
+            # the reconnect's rescan is now parked, holding a snapshot from before this round
+
+            new_tool = f"tool_{round_}"
+            _tool_named(server, new_tool)
+            expected_tools.add(new_tool)
+
+            accepting = asyncio.create_task(
+                asyncio.to_thread(run_cli, config_dir, "upstream", "sync", "notes", "--accept")
+            )
+            await upstreams.until_parked(gate, 2)
+            # the CLI's own scan is now also parked, holding a snapshot that includes new_tool
+
+            gate.open()  # release both at once: an old and a new observation race for real
+
+            result = await accepting
+            assert result.exit_code == 0, result.output
+
+            follow_up = await asyncio.to_thread(run_cli, config_dir, "upstream", "sync", "notes")
+            assert follow_up.exit_code == 0, follow_up.output
+            assert drift_file(config_dir, "notes") is None, (
+                f"round {round_}: an observation was dropped: {follow_up.output}"
+            )
+            assert set(catalog_file(config_dir, "notes")["tools"]) == expected_tools
 
 
 # --- housekeeping ------------------------------------------------------------------------------
