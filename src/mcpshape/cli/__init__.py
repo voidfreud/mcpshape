@@ -7,7 +7,7 @@ from typing import Annotated
 
 import typer
 
-from mcpshape.cli import doctor, proxy, upstream
+from mcpshape.cli import daemon, doctor, proxy, upstream
 from mcpshape.cli.common import HELP_OPTIONS, State, console, drift_notice, example, fail
 from mcpshape.paths import CONFIG_DIR_ENV, STATE_DIR_ENV, default_config_dir, default_state_dir
 
@@ -83,15 +83,7 @@ app.add_typer(
     ),
     name="tool",
 )
-app.add_typer(
-    typer.Typer(
-        help="Operate the Daemon: up, down, status, logs, reload, install, uninstall.",
-        epilog=example("daemon status"),
-        context_settings=HELP_OPTIONS,
-        no_args_is_help=True,
-    ),
-    name="daemon",
-)
+app.add_typer(daemon.app, name="daemon")
 app.command("doctor", epilog=example("doctor"))(doctor.doctor)
 
 

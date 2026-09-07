@@ -6,8 +6,10 @@ Client that reaches the app over ASGI. Tests never import internal modules.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import re
+import socket
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -17,7 +19,7 @@ from fastmcp.client.transports import StreamableHttpTransport
 from typer.testing import CliRunner, Result  # annotated at runtime
 
 from mcpshape.cli import app
-from mcpshape.daemon import build_app
+from mcpshape.daemon import build_app, serve
 from tests.support import upstreams
 from tests.support.asgi import asgi_client_factory
 
@@ -119,3 +121,44 @@ def _result(result: Result) -> CliResult:
         output=ANSI.sub("", result.output),
         stdout=ANSI.sub("", result.stdout),
     )
+
+
+def free_port() -> int:
+    """A TCP port nothing listens on right now."""
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+@contextlib.asynccontextmanager
+async def serving_daemon(cfg: ConfigDir) -> AsyncGenerator[str]:
+    """Run the Daemon from ``cfg`` on a loopback port, as ``daemon up`` would, and yield its URL.
+
+    For the tests that need a socket: a subprocess speaking to a Proxy, or the CLI reading
+    live state. Everything else uses ``running_daemon``. The port is written into
+    ``config.toml`` so the CLI computes the same URLs.
+    """
+    port = free_port()
+    (cfg.path / "config.toml").write_text(f"version = 1\n[daemon]\nport = {port}\n")
+    stop = asyncio.Event()
+    server = asyncio.create_task(serve(build_app(cfg.path, cfg.state), "127.0.0.1", port, stop))
+    try:
+        await _wait_for_port(port)
+        yield f"http://127.0.0.1:{port}"
+    finally:
+        stop.set()
+        await server
+
+
+async def _wait_for_port(port: int, attempts: int = 100) -> None:
+    for _ in range(attempts):
+        try:
+            _, writer = await asyncio.open_connection("127.0.0.1", port)
+        except OSError:
+            await asyncio.sleep(0.05)
+            continue
+        writer.close()
+        await writer.wait_closed()
+        return
+    msg = f"nothing listened on port {port} in time"
+    raise TimeoutError(msg)

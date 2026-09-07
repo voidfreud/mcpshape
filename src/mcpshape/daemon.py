@@ -7,6 +7,7 @@ Starting the Daemon rescans every Upstream, recording Drift rather than serving 
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import logging
 from datetime import UTC, datetime
@@ -17,7 +18,7 @@ from starlette.routing import Mount
 
 from mcpshape import catalog as catalogs
 from mcpshape.adapters.fastmcp import UpstreamTargetError, proxy_app, scan
-from mcpshape.config import ConfigError, load_proxy, load_upstreams, proxy_file
+from mcpshape.config import ConfigError, load_proxy, load_settings, load_upstreams, proxy_file
 from mcpshape.model import DEFAULT_PROXY_NAME
 from mcpshape.proxy import exposed_catalog
 
@@ -121,3 +122,34 @@ def build_app(config_dir: Path, state_dir: Path) -> Starlette:
             yield
 
     return Starlette(routes=routes, lifespan=lifespan)
+
+
+async def serve(app: Starlette, host: str, port: int, stop: asyncio.Event | None = None) -> None:
+    """Serve ``app`` on ``host``:``port`` until ``stop`` is set or the process is signalled.
+
+    The Daemon process's main loop. A cooperative stop lets the server close its socket;
+    cancelling the task would leave it open.
+    """
+    import uvicorn  # noqa: PLC0415  # only the running Daemon needs a server
+
+    config = uvicorn.Config(app, host=host, port=port, log_level="warning", lifespan="on")
+    server = uvicorn.Server(config)
+
+    async def stop_when_asked() -> None:
+        if stop is not None:
+            await stop.wait()
+            server.should_exit = True
+
+    stopper = asyncio.create_task(stop_when_asked())
+    try:
+        await server.serve()
+    finally:
+        stopper.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await stopper
+
+
+def run(config_dir: Path, state_dir: Path) -> None:
+    """Build the Daemon app from ``config_dir`` and serve it on the configured address."""
+    daemon = load_settings(config_dir).daemon
+    asyncio.run(serve(build_app(config_dir, state_dir), daemon.host, daemon.port))
