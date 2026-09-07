@@ -47,9 +47,10 @@ def _load_target(path: Path, data: dict[str, Any]) -> UpstreamTarget:
     transport = data.get("transport")
     if transport == "memory":
         target = data.get("target")
-        if not isinstance(target, str) or ":" not in target:
+        module, _, attribute = target.partition(":") if isinstance(target, str) else ("", "", "")
+        if not module or not attribute:
             msg = f'{path}: transport "memory" needs target = "module:attribute"'
             raise ConfigError(msg)
-        return MemoryTarget(import_path=target)
+        return MemoryTarget(module=module, attribute=attribute)
     msg = f"{path}: unknown transport {transport!r}"
     raise ConfigError(msg)

@@ -23,11 +23,11 @@ def calculator() -> FastMCP[Any]:
 
 @pytest.mark.parametrize("path", ["/calc/mcp", "/calc/default/mcp"])
 async def test_client_lists_and_calls_upstream_tool_through_proxy(
-    cfg: ConfigDir, path: str
+    config_dir: ConfigDir, path: str
 ) -> None:
-    cfg.add_memory_upstream("calc", calculator())
+    config_dir.add_memory_upstream("calc", calculator())
 
-    async with running_daemon(cfg) as daemon, daemon.client(path) as client:
+    async with running_daemon(config_dir) as daemon, daemon.client(path) as client:
         tools = await client.list_tools()
         assert [tool.name for tool in tools] == ["add"]
 

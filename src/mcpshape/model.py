@@ -9,12 +9,13 @@ DEFAULT_PROXY_NAME = "default"
 
 @dataclass(frozen=True)
 class MemoryTarget:
-    """An Upstream living in this process, named by an ``module:attribute`` import path.
+    """An Upstream living in this process, as the attribute of an importable module.
 
     Test-only: it lets an in-memory server act as an Upstream with no subprocess or network.
     """
 
-    import_path: str
+    module: str
+    attribute: str
 
 
 UpstreamTarget = MemoryTarget

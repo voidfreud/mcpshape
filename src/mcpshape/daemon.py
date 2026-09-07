@@ -1,4 +1,4 @@
-"""The Daemon's ASGI app: one Proxy endpoint per Upstream, never merged (ADR 0002)."""
+"""The Daemon's ASGI app: each Upstream's Proxies at their own paths, never merged (ADR 0002)."""
 
 from __future__ import annotations
 

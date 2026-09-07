@@ -54,18 +54,17 @@ def proxy_app(upstream: Upstream) -> ProxyApp:
 
 def _resolve(target: UpstreamTarget) -> FastMCP[Any]:
     match target:
-        case MemoryTarget(import_path=import_path):
-            return _import_server(import_path)
+        case MemoryTarget(module=module, attribute=attribute):
+            return _import_server(module, attribute)
 
 
-def _import_server(import_path: str) -> FastMCP[Any]:
-    module_name, _, attribute = import_path.partition(":")
+def _import_server(module: str, attribute: str) -> FastMCP[Any]:
     try:
-        server: object = getattr(importlib.import_module(module_name), attribute)
+        server: object = getattr(importlib.import_module(module), attribute)
     except (ImportError, AttributeError) as exc:
-        msg = f"cannot import {import_path}: {exc}"
+        msg = f"cannot import {module}:{attribute}: {exc}"
         raise UpstreamTargetError(msg) from exc
     if not isinstance(server, FastMCP):
-        msg = f"{import_path} is not an in-memory MCP server"
+        msg = f"{module}:{attribute} is not an in-memory MCP server"
         raise UpstreamTargetError(msg)
     return cast("FastMCP[Any]", server)

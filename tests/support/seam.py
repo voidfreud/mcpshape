@@ -8,15 +8,15 @@ from __future__ import annotations
 
 import contextlib
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
-import httpx2
+import pytest
 from fastmcp import Client, FastMCP
 from fastmcp.client.transports import StreamableHttpTransport
-from fastmcp.utilities.asgi_transport import StreamingASGITransport
 
 from mcpshape.daemon import build_app
 from tests.support import upstreams
+from tests.support.asgi import asgi_client_factory
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Generator
@@ -49,7 +49,7 @@ class ConfigDir:
             upstreams.unregister(name)
 
 
-@contextlib.contextmanager
+@pytest.fixture
 def config_dir(tmp_path: Path) -> Generator[ConfigDir]:
     cfg = ConfigDir(tmp_path / "config")
     cfg.path.mkdir()
@@ -65,26 +65,10 @@ class RunningDaemon:
 
     app: ASGIApp
 
-    def http_client(
-        self,
-        headers: dict[str, str] | None = None,
-        timeout: httpx2.Timeout | None = None,
-        auth: httpx2.Auth | None = None,
-        **kwargs: Any,  # noqa: ANN401  # FastMCP passes more than its factory type declares
-    ) -> httpx2.AsyncClient:
-        return httpx2.AsyncClient(
-            transport=StreamingASGITransport(self.app),
-            base_url=BASE_URL,
-            headers=headers,
-            timeout=timeout,
-            auth=auth,
-            **kwargs,
-        )
-
     def client(self, path: str) -> Client[StreamableHttpTransport]:
         """A FastMCP Client for the Proxy served at ``path`` (for example ``/calc/mcp``)."""
         transport = StreamableHttpTransport(
-            f"{BASE_URL}{path}", httpx_client_factory=self.http_client
+            f"{BASE_URL}{path}", httpx_client_factory=asgi_client_factory(self.app, BASE_URL)
         )
         return Client(transport)
 
