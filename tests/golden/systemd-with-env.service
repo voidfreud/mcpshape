@@ -1,0 +1,14 @@
+[Unit]
+Description=mcpshape Daemon
+After=network.target
+
+[Service]
+ExecStart=mcpshape daemon up
+Restart=on-failure
+StandardOutput=append:/home/tester/.local/state/mcpshape/log/daemon.out.log
+StandardError=append:/home/tester/.local/state/mcpshape/log/daemon.err.log
+Environment=MCPSHAPE_CONFIG_DIR=/home/tester/.config/mcpshape-alt
+Environment=MCPSHAPE_STATE_DIR=/home/tester/.local/state/mcpshape-alt
+
+[Install]
+WantedBy=default.target

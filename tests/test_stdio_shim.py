@@ -7,6 +7,7 @@ proves stdout carried nothing but the protocol.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import json
 import os
@@ -148,6 +149,37 @@ async def test_the_shim_starts_the_daemon_when_nothing_answers(
         assert len(started) == 1, log.read_text()
 
     wait_for_exit(started[0])
+
+
+async def test_two_shims_starting_at_once_do_not_race_to_bind(
+    config_dir: ConfigDir, tmp_path: Path
+) -> None:
+    """#13: ``daemon up`` takes a lock so the loser notices the winner instead of failing.
+
+    Two Clients starting shims at the same instant both spawn a ``daemon up``; the fix is
+    that the one that does not win the bind waits on the lock, sees the winner is already
+    answering, and exits cleanly rather than reporting a failure while the winner is in fact
+    up (the bug landing #8 noted).
+    """
+    add_upstream_a_separate_daemon_can_import(config_dir, "calc")
+    (config_dir.path / "config.toml").write_text(
+        f"version = 1\n[daemon]\nport = {free_port()}\n",
+    )
+    log_a, log_b = tmp_path / "shim-a.log", tmp_path / "shim-b.log"
+
+    async def one(log: Path) -> int:
+        async with shim(config_dir, log, "calc") as client:
+            result = await client.call_tool("add", {"a": 2, "b": 3})
+            return int(result.data)
+
+    with stopping_a_daemon_the_shim_started(log_a), stopping_a_daemon_the_shim_started(log_b):
+        results = await asyncio.gather(one(log_a), one(log_b))
+
+    assert results == [5, 5]
+    started = daemons_in(log_a) + daemons_in(log_b)
+    assert started, "at least one shim should have started a Daemon"
+    for pid in started:
+        wait_for_exit(pid)
 
 
 async def test_the_entry_proxy_export_writes_is_one_the_shim_accepts(

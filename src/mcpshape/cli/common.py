@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import socket
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, NoReturn
 
@@ -21,6 +22,9 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 HELP_OPTIONS = {"help_option_names": ["-h", "--help"]}
+
+PROBE_TIMEOUT = 0.5
+"""Seconds to wait for a raw TCP probe of whether something answers at an address."""
 
 console = Console(soft_wrap=True)
 errors = Console(stderr=True, soft_wrap=True)
@@ -98,3 +102,12 @@ def parse_proxy_ref(ref: str) -> tuple[str, str]:
     if not sep or not upstream or not proxy or "/" in proxy:
         fail(f"expected <upstream>/<proxy>, got {ref!r}")
     return upstream, proxy
+
+
+def answering(host: str, port: int) -> bool:
+    """Whether anything accepts a connection there right now."""
+    try:
+        with socket.create_connection((host, port), timeout=PROBE_TIMEOUT):
+            return True
+    except OSError:
+        return False

@@ -62,6 +62,19 @@
           "minimum": 1,
           "title": "Port",
           "type": "integer"
+        },
+        "token": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Bearer token every request to Proxies, the API, and the dashboard must carry. Required to bind a non-loopback host.",
+          "title": "Token"
         }
       },
       "title": "DaemonSettings",

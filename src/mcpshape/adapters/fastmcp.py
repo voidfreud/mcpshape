@@ -284,14 +284,18 @@ async def _catalog_of(client: Client[Any]) -> Catalog:
     )
 
 
-def run_shim(url: str) -> None:
+def run_shim(url: str, token: str | None = None) -> None:
     """Speak MCP over stdio and forward every request to the Proxy served at ``url``.
 
     The other half of the hidden ``serve`` command, for the Clients that accept stdio only.
     Runs until the Client closes the pipe. stdout carries the protocol, so the banner FastMCP
-    would otherwise print is off.
+    would otherwise print is off. ``token`` is sent as a bearer token when the Daemon requires
+    one; never logged.
     """
-    create_proxy(StreamableHttpTransport(url)).run(transport="stdio", show_banner=False)
+    headers = {"Authorization": f"Bearer {token}"} if token else None
+    create_proxy(StreamableHttpTransport(url, headers=headers)).run(
+        transport="stdio", show_banner=False
+    )
 
 
 async def _listed[T](method: Callable[[], Awaitable[Sequence[T]]]) -> Sequence[T]:

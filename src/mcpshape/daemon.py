@@ -15,12 +15,14 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import partial
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel, Field
 from starlette.applications import Starlette
+from starlette.middleware import Middleware
 from starlette.responses import JSONResponse
 from starlette.routing import Mount, Route
 
@@ -45,7 +47,7 @@ if TYPE_CHECKING:
 
     from starlette.requests import Request
     from starlette.routing import BaseRoute
-    from starlette.types import Receive, Scope, Send
+    from starlette.types import ASGIApp, Receive, Scope, Send
 
     from mcpshape.adapters.fastmcp import ProxyApp
     from mcpshape.catalog import Catalog
@@ -56,7 +58,47 @@ if TYPE_CHECKING:
 log = logging.getLogger("mcpshape.daemon")
 
 STATUS_PATH = "/api/status"
-"""The one management route so far: live state, which #16 grows into the management API."""
+"""One of two management routes so far: live state, which #16 grows into the management API."""
+
+SHUTDOWN_PATH = "/api/shutdown"
+"""What ``daemon down`` posts to: sets the stop event ``serve`` is watching."""
+
+
+def is_loopback(host: str) -> bool:
+    """Whether ``host`` is reachable only from this machine."""
+    return host in {"127.0.0.1", "::1", "localhost"} or host.startswith("127.")
+
+
+class _BearerAuth:
+    """Requires ``Authorization: Bearer <token>`` on every HTTP request when a token is set.
+
+    Wraps every route: Proxies, the management API, and, later, the dashboard. Never logs the
+    token itself, given or expected.
+    """
+
+    def __init__(self, app: ASGIApp, token: str) -> None:
+        self._app = app
+        self._token = token
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http" or self._authorized(scope):
+            await self._app(scope, receive, send)
+            return
+        response = JSONResponse({"error": "a bearer token is required"}, status_code=401)
+        await response(scope, receive, send)
+
+    def _authorized(self, scope: Scope) -> bool:
+        headers: dict[bytes, bytes] = dict(scope.get("headers") or ())
+        given: bytes = headers.get(b"authorization", b"")
+        return given == f"Bearer {self._token}".encode("latin-1")
+
+
+def _authed(app: ASGIApp, token: str | None) -> ASGIApp:
+    return _BearerAuth(app, token) if token else app
+
+
+def _middleware(token: str | None) -> list[Middleware]:
+    return [Middleware(_BearerAuth, token=token)] if token else []
 
 
 class ProxyState(BaseModel):
@@ -257,12 +299,32 @@ async def record_observation(state_dir: Path, name: str, observed: Catalog) -> N
     await asyncio.to_thread(catalogs.record_scan, state_dir, name, observed)
 
 
-def build_app(config_dir: Path, state_dir: Path, clock: Clock | None = None) -> Starlette:
-    """The Daemon app for the Upstreams registered under ``config_dir``.
+@dataclass(frozen=True)
+class DaemonApp:
+    """Every ASGI app the Daemon serves: the main one, and one per Proxy port override.
+
+    ``stop`` is what ``/api/shutdown`` sets and what ``serve`` watches to close its sockets.
+    """
+
+    main: Starlette
+    extra: dict[int, ASGIApp]
+    stop: asyncio.Event
+
+
+def build_app(
+    config_dir: Path,
+    state_dir: Path,
+    clock: Clock | None = None,
+    token: str | None = None,
+) -> DaemonApp:
+    """The Daemon apps for the Upstreams registered under ``config_dir``.
 
     Every Proxy is served at ``/<upstream>/<proxy>/mcp``; the ``default`` Proxy also at
-    ``/<upstream>/mcp``; live state at ``/api/status``. ``clock`` is what every lifecycle
-    timer runs on, so tests advance time instead of waiting for it.
+    ``/<upstream>/mcp``; live state at ``/api/status``; ``/api/shutdown`` stops it. ``clock``
+    is what every lifecycle timer runs on, so tests advance time instead of waiting for it. A
+    Proxy whose file sets ``port`` is also mounted alone on that additional listener, in
+    ``.extra``. ``token``, when given, requires ``Authorization: Bearer <token>`` on every
+    request to any of them.
     """
     upstreams = load_upstreams(config_dir)
     global_caps = load_settings(config_dir).caps
@@ -283,7 +345,11 @@ def build_app(config_dir: Path, state_dir: Path, clock: Clock | None = None) -> 
         for upstream in upstreams
         for proxy_name in upstream.proxies
     }
-    routes: list[BaseRoute] = [Route(STATUS_PATH, _status(upstreams, connections, proxies))]
+    stop = asyncio.Event()
+    routes: list[BaseRoute] = [
+        Route(STATUS_PATH, _status(upstreams, connections, proxies)),
+        Route(SHUTDOWN_PATH, _shutdown(stop), methods=["POST"]),
+    ]
     routes += [
         Mount(f"/{name}/{proxy_name}", app=proxy) for (name, proxy_name), proxy in proxies.items()
     ]
@@ -305,7 +371,24 @@ def build_app(config_dir: Path, state_dir: Path, clock: Clock | None = None) -> 
                 await stack.enter_async_context(connection.running())
             yield
 
-    return Starlette(routes=routes, lifespan=lifespan)
+    main = Starlette(routes=routes, lifespan=lifespan, middleware=_middleware(token))
+    ports = _proxy_ports(config_dir, upstreams)
+    extra = {port: _authed(proxies[key], token) for key, port in ports.items()}
+    return DaemonApp(main=main, extra=extra, stop=stop)
+
+
+def _proxy_ports(config_dir: Path, upstreams: list[Upstream]) -> dict[tuple[str, str], int]:
+    """The additional port every Proxy that sets one asks to be served on besides its path."""
+    ports: dict[tuple[str, str], int] = {}
+    for upstream in upstreams:
+        for proxy_name in upstream.proxies:
+            try:
+                proxy = load_proxy(config_dir, upstream.name, proxy_name)
+            except ConfigError:
+                continue
+            if proxy.port is not None:
+                ports[upstream.name, proxy_name] = proxy.port
+    return ports
 
 
 def _status(
@@ -332,15 +415,33 @@ def _status(
     return endpoint
 
 
-async def serve(app: Starlette, host: str, port: int, stop: asyncio.Event | None = None) -> None:
+def _shutdown(stop: asyncio.Event) -> Callable[[Request], Awaitable[JSONResponse]]:
+    """``/api/shutdown``: what ``daemon down`` posts to. Sets ``stop`` and answers at once."""
+
+    async def endpoint(_request: Request) -> JSONResponse:
+        stop.set()
+        return JSONResponse({"stopping": True})
+
+    return endpoint
+
+
+async def serve(
+    app: ASGIApp,
+    host: str,
+    port: int,
+    stop: asyncio.Event | None = None,
+    *,
+    lifespan: Literal["on", "off"] = "on",
+) -> None:
     """Serve ``app`` on ``host``:``port`` until ``stop`` is set or the process is signalled.
 
     The Daemon process's main loop. A cooperative stop lets the server close its socket;
-    cancelling the task would leave it open.
+    cancelling the task would leave it open. ``lifespan="off"`` is for a Proxy's port
+    override: the Proxy's own lifespan is already run once, by the main app.
     """
     import uvicorn  # noqa: PLC0415  # only the running Daemon needs a server
 
-    config = uvicorn.Config(app, host=host, port=port, log_level="warning", lifespan="on")
+    config = uvicorn.Config(app, host=host, port=port, log_level="warning", lifespan=lifespan)
     server = uvicorn.Server(config)
 
     async def stop_when_asked() -> None:
@@ -357,7 +458,20 @@ async def serve(app: Starlette, host: str, port: int, stop: asyncio.Event | None
             await stopper
 
 
+async def serve_all(daemon: DaemonApp, host: str, port: int) -> None:
+    """Serve the main app on ``host``:``port`` and every Proxy port override alongside it."""
+    await asyncio.gather(
+        serve(daemon.main, host, port, daemon.stop),
+        *(
+            serve(app, host, extra_port, daemon.stop, lifespan="off")
+            for extra_port, app in daemon.extra.items()
+        ),
+    )
+
+
 def run(config_dir: Path, state_dir: Path) -> None:
-    """Build the Daemon app from ``config_dir`` and serve it on the configured address."""
-    daemon = load_settings(config_dir).daemon
-    asyncio.run(serve(build_app(config_dir, state_dir), daemon.host, daemon.port))
+    """Build the Daemon app from ``config_dir`` and serve it, and every port override, until
+    ``daemon down`` or a signal stops it."""
+    settings = load_settings(config_dir).daemon
+    app = build_app(config_dir, state_dir, token=settings.token)
+    asyncio.run(serve_all(app, settings.host, settings.port))

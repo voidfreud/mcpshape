@@ -11,7 +11,6 @@ including the pid of a Daemon this shim started, goes to stderr.
 from __future__ import annotations
 
 import os
-import socket
 import subprocess  # the Daemon is started by path, from sys.executable
 import sys
 import time
@@ -21,14 +20,22 @@ from typing import Annotated
 import typer
 
 from mcpshape.adapters.fastmcp import run_shim
-from mcpshape.cli.common import errors, example, fail, parse_proxy_ref, reporting_errors, state
+from mcpshape.cli.common import (
+    answering,
+    errors,
+    example,
+    fail,
+    parse_proxy_ref,
+    reporting_errors,
+    state,
+)
 from mcpshape.cli.listing import proxy_url
 from mcpshape.config import load_proxy, load_settings
 from mcpshape.model import DEFAULT_PROXY_NAME
 from mcpshape.paths import CONFIG_DIR_ENV, STATE_DIR_ENV
 
 DAEMON_START_TIMEOUT = 15.0
-"""Seconds to wait for a Daemon this shim started to answer.
+"""Seconds to wait for a Daemon this shim started, or another shim's, to answer.
 
 Codex CLI gives an MCP server 10 s to start and no other Client documents a startup budget
 (``docs/clients.md``), so waiting a little longer beats giving up while the Daemon is still
@@ -36,7 +43,6 @@ binding its port: the next Client to start finds it up.
 """
 
 PROBE_INTERVAL = 0.05
-PROBE_TIMEOUT = 0.5
 
 EPILOG = example("serve github/default")
 
@@ -62,7 +68,7 @@ def serve(ctx: typer.Context, ref: RefArg, proxy_name: ProxyArg = None) -> None:
     ensure_daemon(config_dir, state_dir, daemon.host, daemon.port)
     url = proxy_url(config_dir, upstream, proxy)
     errors.print(f"Serving [bold]{upstream}/{proxy}[/bold] from {url} over stdio.")
-    run_shim(url)
+    run_shim(url, daemon.token)
 
 
 def resolve(ref: str, given: str | None) -> tuple[str, str]:
@@ -77,7 +83,13 @@ def resolve(ref: str, given: str | None) -> tuple[str, str]:
 
 
 def ensure_daemon(config_dir: Path, state_dir: Path, host: str, port: int) -> None:
-    """Start the Daemon unless something already answers on ``host``:``port``, and wait for it."""
+    """Start the Daemon unless something already answers on ``host``:``port``, and wait for it.
+
+    Two Clients starting shims at once both spawn a Daemon; ``daemon up`` takes a lock for as
+    long as it runs, so the loser's own ``daemon up`` notices the winner and exits at once
+    instead of failing to bind. That exit (status 0, no port ever bound by it) is not this
+    shim's failure: it is only a failure once the port never answers either way (#13).
+    """
     if answering(host, port):
         return
     daemon = start_daemon(config_dir, state_dir)
@@ -86,7 +98,7 @@ def ensure_daemon(config_dir: Path, state_dir: Path, host: str, port: int) -> No
     while time.monotonic() < deadline:
         if answering(host, port):
             return
-        if (code := daemon.poll()) is not None:
+        if (code := daemon.poll()) is not None and code != 0:
             fail(f"the Daemon exited with status {code} instead of listening on {host}:{port}")
         time.sleep(PROBE_INTERVAL)
     fail(f"the Daemon did not answer on {host}:{port} within {DAEMON_START_TIMEOUT:.0f} seconds")
@@ -106,12 +118,3 @@ def start_daemon(config_dir: Path, state_dir: Path) -> subprocess.Popen[bytes]:
         stderr=subprocess.DEVNULL,
         start_new_session=True,
     )
-
-
-def answering(host: str, port: int) -> bool:
-    """Whether anything accepts a connection there right now."""
-    try:
-        with socket.create_connection((host, port), timeout=PROBE_TIMEOUT):
-            return True
-    except OSError:
-        return False

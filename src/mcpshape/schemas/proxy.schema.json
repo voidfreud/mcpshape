@@ -479,6 +479,21 @@
       "$ref": "#/$defs/CapOverrides",
       "description": "This Proxy's Caps, over what it inherits from the Upstream."
     },
+    "port": {
+      "anyOf": [
+        {
+          "maximum": 65535,
+          "minimum": 1,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Serve this Proxy on an additional port, besides its path on the main one.",
+      "title": "Port"
+    },
     "tools": {
       "additionalProperties": {
         "$ref": "#/$defs/ToolOverride"

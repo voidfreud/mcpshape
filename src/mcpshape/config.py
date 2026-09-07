@@ -62,6 +62,13 @@ class DaemonSettings(BaseModel):
 
     host: str = Field(default="127.0.0.1", description="Address the Daemon binds to.")
     port: int = Field(default=8321, ge=1, le=65535, description="Port the Daemon listens on.")
+    token: str | None = Field(
+        default=None,
+        description=(
+            "Bearer token every request to Proxies, the API, and the dashboard must carry. "
+            "Required to bind a non-loopback host."
+        ),
+    )
 
 
 class DriftSettings(BaseModel):
@@ -220,6 +227,12 @@ class ProxyFile(_File):
     caps: CapOverrides = Field(
         default_factory=CapOverrides,
         description="This Proxy's Caps, over what it inherits from the Upstream.",
+    )
+    port: int | None = Field(
+        default=None,
+        ge=1,
+        le=65535,
+        description="Serve this Proxy on an additional port, besides its path on the main one.",
     )
     tools: dict[str, ToolOverride] = Field(
         default_factory=dict, description="Overrides by tool name."

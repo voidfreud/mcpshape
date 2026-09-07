@@ -22,7 +22,7 @@ from fastmcp.client.transports import StreamableHttpTransport
 from typer.testing import CliRunner, Result  # annotated at runtime
 
 from mcpshape.cli import app
-from mcpshape.daemon import STATUS_PATH, build_app, serve
+from mcpshape.daemon import STATUS_PATH, build_app, serve_all
 from tests.support import upstreams
 from tests.support.asgi import asgi_client_factory
 
@@ -147,18 +147,22 @@ class RunningDaemon:
 
     app: ASGIApp
 
-    def client(self, path: str) -> Client[StreamableHttpTransport]:
+    def client(
+        self, path: str, headers: dict[str, str] | None = None
+    ) -> Client[StreamableHttpTransport]:
         """A FastMCP Client for the Proxy served at ``path`` (for example ``/calc/mcp``)."""
         transport = StreamableHttpTransport(
-            f"{BASE_URL}{path}", httpx_client_factory=asgi_client_factory(self.app, BASE_URL)
+            f"{BASE_URL}{path}",
+            headers=headers,
+            httpx_client_factory=asgi_client_factory(self.app, BASE_URL),
         )
         return Client(transport)
 
-    async def status(self) -> dict[str, Any]:
+    async def status(self, headers: dict[str, str] | None = None) -> dict[str, Any]:
         """What the Daemon reports at ``/api/status``, as any HTTP caller would read it."""
         factory = asgi_client_factory(self.app, BASE_URL)
         async with factory() as http:
-            answer = await http.get(f"{BASE_URL}{STATUS_PATH}")
+            answer = await http.get(f"{BASE_URL}{STATUS_PATH}", headers=headers)
         return json.loads(answer.text)
 
     async def upstream_state(self, name: str) -> str:
@@ -183,10 +187,11 @@ class RunningDaemon:
 
 @contextlib.asynccontextmanager
 async def running_daemon(
-    cfg: ConfigDir, clock: Clock | None = None
+    cfg: ConfigDir, clock: Clock | None = None, token: str | None = None
 ) -> AsyncGenerator[RunningDaemon]:
     """Build the Daemon app from ``cfg`` and run its lifespan for the duration."""
-    app = build_app(cfg.path, cfg.state, clock)
+    daemon_app = build_app(cfg.path, cfg.state, clock, token)
+    app = daemon_app.main
     async with app.router.lifespan_context(app):
         yield RunningDaemon(app)
 
@@ -260,24 +265,28 @@ def free_port() -> int:
 
 
 @contextlib.asynccontextmanager
-async def serving_daemon(cfg: ConfigDir, clock: Clock | None = None) -> AsyncGenerator[str]:
+async def serving_daemon(
+    cfg: ConfigDir, clock: Clock | None = None, token: str | None = None
+) -> AsyncGenerator[str]:
     """Run the Daemon from ``cfg`` on a loopback port, as ``daemon up`` would, and yield its URL.
 
     For the tests that need a socket: a subprocess speaking to a Proxy, or the CLI reading
     live state. Everything else uses ``running_daemon``. The port is written into
-    ``config.toml`` so the CLI computes the same URLs.
+    ``config.toml`` so the CLI computes the same URLs. The Daemon's own ``/api/shutdown``
+    stop event is what is watched, so ``daemon down`` and this fixture's own cleanup agree.
     """
     port = free_port()
-    (cfg.path / "config.toml").write_text(f"version = 1\n[daemon]\nport = {port}\n")
-    stop = asyncio.Event()
-    server = asyncio.create_task(
-        serve(build_app(cfg.path, cfg.state, clock), "127.0.0.1", port, stop)
-    )
+    settings = f"version = 1\n[daemon]\nport = {port}\n"
+    if token:
+        settings += f'token = "{token}"\n'
+    (cfg.path / "config.toml").write_text(settings)
+    daemon_app = build_app(cfg.path, cfg.state, clock, token)
+    server = asyncio.create_task(serve_all(daemon_app, "127.0.0.1", port))
     try:
         await _wait_for_port(port)
         yield f"http://127.0.0.1:{port}"
     finally:
-        stop.set()
+        daemon_app.stop.set()
         await server
 
 
