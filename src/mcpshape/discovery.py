@@ -26,7 +26,7 @@ from tomlkit.exceptions import TOMLKitError
 
 from mcpshape.model import HttpTransport, SseTransport, StdioTransport, Transport
 from mcpshape.names import RESERVED, SLUG
-from mcpshape.profiles import PROFILES, Profile
+from mcpshape.profiles import PROFILES, Format, Profile
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping, Sequence
@@ -56,9 +56,13 @@ HTTP_TYPES: frozenset[str] = frozenset(
 URL_KEYS: tuple[str, ...] = tuple(dict.fromkeys(found.url_key for found in PROFILES.values()))
 """The keys a Client puts a server's URL under, from the Profiles."""
 
+DISABLE_FLAGS: frozenset[str] = frozenset(
+    found.disable_flag for found in PROFILES.values() if found.disable_flag
+)
+"""Every per-server off switch a Client documents, for files attributed to no Client."""
+
 SSE_TYPE = "sse"
 LOOPBACK = frozenset({"localhost", "127.0.0.1", "::1", "0.0.0.0"})  # noqa: S104  # compared, never bound
-Format = Literal["json", "toml", "yaml"]
 FORMATS: Mapping[str, Format] = {".json": "json", ".toml": "toml", ".yaml": "yaml", ".yml": "yaml"}
 
 
@@ -72,6 +76,10 @@ class Found:
     path: Path
     client: str | None
     """The Client whose file this is, when the path is one that Client uses."""
+    disabled: bool = False
+    """The Client's file switches this server off, by the flag that Client documents."""
+    env: tuple[str, ...] = ()
+    """Environment variables the entry sets, which an Upstream file does not carry yet."""
 
 
 @dataclass(frozen=True)
@@ -107,21 +115,25 @@ def candidates(directories: Sequence[Path]) -> list[_Candidate]:
 
     A Profile's own location is attributed to its Client. The same file name dropped straight
     into a searched directory is opened too, but attributed to nobody: ``mcp.json`` in a
-    directory the user named is not proof that Cursor wrote it.
+    directory the user named is not proof that Cursor wrote it. A per-project file name is
+    looked for in project directories only: the home directory is nobody's project.
     """
     roots = [
         *(root.expanduser().absolute() for root in directories),
         *(Path(where).expanduser().absolute() for where in TYPICAL_DIRECTORIES),
     ]
+    home = Path("~").expanduser().absolute()
+    projects = [root for root in roots if root != home]
     wanted: list[_Candidate] = []
     for client in PROFILES.values():
         for location in client.locations:
             name = PurePosixPath(location.path).name
-            if location.path.startswith("~"):
+            if location.scope == "user":
                 wanted.append(_Candidate(Path(location.path).expanduser(), client))
+                wanted += [_Candidate(root / name, None) for root in roots]
             else:
-                wanted += [_Candidate(root / location.path, client) for root in roots]
-            wanted += [_Candidate(root / name, None) for root in roots]
+                wanted += [_Candidate(root / location.path, client) for root in projects]
+                wanted += [_Candidate(root / name, None) for root in projects]
     return _existing(wanted)
 
 
@@ -186,20 +198,35 @@ def _as_list(node: Any) -> list[Any]:  # noqa: ANN401  # a parsed config file is
 
 
 def _servers(document: dict[str, Any], candidate: _Candidate) -> list[Found]:
-    """Every entry under the first key path this file actually uses."""
+    """Every entry under the first key path this file keeps servers under."""
     client = candidate.client
     paths = (client.container, *CONTAINERS) if client else CONTAINERS
     shape = client.entry_shape if client else "map"
+    flags = _disable_flags(client)
     for container in dict.fromkeys(paths):
         node = _walk(document, container)
-        if node is None:
-            continue
-        return [
-            Found(name, transport, candidate.path, client.name if client else None)
+        found = [
+            Found(
+                name,
+                transport,
+                candidate.path,
+                client.name if client else None,
+                disabled=any(entry.get(flag) is True for flag in flags),
+                env=tuple(sorted(_as_map(entry.get("env")))),
+            )
             for name, entry in _entries(node, shape)
             if (transport := _transport(entry, client)) is not None
         ]
+        if found:
+            return found
     return []
+
+
+def _disable_flags(client: Profile | None) -> frozenset[str]:
+    """The off switch this Client documents; every Client's when the file is nobody's."""
+    if client is None:
+        return DISABLE_FLAGS
+    return frozenset({client.disable_flag}) if client.disable_flag else frozenset()
 
 
 def _walk(document: dict[str, Any], container: tuple[str, ...]) -> Any:  # noqa: ANN401  # untyped

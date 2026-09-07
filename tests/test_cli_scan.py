@@ -112,6 +112,49 @@ def test_scan_finds_a_project_config_in_the_working_directory(
     assert "./serve.sh" in result.output
 
 
+def test_scan_leaves_a_project_file_in_the_home_directory_alone(
+    config_dir: ConfigDir, home: Path
+) -> None:
+    """``.mcp.json`` is a per-project file: one in the home directory is not a project's."""
+    write(home / ".mcp.json", servers(stray={"command": "stray-mcp"}))
+
+    result = scan(config_dir, home, "--list")
+
+    assert result.exit_code == 0, result.output
+    assert "stray-mcp" not in result.output
+
+
+def test_scan_skips_a_server_its_client_switched_off(
+    config_dir: ConfigDir, home: Path, tmp_path: Path
+) -> None:
+    elsewhere = tmp_path / "elsewhere"
+    write(
+        elsewhere / "mcp.json",
+        servers(off={"command": "off-mcp", "disabled": True}, on={"command": "on-mcp"}),
+    )
+
+    result = scan(config_dir, home, str(elsewhere), "--list")
+
+    assert result.exit_code == 0, result.output
+    assert "on-mcp" in result.output
+    assert "off-mcp" not in result.output
+    assert "switched off" in result.output
+
+
+def test_scan_says_when_an_entry_sets_environment_variables(
+    config_dir: ConfigDir, home: Path
+) -> None:
+    claude_code(
+        home, github={"command": "npx", "args": ["server-github"], "env": {"GITHUB_TOKEN": "x"}}
+    )
+
+    result = scan(config_dir, home, "--list")
+
+    assert result.exit_code == 0, result.output
+    assert "GITHUB_TOKEN" in result.output
+    assert "x" not in result.output.split("GITHUB_TOKEN")[1].split("\n")[0].split(";")[0]
+
+
 def test_scan_reads_a_directory_named_on_the_command_line(
     config_dir: ConfigDir, home: Path, tmp_path: Path
 ) -> None:

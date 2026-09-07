@@ -77,6 +77,13 @@ def scan(
         console.print("No MCP server to add. Add one by hand with [bold]mcpshape add[/bold].")
         return
     console.print(table(candidates))
+    for candidate in candidates:
+        if candidate.found.env:
+            console.print(
+                f"[yellow]![/] {escape(candidate.found.name)} sets "
+                f"{', '.join(candidate.found.env)} in its Client's file; an Upstream file does "
+                "not carry environment variables yet, so set them where the Daemon runs."
+            )
     if list_only:
         console.print("Nothing was added. Drop [bold]--list[/bold] to be asked about each.")
         return
@@ -95,6 +102,8 @@ def triage(
         name = discovery.slug_for(server.name)
         if discovery.is_own_proxy(server.transport, daemon):
             skipped.append(f"{server.name} in {server.path} is an mcpshape Proxy already")
+        elif server.disabled:
+            skipped.append(f"{server.name} in {server.path} is switched off there")
         elif name is None:
             skipped.append(f"{server.name!r} in {server.path} yields no valid Upstream name")
         elif name in seen:
