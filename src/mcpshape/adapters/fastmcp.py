@@ -333,13 +333,13 @@ class _Runtime:
                 raise error(str(exc) or type(exc).__name__, log_level=logging.WARNING) from exc
 
 
-def _capped_output(limit: int | None) -> Callable[[hooks.ToolResult], hooks.ToolResult] | None:
+def _capped_output(ceiling: int | None) -> Callable[[hooks.ToolResult], hooks.ToolResult] | None:
     """What ``_Runtime.run`` cuts a tool's answer with, or ``None`` before a Cap is known."""
-    if limit is None:
+    if ceiling is None:
         return None
 
     def apply(result: hooks.ToolResult) -> hooks.ToolResult:
-        cut = cut_output(result.text, limit)
+        cut = cut_output(result.text, ceiling)
         if cut != result.text:
             result.text = cut
         return result

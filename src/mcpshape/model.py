@@ -155,12 +155,15 @@ class CapSettings(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    # The defaults for descriptions and instructions sit under every documented Client
+    # cutoff (docs/clients.md), so a Proxy nobody tuned survives intact everywhere. The
+    # Profiles carry the numbers with their sources; doctor --for reports them.
     tool_name: int = Field(default=64, gt=0, description=CAP_HELP["tool_name"])
-    tool_description: int = Field(default=1024, gt=0, description=CAP_HELP["tool_description"])
+    tool_description: int = Field(default=1800, gt=0, description=CAP_HELP["tool_description"])
     argument_description: int = Field(
         default=400, gt=0, description=CAP_HELP["argument_description"]
     )
-    instructions: int = Field(default=4000, gt=0, description=CAP_HELP["instructions"])
+    instructions: int = Field(default=1800, gt=0, description=CAP_HELP["instructions"])
     tool_output: int = Field(default=20_000, gt=0, description=CAP_HELP["tool_output"])
 
 

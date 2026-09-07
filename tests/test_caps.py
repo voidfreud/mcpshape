@@ -219,8 +219,22 @@ async def test_a_tool_output_over_its_cap_ends_with_a_note_of_how_much_was_cut(
         result = await client.call_tool("create_issue", {"title": "Bug"})
 
     assert len(result.data) <= 30
-    assert "characters cut" in result.data
     assert MARKER not in result.data
+    kept, _, note = result.data.partition(" [")
+    assert kept == "x" * len(kept)
+    assert note == f"{50 - len(kept)} characters cut]", "the count is what the model does not see"
+
+
+async def test_a_tool_output_cap_too_small_for_the_note_still_tells_the_model_everything_was_cut(
+    config_dir: ConfigDir,
+) -> None:
+    set_global_caps(config_dir, tool_output=5)
+    await synced(config_dir, issues())
+
+    async with running_daemon(config_dir) as daemon, daemon.client("/issues/mcp") as client:
+        result = await client.call_tool("create_issue", {"title": "Bug"})
+
+    assert result.data == " [50 characters cut]"
 
 
 async def test_tool_output_under_its_cap_is_untouched(config_dir: ConfigDir) -> None:

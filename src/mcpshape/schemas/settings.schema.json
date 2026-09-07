@@ -15,7 +15,7 @@
           "type": "integer"
         },
         "tool_description": {
-          "default": 1024,
+          "default": 1800,
           "description": "Ceiling on an exposed tool description, in characters.",
           "exclusiveMinimum": 0,
           "title": "Tool Description",
@@ -29,7 +29,7 @@
           "type": "integer"
         },
         "instructions": {
-          "default": 4000,
+          "default": 1800,
           "description": "Ceiling on the Proxy's exposed instructions, in characters.",
           "exclusiveMinimum": 0,
           "title": "Instructions",

@@ -314,33 +314,33 @@ def _cap_tool(definition: dict[str, Any], caps: CapSettings) -> dict[str, Any]:
     return curated
 
 
-def _cap_argument(property_schema: dict[str, Any], limit: int) -> dict[str, Any]:
+def _cap_argument(property_schema: dict[str, Any], ceiling: int) -> dict[str, Any]:
     if (description := property_schema.get("description")) is None:
         return property_schema
-    return {**property_schema, "description": _cut(str(description), limit)}
+    return {**property_schema, "description": _cut(str(description), ceiling)}
 
 
-def _cut(text: str, limit: int) -> str:
-    """``text`` as is when it already fits ``limit``; cut with ``MARKER`` at the end otherwise."""
-    if len(text) <= limit:
+def _cut(text: str, ceiling: int) -> str:
+    """``text`` as is when it already fits ``ceiling``; cut with ``MARKER`` at the end otherwise."""
+    if len(text) <= ceiling:
         return text
-    if limit <= len(MARKER):
-        return MARKER[:limit]
-    return text[: limit - len(MARKER)] + MARKER
+    if ceiling <= len(MARKER):
+        return MARKER[:ceiling]
+    return text[: ceiling - len(MARKER)] + MARKER
 
 
-def _cut_unique(text: str, limit: int, taken: set[str]) -> str:
-    """``_cut(text, limit)``, extending the marker rather than colliding with ``taken``.
+def _cut_unique(text: str, ceiling: int, taken: set[str]) -> str:
+    """``_cut(text, ceiling)``, extending the marker rather than colliding with ``taken``.
 
     A name a Cap did not have to touch is never renamed here, so two names ``expose`` already
     kept apart stay apart; only names a Cap cuts to the same result are told apart, by how much
     longer a marker each carries. When even that runs out of room, the collision is refused
     like any other Override collision: two different tools cannot share one exposed name.
     """
-    cut = _cut(text, limit)
+    cut = _cut(text, ceiling)
     if cut not in taken:
         return cut
-    if len(text) <= limit:
+    if len(text) <= ceiling:
         msg = (
             f"tool {text!r} would be exposed as {cut!r}, the same as another tool a Cap cut to "
             "it; rename or hide one of them"
@@ -348,28 +348,35 @@ def _cut_unique(text: str, limit: int, taken: set[str]) -> str:
         raise OverrideError(msg)
     for number in itertools.count(2):
         suffix = f"{MARKER}{number}"
-        if limit <= len(suffix):
+        if ceiling <= len(suffix):
             msg = (
-                f"tool {text!r} cannot be cut to a name unique under a Cap of {limit} "
+                f"tool {text!r} cannot be cut to a name unique under a Cap of {ceiling} "
                 f"characters; every name that short is already taken"
             )
             raise OverrideError(msg)
-        candidate = text[: limit - len(suffix)] + suffix
+        candidate = text[: ceiling - len(suffix)] + suffix
         if candidate not in taken:
             return candidate
     raise AssertionError  # pragma: no cover  # itertools.count never stops on its own
 
 
-def cut_output(text: str, limit: int) -> str:
-    """``text`` as is when it already fits ``limit``; otherwise cut, with a note at the end
+def cut_output(text: str, ceiling: int) -> str:
+    """``text`` as is when it already fits ``ceiling``; otherwise cut, with a note at the end
     saying how many characters were cut, instead of ``MARKER``: the model is told a number, not
-    shown a mark it has no context for."""
-    if len(text) <= limit:
+    shown a mark it has no context for.
+
+    The note counts what the model does not see, itself included in what fits under the Cap.
+    A Cap with no room for the note at all still gets the note, on its own: then the model is
+    told that everything was cut, which is the one thing it must know.
+    """
+    if len(text) <= ceiling:
         return text
-    note = f" [{len(text) - limit} characters cut]"
-    if limit <= len(note):
-        return text[:limit]
-    return text[: limit - len(note)] + note
+    kept = ceiling
+    while True:
+        note = f" [{len(text) - kept} characters cut]"
+        if kept + len(note) <= ceiling or kept == 0:
+            return text[:kept] + note
+        kept = max(0, ceiling - len(note))
 
 
 # --- what doctor reports -----------------------------------------------------------------------
