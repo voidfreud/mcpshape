@@ -4,7 +4,7 @@ Issues and specs for this repo live as GitHub issues. Use the `gh` CLI for all o
 
 ## Conventions
 
-- **Create an issue**: `gh issue create --title "..." --body "..."`. Use a heredoc for multi-line bodies. Every issue in this repo is a child ticket of the map (#2) and goes through the wayfinding operations below: linked, edged, labelled.
+- **Create an issue**: `gh issue create --title "..." --body "..."`. Use a heredoc for multi-line bodies. Every issue in this repo is a child ticket of the spec issue (#2), which serves as the map, and goes through the wayfinding operations below: linked, edged, labelled.
 - **Read an issue**: `gh issue view <number> --comments`, filtering comments by `jq` and also fetching labels.
 - **List issues**: `gh issue list --state open --json number,title,body,labels,comments --jq '[.[] | {number, title, body, labels: [.labels[].name], comments: [.comments[].body]}]'` with appropriate `--label` and `--state` filters.
 - **Comment on an issue**: `gh issue comment <number> --body "..."`
@@ -12,6 +12,15 @@ Issues and specs for this repo live as GitHub issues. Use the `gh` CLI for all o
 - **Close**: `gh issue close <number> --comment "..."`
 
 Infer the repo from `git remote -v`; `gh` does this automatically when run inside a clone.
+
+## Pull requests
+
+One pull request per wave: one issue, or a group of issues, with their review commits. The rule is the brief's, under Engineering; this is how a pull request looks here.
+
+- **Branch**: one per wave, off `main`, named `<type>/<slug>`. Brought up to date by rebasing onto `main`, never by merging `main` in. Every commit on it is a Conventional Commit, `type: subject`, and none of them is a merge commit; CI refuses the pull request otherwise (both rules are the brief's).
+- **Title**: Conventional Commit form, `type: subject`, the subject in the glossary's words.
+- **Body**, in this order: `## Summary` (what the wave delivers); `## What changed` (by module, with file names); `## Tests` (which files, what they assert, how they drive the seam); `## Review` (the findings the review commits applied); `## Facts recorded` (what went into `docs/clients.md`, when anything did); then `Closes #<n>` for every ticket the wave completes, none for a wave that changes only rules or docs. A reader who sees only the pull request knows what was built and how it was checked.
+- **Merge**: only once every CI check is green, with `gh pr merge <n> --merge --subject "<type>: <subject> (#<n>)"`, which is also what GitHub's merge button writes, since the repository's default merge subject is the pull request title. The branch is deleted on merge.
 
 ## Pull requests as a triage surface
 
@@ -37,9 +46,10 @@ Run `gh issue view <number> --comments`.
 
 Used by `/wayfinder`, and by any session that creates, claims, or closes an issue. The **map** is a single issue with **child** issues as tickets.
 
-- **Map**: a single issue labelled `wayfinder:map`, holding the Notes / Decisions-so-far / Fog body. `gh issue create --label wayfinder:map`.
-- **Child ticket**: an issue linked to the map as a GitHub sub-issue (`gh api` on the sub-issues endpoint). Where sub-issues aren't enabled, add the child to a task list in the map body and put `Part of #<map>` at the top of the child body. Labels: `wayfinder:<type>` (`research`/`prototype`/`grilling`/`task`). Once claimed, the ticket is assigned to the driving dev.
+- **Map**: a single issue labelled `wayfinder:map`. Here it is the spec issue (#2), whose body is the spec; a map charted by `/wayfinder` holds the Notes / Decisions-so-far / Fog body instead. `gh issue create --label wayfinder:map`.
+- **Child ticket**: an issue linked to the map as a GitHub sub-issue (`gh api` on the sub-issues endpoint). Where sub-issues aren't enabled, add the child to a task list in the map body and put `Part of #<map>` at the top of the child body. Labels: a triage label from `docs/agents/triage-labels.md` (`ready-for-agent` once fully specified), plus `bug` or `enhancement` on a follow-up filed while landing a wave; `wayfinder:<type>` (`research`/`prototype`/`grilling`/`task`) marks only a ticket charted by `/wayfinder`. The map carries `wayfinder:map` and no triage label. Once claimed, the ticket is assigned to the driving dev.
 - **Blocking**: GitHub's **native issue dependencies**, the canonical, UI-visible representation. Add an edge with `gh api --method POST repos/<owner>/<repo>/issues/<child>/dependencies/blocked_by -F issue_id=<blocker-db-id>`, where `<blocker-db-id>` is the blocker's numeric **database id** (`gh api repos/<owner>/<repo>/issues/<n> --jq .id`, _not_ the `#number` or `node_id`). GitHub reports `issue_dependencies_summary.blocked_by` (open blockers only, the live gate). Where dependencies aren't available, fall back to a `Blocked by: #<n>, #<n>` line at the top of the child body. A ticket is unblocked when every blocker is closed.
 - **Frontier query**: list the map's open children (`gh issue list --state open`, scoped to the map's sub-issues / task list), drop any with an open blocker (`issue_dependencies_summary.blocked_by > 0`, or an open issue in the `Blocked by` line) or an assignee; first in map order wins.
 - **Claim**: `gh issue edit <n> --add-assignee @me`, the session's first write.
-- **Resolve**: the wave's pull request body says `Closes #<n>` for every ticket it completes, and merging it green is what closes them (the rule is the brief's, under Engineering). A closed issue unblocks its dependents in the frontier query, so a ticket is never closed by hand before its merge. After the merge, `gh issue comment <n> --body "<answer>"` naming the commits it landed in, then append a context pointer (gist + link) to the map's Decisions-so-far.
+- **File**: follow-ups observed while landing a wave (the rule is the brief's, under Engineering): created, linked, edged, and labelled as above, before the wave's pull request merges.
+- **Resolve**: the wave's pull request body says `Closes #<n>` for every ticket it completes, and merging it green is what closes them (the rule is the brief's, under Engineering). A closed issue unblocks its dependents in the frontier query, so a ticket is never closed by hand before its merge. After the merge, `gh issue comment <n> --body "<answer>"` naming the commits it landed in, then append a context pointer (gist + link) as a comment on the map.

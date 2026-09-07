@@ -3,9 +3,9 @@ status: accepted
 date: 2026-09-07
 ---
 
-# Client-agnostic core, with per-Client Profiles for limits and integration
+# Client-agnostic core, with per-Client Profiles for limits and conveniences
 
-Claude Code is the first Client we care about and the one with the most documented limits, so the obvious path is to design around it. We decided not to. The core of mcpshape (Upstreams, Proxies, Overrides, Caps, Hooks, Virtual Tools, the Daemon, the file formats) knows nothing about any particular Client and speaks only MCP. Everything Client-specific lives in a Client Profile: the Client's known limits (name lengths, description and instruction truncation, output size, tool counts), its config file location and format, its transport support, and any conveniences it offers. `proxy install`, `upstream scan`, and default Caps consult the Profile for the target Client. Claude Code, and later others, may get tighter integration and niceties through a richer Profile, never through special cases in the core.
+Claude Code is the first Client we care about and the one with the most documented limits, so the obvious path is to design around it. We decided not to. The core of mcpshape (Upstreams, Proxies, Overrides, Caps, Hooks, Virtual Tools, the Daemon, the file formats) knows nothing about any particular Client and speaks only MCP. Everything Client-specific lives in a Client Profile: the Client's known limits (name lengths, description and instruction truncation, output size, tool counts), its config file location and format, its transport support, and any conveniences it offers. `proxy install` and `doctor` consult the Profile of the Client named on the command line, `upstream scan` searches every Profile's locations, and default Caps come from a Profile too. Claude Code, and later others, may get more conveniences through a richer Profile, never through special cases in the core.
 
 ## Considered options
 

@@ -5,7 +5,7 @@ A local proxy that sits between MCP clients and the MCP servers they use, so the
 ## Language
 
 **Upstream**:
-An existing MCP server that the user adds once, as shipped by an app or a service. Has one or more Proxies.
+An existing MCP server that the user adds once, local or hosted. Has one or more Proxies.
 _Avoid_: the MCP, source server, backend, remote
 
 **Proxy**:
@@ -17,8 +17,8 @@ An application that connects to a Proxy and lets a model use it, such as Claude 
 _Avoid_: app, host, harness, consumer
 
 **Client Profile**:
-What mcpshape knows about one kind of Client: its limits, where its configuration lives, what transports it accepts, and what integration conveniences it offers.
-_Avoid_: adapter, integration, target, harness config
+What mcpshape knows about one kind of Client: its limits, where its configuration lives, what transports it accepts, and what conveniences it offers.
+_Avoid_: integration, target, harness config
 
 **Catalog**:
 The set of tools, resources, and prompts an Upstream advertises, as last observed by mcpshape.
@@ -29,7 +29,7 @@ A declarative per-item edit to how a Catalog item is presented to a Client: a ne
 _Avoid_: transform, patch, rewrite, mapping
 
 **Cap**:
-A maximum length for a kind of text a Proxy exposes: names, descriptions, instructions, or tool output.
+The ceiling on how long a kind of text a Proxy exposes may be: names, descriptions, instructions, or tool output.
 _Avoid_: limit, truncation, max length, budget
 
 **Hook**:
@@ -41,9 +41,21 @@ A tool a Proxy exposes that has no counterpart in the Upstream's Catalog.
 _Avoid_: custom tool, synthetic tool, composite tool
 
 **Drift**:
-The difference between the stored Catalog and what the Upstream advertises now.
+Where the stored Catalog and what the Upstream advertises now disagree: items added, gone, or altered.
 _Avoid_: diff, change, delta, update
 
 **Daemon**:
 The single long-running mcpshape process.
 _Avoid_: server, service, agent, engine
+
+**Exposed set**:
+What a Proxy advertises to Clients: the accepted Catalog after Overrides and Caps, plus its Virtual Tools. An item's exposed name is what a Client sees; its Catalog name is its identity everywhere else.
+_Avoid_: public tools, visible tools, alias
+
+**Shim**:
+The hidden `serve` command: speaks stdio to a Client, forwards to one Proxy over Streamable HTTP, and starts the Daemon if it is not running. For Clients that accept only stdio.
+_Avoid_: bridge, wrapper, launcher
+
+**Adapter**:
+The one module that imports FastMCP and turns an Upstream with its Overrides, Caps, Hooks, and Virtual Tools into a running Proxy. Nothing else in mcpshape, and nothing a user writes, sees a FastMCP type.
+_Avoid_: wrapper, internal layer, bridge

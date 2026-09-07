@@ -6,6 +6,34 @@ on:
   pull_request:
 
 jobs:
+  conventional:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Title and every commit are Conventional Commits, no merge commits on the branch
+        env:
+          TITLE: ${{ github.event.pull_request.title }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          pattern='^(build|chore|ci|docs|feat|fix|perf|refactor|revert|style|test)(\([a-z0-9._/-]+\))?!?: [^ ].*$'
+          fail=0
+          if ! printf '%s\n' "$TITLE" | grep -Eq "$pattern"; then
+            echo "::error::pull request title is not a Conventional Commit: $TITLE"; fail=1
+          fi
+          while IFS= read -r line; do
+            sha=${line%% *}; subject=${line#* }
+            if [ "$(git rev-list --parents -n 1 "$sha" | wc -w)" -gt 2 ]; then
+              echo "::error::$sha is a merge commit; rebase the branch instead"; fail=1
+            fi
+            if ! printf '%s\n' "$subject" | grep -Eq "$pattern"; then
+              echo "::error::$sha is not a Conventional Commit: $subject"; fail=1
+            fi
+          done < <(git log --format='%H %s' "$BASE..$HEAD")
+          exit $fail
   test:
     strategy:
       fail-fast: false

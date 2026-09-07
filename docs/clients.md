@@ -10,7 +10,7 @@ data for Client Profiles. Checked 2026-09-06/07 against primary documentation.
 - Streamable HTTP accepted by: Claude Code, Claude Desktop (Connectors UI only, not its config
   file), Cursor, Windsurf, VS Code, Gemini CLI, Codex CLI, Goose, JetBrains, Cline, Continue,
   OpenCode.
-- stdio only: Zed. Claude Desktop's config file. Both would need a stdio bridge to reach an HTTP server.
+- stdio only: Zed. Claude Desktop's config file. Both need the Shim to reach an HTTP server.
 - Remote HTTPS only: ChatGPT.
 
 ### Behavior

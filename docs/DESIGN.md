@@ -1,9 +1,10 @@
 # mcpshape design brief
 
-Outcome of the design session of 2026-09-06/07, recorded verbatim in `docs/sessions/`. Vocabulary is in `CONTEXT.md`, the
-reasoning behind the hard-to-reverse decisions in `docs/adr/`, and the dated Client and
-FastMCP facts the decisions rest on in `docs/clients.md`. This is the shared understanding
-the implementation starts from.
+Outcome of the design session of 2026-09-06/07, recorded verbatim in `docs/sessions/`; that
+transcript is history, not rules, and this brief wins where they differ. Vocabulary is in
+`CONTEXT.md`, the reasoning behind the hard-to-reverse decisions in `docs/adr/`, and the dated
+Client and FastMCP facts the decisions rest on in `docs/clients.md`. This is the shared
+understanding the implementation starts from.
 
 ## Why
 
@@ -28,10 +29,10 @@ what a model sees, per server, without touching the server.
 A local, per-user daemon that sits between MCP Clients and the MCP servers they use.
 Each Upstream is added once and gets one or more Proxies. A Proxy is a curated MCP
 server of its own: tools hidden, renamed, re-described, capped, hooked, or added,
-before a model sees them. Never a merged endpoint (ADR 0002).
+before a model sees them. A Proxy serves one Upstream; Upstreams are never merged (ADR 0002).
 
 Built on unmodified FastMCP 4.x, pinned to a major, with every FastMCP touchpoint
-behind a thin internal layer so user-facing files and APIs survive FastMCP churn (ADR 0001).
+behind the Adapter so user-facing files and APIs survive FastMCP churn (ADR 0001).
 
 Client-agnostic: the core speaks only MCP and knows no Client. Everything Client-specific,
 limits, config paths, transports, conveniences, lives in a Client Profile (ADR 0003).
@@ -57,7 +58,7 @@ Claude Code is the first and best-integrated Profile, never a special case in th
 - Every Upstream gets a Proxy named `default` when it is added.
 - Streamable HTTP is the Client-facing transport. A hidden `serve` stdio shim speaks stdio to
   the Client, forwards to the Proxy URL, and starts the Daemon if it is not running. It exists for the Clients that accept only stdio (see `docs/clients.md`).
-  `proxy install` writes whichever form the target Client needs.
+  `proxy install` writes whichever form the Client named with `--to` needs.
 
 ### Upstream lifecycle
 - Lazy by default: connect on first tool call, disconnect after `idle_timeout`
@@ -77,7 +78,7 @@ Claude Code is the first and best-integrated Profile, never a special case in th
   and on `upstream sync`.
 - Drift default: new items hidden, vanished items' Overrides kept as orphaned. The default
   is configurable in the global settings. The CLI prints a one-line notice on every command until
-  the Drift is reviewed. `upstream sync` shows the diff; `--accept` applies it.
+  the Drift is reviewed. `upstream sync` shows the Drift; `--accept` applies it.
 - A Proxy's exposed set changes only on accept, so `tools/list_changed` reaches Clients only
   then. Most Clients need a reconnect to see it; the CLI and dashboard say so.
 
@@ -89,8 +90,8 @@ Claude Code is the first and best-integrated Profile, never a special case in th
 2. **Caps**: ceilings on the length of tool names, tool and argument descriptions, Proxy
    instructions, and tool output. One global master Cap per kind; an Upstream, a Proxy, or a
    tool may each only lower what it inherits (global, then Upstream, then Proxy, then tool).
-   Truncation appends a marker; truncated output tells the
-   model how much was cut.
+   Names, descriptions, and instructions cut to a Cap end with a marker; tool output cut to a
+   Cap instead tells the model how much was cut.
 3. **Hooks**: user Python, before/after per tool, resource, and prompt. Can rewrite args and
    results, short-circuit, or raise. Reach only their own Upstream.
 4. **Virtual Tools**: user Python tools with a handle to call their own Upstream.
@@ -105,7 +106,7 @@ Claude Code is the first and best-integrated Profile, never a special case in th
 - Hooks run in-process with no sandbox. Exceptions become tool errors and log lines. A Hook
   that blocks forever or calls `sys.exit` is not guarded against; this is documented, not solved.
 - Files are watched and the affected Proxy reloaded (`daemon reload` also exists). Load errors
-  mark the Proxy unhealthy: it keeps advertising its last exposed tool set and every call
+  mark the Proxy unhealthy: it keeps advertising its last exposed set and every call
   returns a tool error naming the Proxy and reason. Nothing reaches the Upstream. The Daemon
   never crashes on user code.
 - Per-Proxy `instructions` override is a first-class feature: in Clients that defer tool
@@ -128,17 +129,17 @@ Claude Code is the first and best-integrated Profile, never a special case in th
 ### Client Profiles
 - One Profile per supported Client: config file path and format, transports accepted, whether
   the stdio shim is needed, the naming scheme the Client applies to tool names, documented
-  limits with source and date, and integration extras. Seed data: `docs/clients.md`.
-- Consumers: `proxy install` (writes the right entry, optionally disables the Client's
-  original entry for that server, warns when names exceed the Client's budget),
+  limits with source and date, and conveniences. Seed data: `docs/clients.md`.
+- Used by: `proxy install` (writes the right entry, optionally disables the Client's
+  original entry for that server, warns when names exceed what the Client allows),
   `upstream scan` (where to look), default Caps, and `doctor` (validates exposed names and
-  schemas against the target Profile's rules).
+  schemas against the Profile of the Client named with `--for`).
 - Limits are dated facts; nothing is enforced silently.
 - Initial Profiles: every Client listed in `docs/clients.md`. Only those with documented
   limits carry real numbers at first.
 - Claude Code Profile defaults, set now: Caps for tool descriptions and Proxy instructions
-  comfortably under the documented 2KB truncation, and `doctor` reminds that critical text
-  goes first because the first sentence carries the routing hint.
+  comfortably under the 2KB at which Claude Code cuts them off, and `doctor` reminds that
+  critical text goes first because the first sentence carries the routing hint.
 
 ### Observability
 - App log with standard levels. Verbose by default during development; configurable down to
@@ -161,7 +162,7 @@ mcpshape doctor
 - `doctor` validates every config file against the shipped schema and loads every user Python
   file without starting anything, then reports.
 - `tool trim` shows the original description and opens it for editing. It is a replace;
-  automatic truncation is a Cap.
+  cutting text to a length is a Cap.
 - `upstream scan` discovers servers in known Client config locations, typical directories,
   and any directory the user names.
 
@@ -175,19 +176,33 @@ mcpshape doctor
 ### Engineering
 - uv, ruff (strict), pyright strict, pytest with in-memory FastMCP Upstreams, Hypothesis for
   config round-trips and Override application over generated Catalogs. A benchmark script for
-  proxy overhead instead of a stress-test suite. GitHub Actions on macOS and Linux.
-  Conventional commits, semver. MIT.
+  proxy overhead instead of a stress-test suite. GitHub Actions on macOS and Linux. Semver. MIT.
+- Every commit message, pull request title, and merge subject is a Conventional Commit,
+  `type: subject`, the subject in the glossary's words. CI checks a pull request's title and
+  every commit on its branch, and the ruleset requires that check; the repository's default
+  merge subject is the pull request title, so a merge carries a checked subject.
 - Protected `main`: pull requests only, one per wave (one issue, or a group of issues, with
-  their review commits), merged with a merge commit once CI is green. The merge closes the
-  wave's tickets. The ruleset refuses anything else; nothing is ever committed on `main`.
+  their review commits; a wave that changes only rules or docs has no ticket), merged with a
+  merge commit once CI is green. The merge closes the wave's tickets. The ruleset refuses
+  anything else; nothing is ever committed on `main`. How a branch is kept, and how a pull
+  request is titled, written, and merged, is in `docs/agents/issue-tracker.md`.
+- A wave's branch is brought up to date by rebasing onto `main`, never by merging `main` in;
+  CI refuses a branch that holds a merge commit.
+- A wave is reviewed on its branch before its pull request opens, on two axes: standards,
+  against this brief and the glossary, and spec, against the ticket. The findings are applied
+  in review commits on the same branch, and the session landing the wave reads the riskiest
+  file itself, whoever wrote it. A finding is never deferred to a later pull request.
+- A session files every follow-up it observes while landing a wave, as a child ticket of the
+  spec with labels and blocked-by edges, before the wave's pull request merges. Nothing is
+  left for the user to remember.
 - Tests drive the system through one seam: a temp config directory, the Daemon app in-process,
   in-memory Upstreams, a FastMCP Client over ASGI, and the CLI via Typer's runner. Tests never
   import internal modules to assert on their state. Exceptions: the stdio shim (real subprocess),
-  autostart unit writers (golden files), the FastMCP adapter contract tests,
+  autostart unit writers (golden files), the Adapter contract tests,
   `tests/test_config_roundtrip.py` (the tomlkit round-trip property, at the config module),
   `tests/test_overrides_property.py` (the Override application property, at the proxy module), and
   `tests/test_boundaries.py`, which reads source files to enforce the import rule below.
-- Only the FastMCP adapter module imports FastMCP (ADR 0001). A FastMCP behavior that
+- Only the Adapter imports FastMCP (ADR 0001). A FastMCP behavior that
   mcpshape's code relies on is pinned in `tests/test_fastmcp_contract.py`; a docstring or
   `docs/clients.md` alone does not count.
 - One repo, modular for clarity. Dashboard as a separate package directory in the same repo,
@@ -207,8 +222,8 @@ mcpshape doctor
   keychain is painful headless and under launchd.
 - Expression mini-language for Hooks: a second thing to design; Python only.
 - Passing new Catalog items through by default: violates "nothing reaches the model unasked".
-- Empty tool list for an unhealthy Proxy: Clients keep cached tool lists and call anyway, so
-  the last exposed set stays advertised and every call errors instead.
+- An empty exposed set for an unhealthy Proxy: Clients keep the tools they last received and
+  call anyway, so the last exposed set stays advertised and every call errors instead.
 - Serving Overrides without Hooks when user code fails: would silently skip rewrites.
 - pip/pipx as documented install paths: uv only.
 
@@ -217,19 +232,20 @@ mcpshape doctor
 - Per-Proxy "search + call" meta-tools for long-tail Upstreams (FastMCP's Tool Search
   transform). Progressive disclosure inside a Proxy, opt-in only; never the default.
 - Emitting Client-specific `_meta` hints from a Profile when the Client documents them.
-- Cross-Proxy calls from user code: would become the merged endpoint by another route.
+- Cross-Proxy calls from user code: would merge Upstreams by another route.
 - Programmatic tool-list Hooks.
-- Virtual Upstreams (tools wrapping non-MCP things); composite tools beyond Virtual Tools.
+- Virtual Upstreams (tools wrapping non-MCP things); tools composed across Upstreams, beyond
+  Virtual Tools.
 - OS keychain for secrets.
 - Windows: "not required at this stage".
 - Dashboard framework choice: separate design session. Constraints: lightweight, nothing the
-  backend already does, CLI parity via the management API only.
+  Daemon already does, CLI parity via the management API only.
 
 ## Out of scope
-- Merging Upstreams into one endpoint. Hosting or running Upstreams remotely.
+- Merging Upstreams into one Proxy. Hosting or running Upstreams remotely.
 
 ## To verify before relying on it
-- Claude Code's documented 2KB truncation of instructions and tool descriptions: measure the
+- Claude Code's documented 2KB cutoff of instructions and tool descriptions: measure the
   exact cutoff (characters vs bytes) and whether it is per server or a shared pool across
   servers. Test with a throwaway Upstream. Tighten the Claude Code Profile's default Caps
   to the measured numbers if they differ.

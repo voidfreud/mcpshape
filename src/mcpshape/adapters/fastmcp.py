@@ -3,7 +3,7 @@
 The rest of mcpshape sees three things: ``scan``, which turns an Upstream into a Catalog,
 ``proxy_app``, an ASGI app per Proxy that serves lists from what it is handed and forwards
 calls to the Upstream under Catalog names through ``UpstreamConnection``, one Upstream's
-shared client behind its lifecycle state machine, and ``run_stdio_bridge``, the stdio shim's
+shared client behind its lifecycle state machine, and ``run_shim``, the stdio shim's
 other half.
 
 FastMCP's proxy components keep the backend name when they are copied under a new one, which
@@ -222,7 +222,7 @@ async def scan(transport: Transport) -> Catalog:
     )
 
 
-def run_stdio_bridge(url: str) -> None:
+def run_shim(url: str) -> None:
     """Speak MCP over stdio and forward every request to the Proxy served at ``url``.
 
     The other half of the hidden ``serve`` command, for the Clients that accept stdio only.
