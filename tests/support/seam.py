@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING
 import pytest
 from fastmcp import Client, FastMCP
 from fastmcp.client.transports import StreamableHttpTransport
-from typer.testing import CliRunner
+from typer.testing import CliRunner, Result  # annotated at runtime
 
 from mcpshape.cli import app
 from mcpshape.daemon import build_app
@@ -91,10 +91,12 @@ async def running_daemon(cfg: ConfigDir) -> AsyncGenerator[RunningDaemon]:
 
 @dataclass(frozen=True)
 class CliResult:
-    """What the user saw: exit code and the combined output."""
+    """What the user saw: exit code, the combined output, and stdout on its own."""
 
     exit_code: int
     output: str
+    stdout: str
+    """Only what went to stdout, so a test can parse what a command was asked to print."""
 
 
 def run_cli(cfg: ConfigDir, *args: str) -> CliResult:
@@ -102,10 +104,18 @@ def run_cli(cfg: ConfigDir, *args: str) -> CliResult:
     result = CliRunner().invoke(
         app, ["--config-dir", str(cfg.path), "--state-dir", str(cfg.state), *args], env=CLI_ENV
     )
-    return CliResult(exit_code=result.exit_code, output=ANSI.sub("", result.output))
+    return _result(result)
 
 
 def run_cli_with_env(env: dict[str, str], *args: str) -> CliResult:
     """Run the CLI without ``--config-dir``, letting ``env`` decide where config lives."""
     result = CliRunner().invoke(app, list(args), env={**CLI_ENV, **env})
-    return CliResult(exit_code=result.exit_code, output=ANSI.sub("", result.output))
+    return _result(result)
+
+
+def _result(result: Result) -> CliResult:
+    return CliResult(
+        exit_code=result.exit_code,
+        output=ANSI.sub("", result.output),
+        stdout=ANSI.sub("", result.stdout),
+    )
