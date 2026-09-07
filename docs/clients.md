@@ -60,8 +60,8 @@ data for Client Profiles. Checked 2026-09-06/07 against primary documentation.
 - Goose: YAML `extensions:` block. Cline: `cline_mcp_settings.json`.
   Continue: `config.yaml`. OpenCode: `opencode.json`.
 
-## FastMCP 4.0.1
-- Requires Python 3.10+. Public API changed 2.x to 3.0 (Feb 2026) and 3.0 to 4.0 (Aug 2026).
+## FastMCP 4.0.3
+- Requires Python 3.10+. Ships with `httpx2` (the `httpx` 2.x package name) and `mcp` 2.x. Public API changed 2.x to 3.0 (Feb 2026) and 3.0 to 4.0 (Aug 2026).
 - `create_proxy` accepts URL, path, or `mcpServers` dict; forwards tools, resources, prompts,
   logging, progress. Caches upstream lists with a 300 s default TTL.
 - `ToolTransform` renames, re-describes, tags, hides or renames arguments. No output-schema
@@ -69,7 +69,12 @@ data for Client Profiles. Checked 2026-09-06/07 against primary documentation.
 - `Middleware` hooks: `on_call_tool`, `on_list_tools`, `on_read_resource`, `on_get_prompt`, etc.
 - Tool Search transform: server-side deferral behind search and call meta-tools, with an
   `always_visible` list.
-- Multiple servers in one process: mount each `http_app()` into one Starlette app.
+- Multiple servers in one process: mount each `http_app()` into one Starlette app. Each
+  `http_app()` has its own lifespan that must run, so the parent app composes them.
+- In-process testing: `fastmcp.utilities.asgi_transport.StreamingASGITransport` drives an ASGI
+  app from an `httpx2.AsyncClient`, streaming responses, so a FastMCP `Client` can reach
+  `http_app()` with no sockets via `httpx_client_factory`. The factory is called with
+  `follow_redirects` on top of what `McpHttpClientFactory` declares.
 - Client transports: stdio, Streamable HTTP, SSE, in-memory. OAuth client built in; tokens
   in-memory by default, persistence must be supplied.
 - Protocol is sessionless by default in 4.x; server-initiated sampling and roots are removed,

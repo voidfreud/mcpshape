@@ -1,0 +1,62 @@
+[project]
+name = "mcpshape"
+version = "0.1.0"
+description = "A local proxy that reshapes what MCP servers expose."
+readme = "README.md"
+license = "MIT"
+authors = [
+    { name = "Void Freud", email = "246163318+voidfreud@users.noreply.github.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "fastmcp>=4,<5",
+    "starlette>=1.0",
+]
+
+[dependency-groups]
+dev = [
+    "hypothesis>=6",
+    "pyright>=1.1",
+    "pytest>=9",
+    "pytest-asyncio>=1",
+    "ruff>=0.16",
+]
+
+[build-system]
+requires = ["uv_build>=0.12.9,<0.13.0"]
+build-backend = "uv_build"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+src = ["src", "tests"]
+extend-exclude = ["docs"]
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = [
+    "D",       # docstrings are not enforced by a linter
+    "CPY",     # no per-file copyright notices
+    "COM812",  # conflicts with the formatter
+    "ISC001",  # conflicts with the formatter
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = [
+    "S101",    # asserts are the point of tests
+    "PLR2004", # literal expected values are the point of tests
+]
+
+[tool.pyright]
+pythonVersion = "3.12"
+typeCheckingMode = "strict"
+include = ["src", "tests"]
+venvPath = "."
+venv = ".venv"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+filterwarnings = ["error"]
