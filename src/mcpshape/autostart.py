@@ -9,7 +9,10 @@ from __future__ import annotations
 
 import getpass
 import plistlib
+import shlex
+import shutil
 import subprocess  # the one thin edge: registering the unit with the OS
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -23,16 +26,24 @@ SYSTEMD_UNIT_NAME = "mcpshape.service"
 class AutostartPaths:
     """What the written unit needs to know to run the Daemon the way this machine does.
 
-    ``mcpshape`` is the command the unit invokes: the installed console script (the
-    ``uv tool install`` path), found on the unit's own ``PATH``, never a path baked in from
-    this process's own interpreter. ``config_dir``/``state_dir`` are set only when the user
-    overrode the defaults, so the common case writes no environment at all.
+    ``command`` is how the unit invokes mcpshape, by absolute path: launchd and systemd run
+    units with a PATH of their own that never holds ``~/.local/bin``, where ``uv tool``
+    installs, so a bare name would not be found. ``config_dir``/``state_dir`` are set only
+    when the user overrode the defaults, so the common case writes no environment at all.
     """
 
     log_dir: Path
-    mcpshape: str = "mcpshape"
+    command: tuple[str, ...]
     config_dir: Path | None = None
     state_dir: Path | None = None
+
+
+def installed_command() -> tuple[str, ...]:
+    """How to run mcpshape from a unit: the installed console script by absolute path, or,
+    when none is on this PATH, this interpreter running the package."""
+    if found := shutil.which("mcpshape"):
+        return (str(Path(found).resolve()),)
+    return (sys.executable, "-m", "mcpshape")
 
 
 def launchd_plist_path() -> Path:
@@ -56,9 +67,10 @@ def render_launchd_plist(paths: AutostartPaths) -> bytes:
     """The launchd user agent ``daemon install`` writes on macOS."""
     plist: dict[str, object] = {
         "Label": LABEL,
-        "ProgramArguments": [paths.mcpshape, "daemon", "up"],
+        "ProgramArguments": [*paths.command, "daemon", "up"],
         "RunAtLoad": True,
-        "KeepAlive": True,
+        # Relaunch a Daemon that died, not one `daemon down` stopped: that exits 0.
+        "KeepAlive": {"SuccessfulExit": False},
         "StandardOutPath": str(paths.log_dir / "daemon.out.log"),
         "StandardErrorPath": str(paths.log_dir / "daemon.err.log"),
     }
@@ -75,7 +87,7 @@ def render_systemd_unit(paths: AutostartPaths) -> str:
         "After=network.target",
         "",
         "[Service]",
-        f"ExecStart={paths.mcpshape} daemon up",
+        f"ExecStart={shlex.join([*paths.command, 'daemon', 'up'])}",
         "Restart=on-failure",
         f"StandardOutput=append:{paths.log_dir / 'daemon.out.log'}",
         f"StandardError=append:{paths.log_dir / 'daemon.err.log'}",

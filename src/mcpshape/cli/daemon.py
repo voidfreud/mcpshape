@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
-import os
 import platform
 import sys
 import time
@@ -27,14 +26,12 @@ from mcpshape.cli.common import (
 from mcpshape.cli.listing import health_text, state_text
 from mcpshape.cli.live import Live, how_long, read_live, stop_daemon
 from mcpshape.config import load_settings
-from mcpshape.daemon import is_loopback
-from mcpshape.paths import daemon_lock_file, daemon_log_file, daemon_pid_file, log_dir
+from mcpshape.paths import daemon_lock_file, daemon_log_file, log_dir
 
 if TYPE_CHECKING:
     from collections.abc import Generator
     from pathlib import Path
 
-    from mcpshape.config import DaemonSettings
 
 app = typer.Typer(
     help="Operate the Daemon: up, down, status, logs, install, uninstall.",
@@ -53,14 +50,6 @@ POLL_INTERVAL = 0.05
 
 LOG_LINES = 100
 """How many lines ``daemon logs`` shows by default."""
-
-
-def _refuse_insecure_bind(settings: DaemonSettings) -> None:
-    if not is_loopback(settings.host) and not settings.token:
-        fail(
-            f"binding to {settings.host!r}, which is not loopback, needs a bearer token: "
-            'set [daemon] token = "..." in config.toml, or bind to 127.0.0.1'
-        )
 
 
 @contextlib.contextmanager
@@ -100,7 +89,7 @@ def up(ctx: typer.Context) -> None:
     config_dir, state_dir = state(ctx).config_dir, state(ctx).state_dir
     with reporting_errors():
         settings = load_settings(config_dir).daemon
-        _refuse_insecure_bind(settings)
+        daemon.check_bind(settings)
     with _lock(state_dir) as owned:
         if not owned:
             console.print("Another Daemon is starting or already running; waiting for it...")
@@ -114,14 +103,10 @@ def up(ctx: typer.Context) -> None:
         if answering(settings.host, settings.port):
             console.print(f"Daemon already running at http://{settings.host}:{settings.port}")
             return
-        pid_file = daemon_pid_file(state_dir)
-        pid_file.write_text(str(os.getpid()))
-        try:
-            _offer_install(config_dir, state_dir)
-            console.print(f"Daemon listening on http://{settings.host}:{settings.port}")
-            daemon.run(config_dir, state_dir)
-        finally:
-            pid_file.unlink(missing_ok=True)
+        _offer_install(config_dir, state_dir)
+        console.print(f"Daemon listening on http://{settings.host}:{settings.port}")
+        console.print(f"Logging to {daemon_log_file(state_dir)}")
+        daemon.run(config_dir, state_dir)
 
 
 @app.command("down", epilog=example("daemon down"))
@@ -215,6 +200,7 @@ def _autostart_paths(config_dir: Path, state_dir: Path) -> autostart.AutostartPa
 
     return autostart.AutostartPaths(
         log_dir=log_dir(state_dir),
+        command=autostart.installed_command(),
         config_dir=config_dir if config_dir != default_config_dir() else None,
         state_dir=state_dir if state_dir != default_state_dir() else None,
     )

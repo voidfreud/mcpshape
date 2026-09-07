@@ -205,7 +205,9 @@ mcpshape doctor
   autostart unit writers (golden files), the Adapter contract tests,
   `tests/test_config_roundtrip.py` (the tomlkit round-trip property, at the config module),
   `tests/test_overrides_property.py` (the Override application property, at the proxy module), and
-  `tests/test_boundaries.py`, which reads source files to enforce the import rule below.
+  `tests/test_boundaries.py`, which reads source files to enforce the import rule below, and
+  the keeper fault injection in `tests/test_upstream_lifecycle.py`, since no Client-driven path
+  makes the keeper raise.
 - Only the Adapter imports FastMCP (ADR 0001). A FastMCP behavior that
   mcpshape's code relies on is pinned in `tests/test_fastmcp_contract.py`; a docstring or
   `docs/clients.md` alone does not count.

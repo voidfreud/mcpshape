@@ -43,7 +43,3 @@ def daemon_log_file(state_dir: Path) -> Path:
 def daemon_lock_file(state_dir: Path) -> Path:
     """Held for the life of a running Daemon, so a second start sees the first (#13)."""
     return state_dir / "daemon.lock"
-
-
-def daemon_pid_file(state_dir: Path) -> Path:
-    return state_dir / "daemon.pid"

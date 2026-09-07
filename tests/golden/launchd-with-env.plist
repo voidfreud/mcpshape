@@ -10,12 +10,15 @@
 		<string>/home/tester/.local/state/mcpshape-alt</string>
 	</dict>
 	<key>KeepAlive</key>
-	<true/>
+	<dict>
+		<key>SuccessfulExit</key>
+		<false/>
+	</dict>
 	<key>Label</key>
 	<string>org.voidfreud.mcpshape</string>
 	<key>ProgramArguments</key>
 	<array>
-		<string>mcpshape</string>
+		<string>/home/tester/.local/bin/mcpshape</string>
 		<string>daemon</string>
 		<string>up</string>
 	</array>

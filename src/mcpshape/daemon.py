@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hmac
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -30,6 +31,7 @@ from mcpshape import catalog as catalogs
 from mcpshape.adapters.fastmcp import UpstreamConnection, proxy_app, scan, server_name
 from mcpshape.config import (
     ConfigError,
+    DaemonSettings,
     load_proxy,
     load_settings,
     load_upstreams,
@@ -40,6 +42,7 @@ from mcpshape.config import (
 from mcpshape.connection import SystemClock, TimedOutError, bounded
 from mcpshape.hooks import UserCodeError, load_user_code
 from mcpshape.model import DEFAULT_PROXY_NAME, CapError, CapSettings
+from mcpshape.paths import daemon_log_file
 from mcpshape.proxy import Exposed, OverrideError, cap, expose
 
 if TYPE_CHECKING:
@@ -70,6 +73,19 @@ def is_loopback(host: str) -> bool:
     return host in {"127.0.0.1", "::1", "localhost"} or host.startswith("127.")
 
 
+def check_bind(settings: DaemonSettings) -> None:
+    """Refuse a bind anything but this machine could reach unless a bearer token guards it.
+
+    Raises ``ConfigError``; the Daemon checks this itself, however it was started.
+    """
+    if not is_loopback(settings.host) and not settings.token:
+        msg = (
+            f"binding to {settings.host!r}, which is not loopback, needs a bearer token: "
+            'set [daemon] token = "..." in config.toml, or bind to 127.0.0.1'
+        )
+        raise ConfigError(msg)
+
+
 class _BearerAuth:
     """Requires ``Authorization: Bearer <token>`` on every HTTP request when a token is set.
 
@@ -91,7 +107,7 @@ class _BearerAuth:
     def _authorized(self, scope: Scope) -> bool:
         headers: dict[bytes, bytes] = dict(scope.get("headers") or ())
         given: bytes = headers.get(b"authorization", b"")
-        return given == f"Bearer {self._token}".encode("latin-1")
+        return hmac.compare_digest(given, f"Bearer {self._token}".encode("latin-1"))
 
 
 def _authed(app: ASGIApp, token: str | None) -> ASGIApp:
@@ -496,9 +512,32 @@ async def serve_all(daemon: DaemonApp, host: str, port: int) -> None:
     )
 
 
+def log_to_file(state_dir: Path) -> None:
+    """Send the app log to the state directory, where ``daemon logs`` reads it.
+
+    Standard levels, verbose for now; #16 brings the level setting and the size-based
+    rotation. Adding the handler twice would double every line, so it is added once.
+    """
+    path = daemon_log_file(state_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    app_log = logging.getLogger("mcpshape")
+    if any(
+        isinstance(h, logging.FileHandler) and h.baseFilename == str(path) for h in app_log.handlers
+    ):
+        return
+    handler = logging.FileHandler(path)
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+    app_log.addHandler(handler)
+    app_log.setLevel(logging.INFO)
+
+
 def run(config_dir: Path, state_dir: Path) -> None:
     """Build the Daemon app from ``config_dir`` and serve it, and every port override, until
-    ``daemon down`` or a signal stops it."""
+    ``daemon down`` or a signal stops it. Refuses an unguarded non-loopback bind itself."""
     settings = load_settings(config_dir).daemon
+    check_bind(settings)
+    log_to_file(state_dir)
+    log.info("Daemon starting on %s:%d", settings.host, settings.port)
     app = build_app(config_dir, state_dir, token=settings.token)
     asyncio.run(serve_all(app, settings.host, settings.port))
+    log.info("Daemon stopped")

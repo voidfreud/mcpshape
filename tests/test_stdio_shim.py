@@ -147,6 +147,8 @@ async def test_the_shim_starts_the_daemon_when_nothing_answers(
             assert (await client.call_tool("add", {"a": 2, "b": 3})).data == 5
         started = daemons_in(log)
         assert len(started) == 1, log.read_text()
+        logs = await asyncio.to_thread(run_cli, config_dir, "daemon", "logs")
+        assert "Daemon starting" in logs.stdout, "a Daemon daemon up ran writes the app log"
 
     wait_for_exit(started[0])
 
