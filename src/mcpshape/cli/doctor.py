@@ -9,10 +9,9 @@ import typer
 from rich.markup import escape
 
 from mcpshape import catalog, config
-from mcpshape.cli.common import console, fail, state
-from mcpshape.cli.proxy import entry_name
+from mcpshape.cli.common import client_profile, console, state, unscanned_note
 from mcpshape.names import InvalidNameError, check_name
-from mcpshape.profiles import Profile, UnknownClientError, profile
+from mcpshape.profiles import Profile, entry_name
 from mcpshape.proxy import exposed_catalog, orphaned_overrides
 
 if TYPE_CHECKING:
@@ -86,15 +85,14 @@ class Review:
 
     def check_proxy(self, path: Path, server: str, exposed: catalog.Catalog) -> None:
         """Judge one Proxy's exposed tools by the Client's naming scheme and property rule."""
-        scheme, properties = self.client.scheme, self.client.properties
-        refused = self.problems if scheme.overflow == "reject" else self.warnings
-        if broken := scheme.server_violation(server):
-            refused.append(config.Problem(path, "", broken))
+        refused = self.problems if self.client.scheme.overflow == "reject" else self.warnings
+        refused.extend(
+            config.Problem(path, "", broken)
+            for broken in self.client.name_violations(server, exposed.tools)
+        )
+        if (properties := self.client.properties) is None:
+            return
         for tool, definition in exposed.tools.items():
-            if broken := scheme.violation(server, tool):
-                refused.append(config.Problem(path, f"tools.{tool}", broken))
-            if properties is None:
-                continue
             self.problems.extend(
                 config.Problem(path, f"tools.{tool}", broken)
                 for name in property_names(definition)
@@ -114,25 +112,15 @@ def review(config_dir: Path, state_dir: Path, client: Profile) -> Review:
     for upstream in config.load_upstreams(config_dir):
         stored = catalog.load_catalog(state_dir, upstream.name)
         if stored is None:
-            found.notes.append(
-                f"No stored Catalog for {upstream.name}, so no name was checked against "
-                f"{client.name}. Run: mcpshape upstream sync {upstream.name}"
-            )
+            found.notes.append(unscanned_note(upstream.name, client))
             continue
         for proxy in upstream.proxies:
             found.check_proxy(
                 config.proxy_file(config_dir, upstream.name, proxy),
-                entry_name(upstream.name, proxy, None),
+                entry_name(upstream.name, proxy),
                 exposed_catalog(stored, config.load_proxy(config_dir, upstream.name, proxy)),
             )
     return found
-
-
-def client_profile(slug: str) -> Profile:
-    try:
-        return profile(slug)
-    except UnknownClientError as exc:
-        fail(str(exc))
 
 
 ForOpt = Annotated[

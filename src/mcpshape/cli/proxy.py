@@ -11,9 +11,10 @@ import typer
 from rich.markup import escape
 from tomlkit.exceptions import TOMLKitError
 
-from mcpshape import catalog, config, profiles
+from mcpshape import catalog, config
 from mcpshape.cli.common import (
     HELP_OPTIONS,
+    client_profile,
     confirm_or_abort,
     console,
     example,
@@ -21,10 +22,11 @@ from mcpshape.cli.common import (
     parse_proxy_ref,
     reporting_errors,
     state,
+    unscanned_note,
 )
 from mcpshape.cli.listing import proxies_table, proxy_url, toml_file
-from mcpshape.model import DEFAULT_PROXY_NAME
 from mcpshape.names import check_name
+from mcpshape.profiles import entry_name
 from mcpshape.proxy import exposed_catalog
 
 if TYPE_CHECKING:
@@ -139,7 +141,7 @@ ForOpt = Annotated[
         "--for",
         metavar="CLIENT",
         show_default=False,
-        help="Shape the entry the way this Client wants it, by slug.",
+        help="Shape the entry, and the section it sits in, the way this Client wants it.",
     ),
 ]
 
@@ -149,20 +151,6 @@ def plain(text: str) -> None:
     console.print(text, markup=False, highlight=False)
 
 
-def load_profile(slug: str) -> Profile:
-    try:
-        return profiles.profile(slug)
-    except profiles.UnknownClientError as exc:
-        fail(str(exc))
-
-
-def entry_name(upstream: str, proxy: str, override: str | None) -> str:
-    """``<upstream>`` for the default Proxy, ``<upstream>-<proxy>`` otherwise."""
-    if override:
-        return override
-    return upstream if proxy == DEFAULT_PROXY_NAME else f"{upstream}-{proxy}"
-
-
 def budget_report(
     ctx: typer.Context, upstream: str, proxy: str, server: str, profile: Profile
 ) -> list[str]:
@@ -170,17 +158,9 @@ def budget_report(
     config_dir, state_dir = state(ctx).config_dir, state(ctx).state_dir
     stored = catalog.load_catalog(state_dir, upstream)
     if stored is None:
-        return [
-            (
-                f"No stored Catalog for {upstream}, so no name was checked against "
-                f"{profile.name}. Run: mcpshape upstream sync {upstream}"
-            )
-        ]
+        return [unscanned_note(upstream, profile)]
     exposed = exposed_catalog(stored, config.load_proxy(config_dir, upstream, proxy))
-    scheme = profile.scheme
-    found = [scheme.server_violation(server)]
-    found += [scheme.violation(server, tool) for tool in exposed.tools]
-    return [line for line in found if line]
+    return profile.name_violations(server, exposed.tools)
 
 
 def json_snippet(container: tuple[str, ...], name: str, entry: dict[str, Any]) -> str:
@@ -312,12 +292,12 @@ def install(  # noqa: PLR0913  # every one of these is a documented option of th
     """Point a Client at a Proxy by writing the entry that Client expects."""
     config_dir = state(ctx).config_dir
     upstream, proxy = parse_proxy_ref(ref)
-    profile = load_profile(to)
+    profile = client_profile(to)
     if not profile.installable:
         fail(f"{profile.name} cannot reach a Proxy on this machine: {' '.join(profile.notes)}")
     with reporting_errors():
         config.load_proxy(config_dir, upstream, proxy)
-        server = entry_name(upstream, proxy, name)
+        server = name or entry_name(upstream, proxy)
         warnings = budget_report(ctx, upstream, proxy, server, profile)
     entry = profile.entry(proxy_url(config_dir, upstream, proxy), f"{upstream}/{proxy}", server)
     for warning in warnings:
@@ -371,14 +351,19 @@ def report_disabled(path: Path, profile: Profile, disable: str) -> None:
 def export(
     ctx: typer.Context, ref: RefArg, for_client: ForOpt = None, name: NameOpt = None
 ) -> None:
-    """Print strict mcpServers JSON for a Proxy, to paste into any Client."""
+    """Print strict mcpServers JSON for a Proxy; with --for, the entry as that Client wants it."""
     config_dir = state(ctx).config_dir
     upstream, proxy = parse_proxy_ref(ref)
     with reporting_errors():
         config.load_proxy(config_dir, upstream, proxy)
-    profile = load_profile(for_client) if for_client else None
     url = proxy_url(config_dir, upstream, proxy)
-    server = entry_name(upstream, proxy, name)
-    ref = f"{upstream}/{proxy}"
-    entry = profile.entry(url, ref, server) if profile else {"type": "http", "url": url}
-    plain(json.dumps({"mcpServers": {server: entry}}, indent=2))
+    server = name or entry_name(upstream, proxy)
+    if not for_client:
+        plain(json_snippet(("mcpServers",), server, {"type": "http", "url": url}))
+        return
+    profile = client_profile(for_client)
+    entry = profile.entry(url, f"{upstream}/{proxy}", server)
+    if profile.writable or profile.file_format == "json":
+        plain(json_snippet(profile.container, server, entry))
+    else:
+        plain(yaml_snippet(profile, server, entry))

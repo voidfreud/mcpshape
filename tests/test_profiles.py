@@ -328,6 +328,17 @@ def test_export_for_a_stdio_only_client_prints_the_shim_entry(config_dir: Config
     }
 
 
+def test_export_for_a_client_uses_that_clients_own_section(config_dir: ConfigDir) -> None:
+    run_cli(config_dir, "add", "github", "--stdio", "cmd")
+
+    result = run_cli(config_dir, "proxy", "export", "github/default", "--for", "vscode")
+
+    assert result.exit_code == 0, result.output
+    exported = json.loads(result.stdout)
+    assert list(exported) == ["servers"]
+    assert exported["servers"]["github"]["url"] == "http://127.0.0.1:8321/github/mcp"
+
+
 # --- doctor -------------------------------------------------------------------------------------
 
 

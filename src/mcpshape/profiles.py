@@ -16,8 +16,10 @@ import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
+from mcpshape.model import DEFAULT_PROXY_NAME
+
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Iterable, Mapping
 
 CLIENTS_DOC = "docs/clients.md"
 CHECKED = "2026-09-07"
@@ -204,6 +206,12 @@ class Profile:
     def default_location(self) -> Location | None:
         """Where ``proxy install`` writes without ``--config``, or ``None`` when unrecorded."""
         return self.locations[0] if self.locations else None
+
+    def name_violations(self, server: str, tools: Iterable[str]) -> list[str]:
+        """Every exposed name this Client would refuse or reshape, server name first."""
+        found = [self.scheme.server_violation(server)]
+        found += [self.scheme.violation(server, tool) for tool in tools]
+        return [line for line in found if line]
 
     def entry(self, url: str, ref: str, name: str) -> dict[str, Any]:
         """The config entry that points this Client at the Proxy served at ``url``."""
@@ -423,6 +431,12 @@ PROFILES: Mapping[str, Profile] = {
         CHATGPT,
     )
 }
+
+
+def entry_name(upstream: str, proxy: str) -> str:
+    """The name a Proxy is installed under: ``<upstream>`` for the default Proxy, else
+    ``<upstream>-<proxy>``. The Client's naming scheme prefixes tool names with it."""
+    return upstream if proxy == DEFAULT_PROXY_NAME else f"{upstream}-{proxy}"
 
 
 class UnknownClientError(ValueError):

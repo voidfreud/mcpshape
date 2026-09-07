@@ -12,6 +12,7 @@ from rich.console import Console
 from mcpshape.catalog import CatalogError, pending_drift
 from mcpshape.config import ConfigError
 from mcpshape.names import InvalidNameError
+from mcpshape.profiles import Profile, UnknownClientError, profile
 
 if TYPE_CHECKING:
     from collections.abc import Generator
@@ -66,6 +67,22 @@ def confirm_or_abort(prompt: str, *, yes: bool) -> None:
     """Ask before a destructive step unless ``--yes`` was given."""
     if not yes and not typer.confirm(prompt):
         raise typer.Abort
+
+
+def client_profile(slug: str) -> Profile:
+    """The Profile ``--to`` or ``--for`` names, or a red line listing the slugs that exist."""
+    try:
+        return profile(slug)
+    except UnknownClientError as exc:
+        fail(str(exc))
+
+
+def unscanned_note(upstream: str, client: Profile) -> str:
+    """Why no name of ``upstream`` was checked against ``client``, and what to run."""
+    return (
+        f"No stored Catalog for {upstream}, so no name was checked against {client.name}. "
+        f"Run: mcpshape upstream sync {upstream}"
+    )
 
 
 def example(text: str) -> str:
