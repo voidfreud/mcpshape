@@ -31,7 +31,7 @@ if TYPE_CHECKING:
 
     from starlette.types import ASGIApp
 
-    from mcpshape.upstream import Clock
+    from mcpshape.connection import Clock
 
 BASE_URL = "http://mcpshape.test"
 # A wide, plain terminal so help text and tables render the same on every machine and CI.

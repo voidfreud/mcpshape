@@ -135,3 +135,15 @@ and the Profile writes the common `mcpServers` + `{"type": "http", "url": ...}` 
   `subscriptions/listen`, which FastMCP's low-level server does not register a handler for. So
   a Proxy whose exposed set changed can only answer the next `tools/list` with the new set; it
   cannot push the change to an idle Client.
+- What Hooks and Virtual Tools rest on (checked 2026-09-07, 4.0.3). `FunctionTool.from_function`
+  builds a subclass instance (`cls(...)`) from a plain function: name, docstring as description,
+  input schema from the signature; `run_in_thread=False` runs a sync function inline. Its `run`
+  routes the body's return through `convert_result`, so a subclass can accept its own result
+  type. A FastMCP tool returning one value advertises an output schema marked
+  `x-fastmcp-wrap-result` with the value under `result`, and the MCP client refuses a result
+  for such a tool that carries no structured content, so a Hook that replaces a result with
+  plain text needs that structured content rebuilt from the schema. `ProxyTemplate` reads the
+  Upstream inside `create_resource` and hands back a `ProxyResource` whose `_cached_content`
+  is served by `read()`. `ProxyPrompt.render` returns a `PromptResult` of `Message`s. A
+  `call_tool_mcp` on the borrowed client answers a failing or unknown tool with an `isError`
+  result carrying the message, not by raising.

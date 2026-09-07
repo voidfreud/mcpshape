@@ -10,21 +10,31 @@ FastMCP's proxy components keep the backend name when they are copied under a ne
 is how a renamed tool, resource, or prompt still reaches its Catalog item. The server name is
 fixed when the server is built (the MCP SDK caches its identity), so a Proxy whose exposed
 server name changes is rebuilt by its owner; ``ProxyApp.name`` says what it was built with.
+
+Every call, read, and get runs through the chain in ``mcpshape.hooks``: the Proxy's Hooks
+around the forward to the Upstream, with mcpshape's own result types on the user's side and
+FastMCP's on this side. Virtual Tools are FastMCP function tools built from the user's plain
+functions, so the schema comes from the signature. The ``upstream`` handle user code reaches
+is this module's ``_Handle`` over the Upstream's shared client.
 """
 
 from __future__ import annotations
 
+import base64
 import importlib
+import json
 import logging
 from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 import mcp_types
 from fastmcp import Client, FastMCP
 from fastmcp.client.transports import StreamableHttpTransport
-from fastmcp.exceptions import ToolError
+from fastmcp.exceptions import FastMCPError, PromptError, ResourceError, ToolError
+from fastmcp.prompts import Message, PromptResult
+from fastmcp.resources import ResourceContent, ResourceResult
 from fastmcp.server import create_proxy
 from fastmcp.server.providers.base import Provider
 from fastmcp.server.providers.proxy import (
@@ -34,13 +44,17 @@ from fastmcp.server.providers.proxy import (
     ProxyTemplate,
     ProxyTool,
 )
+from fastmcp.tools import FunctionTool
+from fastmcp.tools.base import ToolResult
 from mcp.shared.exceptions import MCPError
-from pydantic import AnyUrl, PrivateAttr
+from pydantic import AnyUrl, PrivateAttr, TypeAdapter
 
+from mcpshape import hooks
 from mcpshape.catalog import Catalog, Item
+from mcpshape.connection import Connection, UpstreamUnavailableError
+from mcpshape.hooks import Call, UpstreamError, UserCode
 from mcpshape.model import MemoryTransport
 from mcpshape.proxy import ArgumentMap, Exposed
-from mcpshape.upstream import Connection, UpstreamUnavailableError
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Awaitable, Callable, Sequence
@@ -50,12 +64,14 @@ if TYPE_CHECKING:
     from fastmcp.resources import Resource, ResourceTemplate
     from fastmcp.server.context import Context
     from fastmcp.tools import Tool
-    from fastmcp.tools.base import ToolResult
     from pydantic import BaseModel
     from starlette.types import ASGIApp
 
+    from mcpshape.connection import Clock, Status
+    from mcpshape.hooks import VirtualTool
     from mcpshape.model import Transport, Upstream
-    from mcpshape.upstream import Clock, Status
+
+log = logging.getLogger("mcpshape.adapter")
 
 MCP_PATH = "/mcp"
 
@@ -72,13 +88,16 @@ class ProxyApp:
     """A Proxy as an ASGI app serving MCP at ``MCP_PATH``, plus the lifespan it needs.
 
     ``serve`` replaces what the Proxy exposes; Clients see the new set on their next request.
-    The server ``name`` cannot change: build a new app for a new name.
+    ``fail`` keeps the last exposed set advertised and answers every call, read, and get with
+    an error naming the Proxy and the reason, until the next ``serve``; nothing reaches the
+    Upstream meanwhile. The server ``name`` cannot change: build a new app for a new name.
     """
 
     name: str
     asgi: ASGIApp
     lifespan: Callable[[], AbstractAsyncContextManager[None]]
     serve: Callable[[Exposed], None]
+    fail: Callable[[str], None]
 
 
 class _Link:
@@ -164,7 +183,8 @@ def proxy_app(
     upstream: Upstream, proxy_name: str, exposed: Exposed, connection: UpstreamConnection
 ) -> ProxyApp:
     """The Proxy ``proxy_name`` of ``upstream``, exposing ``exposed`` over ``connection``."""
-    provider = _CatalogProvider(connection.client)
+    runtime = _Runtime(f"{upstream.name}/{proxy_name}", _Handle(connection.client))
+    provider = _CatalogProvider(connection.client, runtime)
     name = server_name(upstream, proxy_name, exposed)
     server = FastMCP(name=name)
     server.add_provider(provider)
@@ -180,7 +200,7 @@ def proxy_app(
             yield
 
     serve(exposed)
-    return ProxyApp(name=name, asgi=app, lifespan=lifespan, serve=serve)
+    return ProxyApp(name=name, asgi=app, lifespan=lifespan, serve=serve, fail=runtime.fail)
 
 
 async def scan(transport: Transport) -> Catalog:
@@ -226,85 +246,397 @@ def _raw(definition: BaseModel) -> dict[str, Any]:
     return definition.model_dump(mode="json", by_alias=True, exclude_none=True)
 
 
+# --- the chain -------------------------------------------------------------------------------
+
+_BLOCK: TypeAdapter[Any] = TypeAdapter(mcp_types.ContentBlock)
+_MESSAGE_CONTENT: TypeAdapter[Any] = TypeAdapter(
+    mcp_types.TextContent
+    | mcp_types.ImageContent
+    | mcp_types.AudioContent
+    | mcp_types.EmbeddedResource
+)
+
+
+class _Handle:
+    """``upstream`` for one Proxy: its own Upstream's shared client, under Catalog names."""
+
+    def __init__(self, client_factory: ClientFactory) -> None:
+        self._client_factory = client_factory
+
+    async def call(self, name: str, args: dict[str, Any]) -> hooks.ToolResult:
+        client = await self._client_factory()
+        async with client:
+            try:
+                raw = await client.call_tool_mcp(name, args)
+            except MCPError as exc:
+                raise UpstreamError(exc.error.message) from exc
+        result = _tool_result_of(raw.content, raw.structured_content)
+        if raw.is_error:
+            raise UpstreamError(result.text or "the Upstream reported an error")
+        return result
+
+    async def read(self, uri: str) -> hooks.ResourceResult:
+        client = await self._client_factory()
+        async with client:
+            try:
+                contents = await client.read_resource(uri)
+            except MCPError as exc:
+                raise UpstreamError(exc.error.message) from exc
+        return hooks.ResourceResult(contents=[_content_of(item) for item in contents])
+
+    async def get(self, name: str, args: dict[str, Any]) -> hooks.PromptResult:
+        client = await self._client_factory()
+        async with client:
+            try:
+                raw = await client.get_prompt(name, args)
+            except MCPError as exc:
+                raise UpstreamError(exc.error.message) from exc
+        return hooks.PromptResult(
+            messages=[_message_of(message.role, message.content) for message in raw.messages],
+            description=raw.description,
+        )
+
+
+class _Runtime:
+    """What every component of one Proxy runs its calls through: the Hooks, or the failure."""
+
+    def __init__(self, label: str, handle: _Handle) -> None:
+        self.label = label
+        self.handle = handle
+        self.code = UserCode()
+        self.failure: str | None = None
+
+    def serve(self, code: UserCode) -> None:
+        self.code, self.failure = code, None
+
+    def fail(self, reason: str) -> None:
+        self.failure = reason
+
+    async def run[R](
+        self,
+        call: Call,
+        forward: Callable[[Call], Awaitable[R]],
+        of: Callable[[object], R],
+        error: type[FastMCPError],
+    ) -> R:
+        """``call`` through the Hooks, with user failures turned into ``error`` for the Client."""
+        if self.failure is not None:
+            msg = f"Proxy {self.label} is unhealthy: {self.failure}"
+            raise error(msg, log_level=logging.WARNING)
+        with hooks.bound(self.handle):
+            try:
+                return await hooks.run_call(self.code, call, forward, of)
+            except FastMCPError:
+                raise
+            except Exception as exc:
+                raise error(str(exc) or type(exc).__name__, log_level=logging.WARNING) from exc
+
+
 class _CuratedTool(ProxyTool):
-    """A ProxyTool whose exposed arguments are mapped back onto the Catalog tool's on each call."""
+    """A ProxyTool whose call runs through the chain under its Catalog name and arguments."""
 
     _arguments: ArgumentMap = PrivateAttr(default_factory=ArgumentMap)
+    _runtime: _Runtime = PrivateAttr()
+    _origin: str = PrivateAttr(default="")
 
-    def map_arguments(self, arguments: ArgumentMap) -> None:
-        self._arguments = arguments
+    def curate(self, runtime: _Runtime, origin: str, arguments: ArgumentMap) -> None:
+        self._runtime, self._origin, self._arguments = runtime, origin, arguments
 
     async def run(self, arguments: dict[str, Any], context: Context | None = None) -> ToolResult:
-        return await super().run(self._arguments.to_catalog(arguments), context)
+        run_upstream = super().run
+
+        async def forward(call: Call) -> hooks.ToolResult:
+            raw = await run_upstream(call.args, context)
+            result = _tool_result_of(raw.content, raw.structured_content)
+            if raw.is_error:
+                raise ToolError(result.text or "the Upstream reported an error")
+            return result
+
+        call = Call("tool", self._origin, self._arguments.to_catalog(arguments))
+        result = await self._runtime.run(call, forward, hooks.ToolResult.of, ToolError)
+        return _to_tool_result(result, self.output_schema)
+
+
+class _CuratedResource(ProxyResource):
+    """A ProxyResource whose read runs through the chain under its Catalog URI."""
+
+    _runtime: _Runtime = PrivateAttr()
+    _origin: str = PrivateAttr(default="")
+
+    def curate(self, runtime: _Runtime, origin: str) -> None:
+        self._runtime, self._origin = runtime, origin
+
+    async def read(self) -> ResourceResult:
+        read_upstream = super().read
+
+        async def forward(_call: Call) -> hooks.ResourceResult:
+            return _resource_result_of(await read_upstream())
+
+        call = Call("resource", self._origin, {})
+        result = await self._runtime.run(call, forward, hooks.ResourceResult.of, ResourceError)
+        return _to_resource_result(result)
+
+
+class _CuratedTemplate(ProxyTemplate):
+    """A ProxyTemplate whose reads run through the chain under its Catalog URI template.
+
+    FastMCP reads a template by creating a resource for the URI and reading that; the proxy
+    template reads the Upstream while creating it, so the chain runs there and the resource
+    handed back carries the result the Hooks left.
+    """
+
+    _runtime: _Runtime = PrivateAttr()
+    _origin: str = PrivateAttr(default="")
+
+    def curate(self, runtime: _Runtime, origin: str) -> None:
+        self._runtime, self._origin = runtime, origin
+
+    async def create_resource(
+        self, uri: str, params: dict[str, Any], context: Context | None = None
+    ) -> ProxyResource:
+        create_upstream = super().create_resource
+
+        async def forward(call: Call) -> hooks.ResourceResult:
+            resource = await create_upstream(uri, call.args, context)
+            return _resource_result_of(await resource.read())
+
+        call = Call("resource", self._origin, dict(params))
+        result = await self._runtime.run(call, forward, hooks.ResourceResult.of, ResourceError)
+        first = next((item.mime_type for item in result.contents if item.mime_type), None)
+        return ProxyResource(
+            client_factory=self._client_factory,  # pyright: ignore[reportUnknownMemberType]  # FastMCP's factory type is unparameterised
+            uri=uri,
+            name=self.name,
+            title=self.title,
+            description=self.description,
+            mime_type=first or self.mime_type or "text/plain",
+            icons=self.icons,
+            meta=self.meta,
+            tags=self.tags,
+            _cached_content=_to_resource_result(result),
+        )
+
+
+class _CuratedPrompt(ProxyPrompt):
+    """A ProxyPrompt whose get runs through the chain under its Catalog name."""
+
+    _runtime: _Runtime = PrivateAttr()
+    _origin: str = PrivateAttr(default="")
+
+    def curate(self, runtime: _Runtime, origin: str) -> None:
+        self._runtime, self._origin = runtime, origin
+
+    async def render(self, arguments: dict[str, Any] | None = None) -> PromptResult:
+        render_upstream = super().render
+
+        async def forward(call: Call) -> hooks.PromptResult:
+            return _prompt_result_of(await render_upstream(call.args))
+
+        call = Call("prompt", self._origin, dict(arguments or {}))
+        result = await self._runtime.run(call, forward, hooks.PromptResult.of, PromptError)
+        return _to_prompt_result(result)
+
+
+class _VirtualTool(FunctionTool):
+    """A Virtual Tool: the user's function, its schema from its signature, run in the chain.
+
+    Sync functions run inline on the Daemon's loop like every Hook; a blocking one is the
+    user's business, as the design brief says.
+    """
+
+    _runtime: _Runtime = PrivateAttr()
+
+    @classmethod
+    def build(cls, runtime: _Runtime, virtual: VirtualTool) -> _VirtualTool:
+        built = cls.from_function(
+            virtual.fn, name=virtual.name, description=virtual.description, run_in_thread=False
+        )
+        tool = cast("_VirtualTool", built)
+        tool._runtime = runtime  # noqa: SLF001  # our own private attribute
+        return tool
+
+    async def run(self, arguments: dict[str, Any]) -> ToolResult:
+        runtime = self._runtime
+        if runtime.failure is not None:
+            msg = f"Proxy {runtime.label} is unhealthy: {runtime.failure}"
+            raise ToolError(msg, log_level=logging.WARNING)
+        with hooks.bound(runtime.handle):
+            try:
+                return await super().run(arguments)
+            except FastMCPError:
+                raise
+            except Exception as exc:
+                log.warning("Virtual Tool %s raised", self.name, exc_info=True)
+                raise ToolError(str(exc) or type(exc).__name__, log_level=logging.WARNING) from exc
+
+    def convert_result(self, raw_value: Any) -> ToolResult:  # noqa: ANN401  # whatever the user returned
+        if isinstance(raw_value, hooks.ToolResult):
+            return _to_tool_result(raw_value, self.output_schema)
+        return super().convert_result(raw_value)
+
+
+# --- mcpshape's result types at the edge -----------------------------------------------------
+
+
+def _tool_result_of(
+    content: Sequence[mcp_types.ContentBlock], structured: dict[str, Any] | None
+) -> hooks.ToolResult:
+    return hooks.ToolResult(content=[_raw(block) for block in content], structured=structured)
+
+
+def _to_tool_result(result: hooks.ToolResult, schema: dict[str, Any] | None) -> ToolResult:
+    return ToolResult(
+        content=[_BLOCK.validate_python(block) for block in result.content],
+        structured_content=_structured(result, schema),
+    )
+
+
+WRAPPED = "x-fastmcp-wrap-result"
+"""FastMCP's mark on the output schema of a tool whose one value it wraps as ``result``."""
+
+
+def _structured(result: hooks.ToolResult, schema: dict[str, Any] | None) -> dict[str, Any] | None:
+    """The structured content to send: the user's, else what the output schema lets us derive."""
+    if result.structured is not None or not schema:
+        return result.structured
+    text = result.text
+    if WRAPPED in schema:
+        properties = cast("dict[str, dict[str, Any]]", schema.get("properties") or {})
+        wrapped = properties.get("result") or {}
+        return {"result": text if wrapped.get("type") == "string" else _loaded(text, text)}
+    loaded = _loaded(text, None)
+    return cast("dict[str, Any]", loaded) if isinstance(loaded, dict) else None
+
+
+def _loaded(text: str, fallback: object) -> object:
+    try:
+        return json.loads(text)
+    except ValueError:
+        return fallback
+
+
+def _resource_result_of(read: str | bytes | ResourceResult) -> hooks.ResourceResult:
+    if not isinstance(read, ResourceResult):
+        return hooks.ResourceResult(contents=[hooks.Content(read)])
+    return hooks.ResourceResult(
+        contents=[hooks.Content(item.content, item.mime_type) for item in read.contents]
+    )
+
+
+def _content_of(
+    item: mcp_types.TextResourceContents | mcp_types.BlobResourceContents,
+) -> hooks.Content:
+    if isinstance(item, mcp_types.TextResourceContents):
+        return hooks.Content(item.text, item.mime_type)
+    return hooks.Content(base64.b64decode(item.blob), item.mime_type)
+
+
+def _to_resource_result(result: hooks.ResourceResult) -> ResourceResult:
+    return ResourceResult(
+        contents=[ResourceContent(item.data, mime_type=item.mime_type) for item in result.contents]
+    )
+
+
+def _message_of(role: str, content: mcp_types.ContentBlock) -> hooks.Message:
+    return hooks.Message(_raw(content), role)
+
+
+def _prompt_result_of(rendered: str | list[Message | str] | PromptResult) -> hooks.PromptResult:
+    if not isinstance(rendered, PromptResult):
+        return hooks.PromptResult.of(rendered)
+    return hooks.PromptResult(
+        messages=[_message_of(message.role, message.content) for message in rendered.messages],
+        description=rendered.description,
+    )
+
+
+def _to_prompt_result(result: hooks.PromptResult) -> PromptResult:
+    messages = [
+        Message(
+            message.content
+            if isinstance(message.content, str)
+            else _MESSAGE_CONTENT.validate_python(message.content),
+            role=_role(message.role),
+        )
+        for message in result.messages
+    ]
+    return PromptResult(messages, description=result.description)
+
+
+def _role(role: str) -> Literal["user", "assistant"]:
+    if role == "user" or role == "assistant":  # noqa: PLR1714  # narrows the literal
+        return role
+    msg = f"a prompt message's role is 'user' or 'assistant', not {role!r}"
+    raise PromptError(msg)
 
 
 class _CatalogProvider(Provider):
-    """Serves lists from what it is handed and forwards calls, reads, and gets to the Upstream.
+    """Serves lists from what it is handed and runs calls, reads, and gets through the chain.
 
     Each component is built under its Catalog name and then copied under its exposed name, so
     FastMCP keeps the Catalog name as the backend name to forward with.
     """
 
-    def __init__(self, client_factory: ClientFactory) -> None:
+    def __init__(self, client_factory: ClientFactory, runtime: _Runtime) -> None:
         super().__init__()
         self._client_factory = client_factory
+        self._runtime = runtime
         self._tools: list[Tool] = []
         self._resources: list[Resource] = []
         self._templates: list[ResourceTemplate] = []
         self._prompts: list[Prompt] = []
 
     def serve(self, exposed: Exposed) -> None:
-        factory = self._client_factory
         catalog = exposed.catalog
-        self._tools = [
-            self._tool(factory, exposed, name, raw) for name, raw in catalog.tools.items()
+        self._tools = [self._tool(exposed, name, raw) for name, raw in catalog.tools.items()]
+        self._tools += [
+            _VirtualTool.build(self._runtime, virtual) for virtual in exposed.code.tools.values()
         ]
         self._resources = [
-            _renamed(
-                ProxyResource.from_mcp_resource(  # pyright: ignore[reportUnknownMemberType]  # FastMCP's factory type is unparameterised
-                    factory, mcp_types.Resource.model_validate(raw)
-                ),
-                exposed.origin(Item("resource", uri)),
-                uri,
-                "uri",
-                AnyUrl(uri),
-            )
-            for uri, raw in catalog.resources.items()
+            self._resource(exposed, uri, raw) for uri, raw in catalog.resources.items()
         ]
         self._templates = [
-            _renamed(
-                ProxyTemplate.from_mcp_template(  # pyright: ignore[reportUnknownMemberType]  # FastMCP's factory type is unparameterised
-                    factory, mcp_types.ResourceTemplate.model_validate(raw)
-                ),
-                exposed.origin(Item("resource_template", uri)),
-                uri,
-                "uri_template",
-                uri,
-            )
-            for uri, raw in catalog.resource_templates.items()
+            self._template(exposed, uri, raw) for uri, raw in catalog.resource_templates.items()
         ]
-        self._prompts = [
-            _renamed(
-                ProxyPrompt.from_mcp_prompt(  # pyright: ignore[reportUnknownMemberType]  # FastMCP's factory type is unparameterised
-                    factory, mcp_types.Prompt.model_validate(raw)
-                ),
-                exposed.origin(Item("prompt", name)),
-                name,
-                "name",
-                name,
-            )
-            for name, raw in catalog.prompts.items()
-        ]
+        self._prompts = [self._prompt(exposed, name, raw) for name, raw in catalog.prompts.items()]
+        self._runtime.serve(exposed.code)
 
-    @staticmethod
-    def _tool(factory: ClientFactory, exposed: Exposed, name: str, raw: dict[str, Any]) -> Tool:
+    def _tool(self, exposed: Exposed, name: str, raw: dict[str, Any]) -> Tool:
         origin = exposed.origin(Item("tool", name))
         built = _CuratedTool.from_mcp_tool(  # pyright: ignore[reportUnknownMemberType]  # FastMCP's factory type is unparameterised
-            factory, mcp_types.Tool.model_validate({**raw, "name": origin})
+            self._client_factory, mcp_types.Tool.model_validate({**raw, "name": origin})
         )
         tool = _renamed(cast("_CuratedTool", built), origin, name, "name", name)
-        tool.map_arguments(exposed.arguments.get(name, ArgumentMap()))
+        tool.curate(self._runtime, origin, exposed.arguments.get(name, ArgumentMap()))
         return tool
+
+    def _resource(self, exposed: Exposed, uri: str, raw: dict[str, Any]) -> Resource:
+        origin = exposed.origin(Item("resource", uri))
+        built = _CuratedResource.from_mcp_resource(  # pyright: ignore[reportUnknownMemberType]  # FastMCP's factory type is unparameterised
+            self._client_factory, mcp_types.Resource.model_validate({**raw, "uri": origin})
+        )
+        resource = _renamed(cast("_CuratedResource", built), origin, uri, "uri", AnyUrl(uri))
+        resource.curate(self._runtime, origin)
+        return resource
+
+    def _template(self, exposed: Exposed, uri: str, raw: dict[str, Any]) -> ResourceTemplate:
+        origin = exposed.origin(Item("resource_template", uri))
+        built = _CuratedTemplate.from_mcp_template(  # pyright: ignore[reportUnknownMemberType]  # FastMCP's factory type is unparameterised
+            self._client_factory,
+            mcp_types.ResourceTemplate.model_validate({**raw, "uriTemplate": origin}),
+        )
+        template = _renamed(cast("_CuratedTemplate", built), origin, uri, "uri_template", uri)
+        template.curate(self._runtime, origin)
+        return template
+
+    def _prompt(self, exposed: Exposed, name: str, raw: dict[str, Any]) -> Prompt:
+        origin = exposed.origin(Item("prompt", name))
+        built = _CuratedPrompt.from_mcp_prompt(  # pyright: ignore[reportUnknownMemberType]  # FastMCP's factory type is unparameterised
+            self._client_factory, mcp_types.Prompt.model_validate({**raw, "name": origin})
+        )
+        prompt = _renamed(cast("_CuratedPrompt", built), origin, name, "name", name)
+        prompt.curate(self._runtime, origin)
+        return prompt
 
     async def _list_tools(self) -> Sequence[Tool]:
         return self._tools

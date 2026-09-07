@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any
 from mcpshape import catalog as catalogs
 from mcpshape.catalog import KINDS, Item
 from mcpshape.config import ArgumentOverride, PromptOverride, ResourceOverride, ToolOverride
+from mcpshape.hooks import UserCode
 
 if TYPE_CHECKING:
     from mcpshape.catalog import Catalog, Kind
@@ -56,13 +57,23 @@ class Exposed:
     """Each exposed item to the Catalog name it stands for."""
     arguments: dict[str, ArgumentMap] = field(default_factory=dict[str, ArgumentMap])
     """By exposed tool name, for the tools whose arguments were curated."""
+    code: UserCode = field(default_factory=UserCode)
+    """The Hooks that run on calls, and the Virtual Tools exposed beside the Catalog's."""
 
     def origin(self, item: Item) -> str:
         return self.origins.get(item, item.name)
 
+    def tool_names(self) -> list[str]:
+        """Every exposed tool name: the Catalog's, curated, then the Virtual Tools."""
+        return [*self.catalog.tools, *self.code.tools]
 
-def expose(catalog: Catalog, proxy: ProxyFile) -> Exposed:
-    """Apply the Proxy file's Overrides to ``catalog``. Raises ``OverrideError`` when it cannot."""
+
+def expose(catalog: Catalog, proxy: ProxyFile, code: UserCode | None = None) -> Exposed:
+    """Apply the Proxy file's Overrides to ``catalog``, then add ``code``'s Virtual Tools.
+
+    Raises ``OverrideError`` when it cannot: a collision, a hidden argument nothing supplies,
+    a Virtual Tool under a name a Catalog tool is exposed as.
+    """
     exposed = catalog.model_copy(deep=True)
     exposed.instructions = (
         proxy.instructions if proxy.instructions is not None else catalog.instructions
@@ -80,7 +91,18 @@ def expose(catalog: Catalog, proxy: ProxyFile) -> Exposed:
             exposed_name = _curate(kind, name, curated, override, arguments)
             _claim(exposed, kind, exposed_name, name, origins)
             items[exposed_name] = curated
-    return Exposed(catalog=exposed, name=proxy.name, origins=origins, arguments=arguments)
+    code = code or UserCode()
+    for virtual in code.tools:
+        if virtual in exposed.tools:
+            taken = origins[Item("tool", virtual)]
+            msg = (
+                f"Virtual Tool {virtual!r} and {Item('tool', taken)} would both be exposed as "
+                f"{virtual!r}; rename or hide one of them"
+            )
+            raise OverrideError(msg)
+    return Exposed(
+        catalog=exposed, name=proxy.name, origins=origins, arguments=arguments, code=code
+    )
 
 
 def _claim(
@@ -227,6 +249,16 @@ def orphaned_overrides(catalog: Catalog, proxy: ProxyFile) -> list[Item]:
         if name not in catalog.items(kind)
         and (kind != "resource" or name not in catalog.resource_templates)
     ]
+
+
+def orphaned_hooks(catalog: Catalog, code: UserCode) -> list[Item]:
+    """Hooks naming an item the Catalog lacks. They never run until it appears."""
+    return sorted(
+        item
+        for item in code.hooked()
+        if item.name not in catalog.items(item.kind)
+        and (item.kind != "resource" or item.name not in catalog.resource_templates)
+    )
 
 
 def orphaned_arguments(catalog: Catalog, proxy: ProxyFile) -> list[tuple[str, str]]:
