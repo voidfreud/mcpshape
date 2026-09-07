@@ -79,3 +79,9 @@ data for Client Profiles. Checked 2026-09-06/07 against primary documentation.
   in-memory by default, persistence must be supplied.
 - Protocol is sessionless by default in 4.x; server-initiated sampling and roots are removed,
   elicitation is gated.
+- No server-wide broadcast of `tools/list_changed` (checked 2026-09-07, 4.0.3). The only sender
+  is the per-request `Context.send_notification`, which on the 2026-07-28 protocol rides the
+  request's own stream. That protocol delivers list-changed events through
+  `subscriptions/listen`, which FastMCP's low-level server does not register a handler for. So
+  a Proxy whose exposed set changed can only answer the next `tools/list` with the new set; it
+  cannot push the change to an idle Client.

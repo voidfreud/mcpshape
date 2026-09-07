@@ -24,8 +24,10 @@ from mcpshape.model import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterable
     from pathlib import Path
+
+    from mcpshape.catalog import Item, Kind
 
 FILE_VERSION = 1
 SETTINGS_FILE = "config.toml"
@@ -49,14 +51,50 @@ class DaemonSettings(BaseModel):
     port: int = Field(default=8321, ge=1, le=65535, description="Port the Daemon listens on.")
 
 
+class DriftSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    new_items: Literal["hidden", "visible"] = Field(
+        default="hidden",
+        description="Whether items an Upstream adds later are hidden or visible once accepted.",
+    )
+
+
 class SettingsFile(_File):
     """``config.toml``: global settings."""
 
     daemon: DaemonSettings = Field(default_factory=DaemonSettings)
+    drift: DriftSettings = Field(default_factory=DriftSettings)
+
+
+class ItemOverride(BaseModel):
+    """How one Catalog item is presented, keyed by its Catalog name."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    hidden: bool = Field(default=False, description="Do not expose this item at all.")
+
+
+Overrides = dict[str, ItemOverride]
 
 
 class ProxyFile(_File):
     """``<proxy>.toml``: one curation of an Upstream."""
+
+    tools: Overrides = Field(default_factory=dict, description="Overrides by tool name.")
+    resources: Overrides = Field(
+        default_factory=dict, description="Overrides by resource URI or resource template."
+    )
+    prompts: Overrides = Field(default_factory=dict, description="Overrides by prompt name.")
+
+    def overrides(self, kind: Kind) -> Overrides:
+        match kind:
+            case "tool":
+                return self.tools
+            case "resource" | "resource_template":
+                return self.resources
+            case "prompt":
+                return self.prompts
 
 
 class StdioUpstreamFile(_File, StdioTransport):
@@ -176,6 +214,14 @@ def list_proxies(config_dir: Path, upstream: str) -> tuple[str, ...]:
     return tuple(sorted(names, key=lambda name: (name != DEFAULT_PROXY_NAME, name)))
 
 
+def load_proxy(config_dir: Path, upstream: str, proxy: str) -> ProxyFile:
+    path = proxy_file(config_dir, upstream, proxy)
+    if not path.is_file():
+        msg = f"no Proxy {upstream}/{proxy}"
+        raise ConfigError(msg)
+    return ProxyFile.model_validate(_load(path, "proxy"))
+
+
 def load_upstream(config_dir: Path, name: str) -> Upstream:
     path = upstream_dir(config_dir, name) / UPSTREAM_FILE
     if not path.is_file():
@@ -271,6 +317,32 @@ def add_proxy(config_dir: Path, upstream: str, proxy: str) -> Path:
         raise ConfigError(msg)
     write_document(path, new_document("proxy", {}))
     return path
+
+
+OVERRIDE_SECTION: dict[Kind, str] = {
+    "tool": "tools",
+    "resource": "resources",
+    "resource_template": "resources",
+    "prompt": "prompts",
+}
+
+
+def hide_items(path: Path, items: Iterable[Item], note: str) -> None:
+    """Set ``hidden = true`` on each of ``items`` in the Proxy file at ``path``, with ``note``."""
+
+    def edit(document: tomlkit.TOMLDocument) -> None:
+        for item in items:
+            section = OVERRIDE_SECTION[item.kind]
+            if section not in document:
+                document[section] = tomlkit.table(is_super_table=True)
+            overrides = document[section]
+            if item.name not in overrides:
+                overrides[item.name] = tomlkit.table()
+            flag = tomlkit.item(True)  # noqa: FBT003  # the value being written
+            flag.comment(note)
+            overrides[item.name]["hidden"] = flag
+
+    rewrite(path, edit)
 
 
 def remove_proxy(config_dir: Path, upstream: str, proxy: str) -> None:

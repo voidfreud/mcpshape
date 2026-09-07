@@ -23,6 +23,23 @@
       },
       "title": "DaemonSettings",
       "type": "object"
+    },
+    "DriftSettings": {
+      "additionalProperties": false,
+      "properties": {
+        "new_items": {
+          "default": "hidden",
+          "description": "Whether items an Upstream adds later are hidden or visible once accepted.",
+          "enum": [
+            "hidden",
+            "visible"
+          ],
+          "title": "New Items",
+          "type": "string"
+        }
+      },
+      "title": "DriftSettings",
+      "type": "object"
     }
   },
   "additionalProperties": false,
@@ -36,6 +53,9 @@
     },
     "daemon": {
       "$ref": "#/$defs/DaemonSettings"
+    },
+    "drift": {
+      "$ref": "#/$defs/DriftSettings"
     }
   },
   "required": [

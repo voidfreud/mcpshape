@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, NoReturn
 import typer
 from rich.console import Console
 
+from mcpshape.catalog import CatalogError, pending_drift
 from mcpshape.config import ConfigError
 from mcpshape.names import InvalidNameError
 
@@ -25,10 +26,21 @@ errors = Console(stderr=True, soft_wrap=True)
 @dataclass(frozen=True)
 class State:
     config_dir: Path
+    state_dir: Path
 
 
 def state(ctx: typer.Context) -> State:
     return ctx.ensure_object(State)
+
+
+def drift_notice(state_dir: Path) -> None:
+    """One line on stderr naming every Upstream with unreviewed Drift, or nothing."""
+    drifts = pending_drift(state_dir)
+    if not drifts:
+        return
+    where = ", ".join(f"{name} ({drift.summary()})" for name, drift in drifts.items())
+    review = "mcpshape upstream sync " + (next(iter(drifts)) if len(drifts) == 1 else "<upstream>")
+    errors.print(f"[yellow]Drift[/] in {where}. Review with: [bold]{review}[/bold]")
 
 
 def fail(message: str) -> NoReturn:
@@ -39,10 +51,10 @@ def fail(message: str) -> NoReturn:
 
 @contextlib.contextmanager
 def reporting_errors() -> Generator[None]:
-    """Turn config and name errors into one red line and exit code 1."""
+    """Turn config, Catalog, and name errors into one red line and exit code 1."""
     try:
         yield
-    except (ConfigError, InvalidNameError) as exc:
+    except (ConfigError, CatalogError, InvalidNameError) as exc:
         fail(str(exc))
 
 
