@@ -222,8 +222,7 @@ class Connection:
             await waking
             return False
         timing = asyncio.create_task(self._clock.sleep(delay))
-        done, pending = await asyncio.wait({waking, timing}, return_when=asyncio.FIRST_COMPLETED)
-        await _finish(*pending)
+        done = await _first_of(waking, timing)
         return timing in done
 
     async def _fire(self, due: _Due) -> None:
@@ -270,8 +269,7 @@ class Connection:
     async def _connect(self, *, reconnect: bool) -> None:
         opening = asyncio.create_task(self._link.open())
         timing = asyncio.create_task(self._clock.sleep(self._settings.connect_timeout))
-        done, pending = await asyncio.wait({opening, timing}, return_when=asyncio.FIRST_COMPLETED)
-        await _finish(*pending)
+        done = await _first_of(opening, timing)
         if opening not in done:
             await self._fail(f"connect timed out after {self._settings.connect_timeout}s")
             return
@@ -350,6 +348,21 @@ class Connection:
 
 def _left(timeout: float, elapsed: float) -> float:
     return max(0.0, timeout - elapsed)
+
+
+async def _first_of(*tasks: asyncio.Task[None]) -> set[asyncio.Task[None]]:
+    """Wait for the first of ``tasks``; the rest are cancelled, also when the waiter is.
+
+    ``asyncio.wait`` leaves its members running when the waiting task is cancelled, which
+    would orphan a connect attempt or a timer past ``stop()``.
+    """
+    try:
+        done, pending = await asyncio.wait(set(tasks), return_when=asyncio.FIRST_COMPLETED)
+    except asyncio.CancelledError:
+        await _finish(*tasks)
+        raise
+    await _finish(*pending)
+    return done
 
 
 async def _finish(*tasks: asyncio.Task[None] | None) -> None:

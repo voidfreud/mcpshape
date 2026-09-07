@@ -13,7 +13,14 @@ from fastmcp import Client
 from mcp_types import TextContent
 
 from tests.support.clock import FakeClock
-from tests.support.seam import free_port, run_cli, running_daemon, serving_daemon, until
+from tests.support.seam import (
+    RunningDaemon,
+    free_port,
+    run_cli,
+    running_daemon,
+    serving_daemon,
+    until,
+)
 from tests.support.upstreams import slow_server
 from tests.test_catalog_drift import cli, drift_file, grow, notes
 from tests.test_proxy_seam import calculator
@@ -171,6 +178,39 @@ async def test_a_connect_that_hangs_is_given_up_on_after_the_connect_timeout(
         assert message in error_text(result)
         assert await daemon.upstream_state("slow") == "unavailable"
         gate.set()
+
+
+async def seconds_in_state(daemon: RunningDaemon, name: str) -> float:
+    """How long the Daemon says ``name`` has been in its state, on the Daemon's clock."""
+    upstream = next(u for u in (await daemon.status())["upstreams"] if u["name"] == name)
+    return float(upstream["seconds"])
+
+
+async def test_retries_back_off_exponentially_until_the_upstream_returns(
+    config_dir: ConfigDir,
+) -> None:
+    """Retries come after 1 s, then 2 s, then 4 s: a retry restarts the clock on the state."""
+    clock = FakeClock()
+    config_dir.add_memory_upstream("calc", calculator())
+    await cli(config_dir, "upstream", "sync", "calc")
+    config_dir.break_upstream("calc")
+
+    async with running_daemon(config_dir, clock) as daemon, daemon.client("/calc/mcp") as client:
+        failed = await client.call_tool("add", {"a": 1, "b": 1}, raise_on_error=False)
+        assert failed.is_error
+        assert await daemon.upstream_state("calc") == "unavailable"
+
+        await clock.advance(1.0)  # the first retry, which fails again
+        assert await daemon.upstream_state("calc") == "unavailable"
+        await clock.advance(1.5)  # not yet 2 s since that failure: no retry
+        assert await seconds_in_state(daemon, "calc") == 1.5
+        await clock.advance(0.6)  # past 2 s: the second retry ran and failed
+        assert await seconds_in_state(daemon, "calc") < 0.5
+
+        config_dir.restore_upstream("calc")
+        await clock.advance(4.0)  # the third retry, which succeeds
+        assert await daemon.awaiting_state("calc", *CONNECTED) in CONNECTED
+        assert (await client.call_tool("add", {"a": 1, "b": 1})).data == 2
 
 
 async def test_a_reconnect_after_the_backoff_rescans_the_catalog(config_dir: ConfigDir) -> None:
