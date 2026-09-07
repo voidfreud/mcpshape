@@ -5,16 +5,29 @@ These tests talk to FastMCP directly, on purpose. Everything else goes through t
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 
 import fastmcp
 from fastmcp import Client, FastMCP
 from fastmcp.client.transports import StreamableHttpTransport
 from fastmcp.server import create_proxy
+from fastmcp.server.providers.proxy import (
+    ProxyClient,
+    ProxyPrompt,
+    ProxyResource,
+    ProxyTemplate,
+    ProxyTool,
+)
+from mcp_types import TextContent, TextResourceContents
+from pydantic import AnyUrl, PrivateAttr
 from starlette.applications import Starlette
 from starlette.routing import Mount
 
 from tests.support.asgi import asgi_client_factory
+
+if TYPE_CHECKING:
+    from fastmcp.server.context import Context
+    from fastmcp.tools.base import ToolResult
 
 
 def echo_server() -> FastMCP[Any]:
@@ -49,3 +62,99 @@ async def test_http_app_serves_mcp_under_a_starlette_mount_with_its_own_lifespan
 
     async with proxy_app.router.lifespan_context(proxy_app), Client(transport) as client:
         assert [tool.name for tool in await client.list_tools()] == ["echo"]
+
+
+# --- what Overrides rely on ------------------------------------------------------------------
+
+
+def notes_server() -> FastMCP[Any]:
+    server = FastMCP("notes", instructions="Keep notes short.")
+
+    def add(a: int, b: int = 1) -> int:
+        return a + b
+
+    def note(id: str) -> str:  # noqa: A002
+        return f"note {id}"
+
+    def greeting(name: str) -> str:
+        return f"Hello {name}"
+
+    server.tool(add)
+    server.resource("notes://all")(lambda: "all notes")
+    server.resource("notes://{id}")(note)
+    server.prompt(greeting)
+    return server
+
+
+class Marked(ProxyTool):
+    """A ProxyTool subclass with a private attribute, as the adapter's curated tool has."""
+
+    _mark: str = PrivateAttr(default="")
+
+    def set_mark(self, mark: str) -> None:
+        self._mark = mark
+
+    @property
+    def mark(self) -> str:
+        return self._mark
+
+    async def run(self, arguments: dict[str, Any], context: Context | None = None) -> ToolResult:
+        return await super().run({"a": arguments["x"], "b": 10}, context)
+
+
+async def test_proxy_components_copied_under_a_new_name_still_reach_the_backend() -> None:
+    upstream = notes_server()
+    base: ProxyClient[Any] = ProxyClient(upstream)
+    async with Client(upstream) as client:
+        tool = (await client.list_tools())[0]
+        resource = (await client.list_resources())[0]
+        template = (await client.list_resource_templates())[0]
+        prompt = (await client.list_prompts())[0]
+    marked = cast("Marked", Marked.from_mcp_tool(base.new, tool))  # pyright: ignore[reportUnknownMemberType]
+    marked.set_mark("kept")
+    renamed = marked.model_copy(update={"name": "plus"})
+    assert isinstance(renamed, Marked)
+    assert renamed.mark == "kept"
+
+    proxy = FastMCP("proxy")
+    proxy.add_tool(renamed)
+    proxy.add_resource(
+        ProxyResource.from_mcp_resource(base.new, resource).model_copy(  # pyright: ignore[reportUnknownMemberType]
+            update={"uri": AnyUrl("notes://everything")}
+        )
+    )
+    proxy.add_template(
+        ProxyTemplate.from_mcp_template(base.new, template).model_copy(  # pyright: ignore[reportUnknownMemberType]
+            update={"uri_template": "note://{id}"}
+        )
+    )
+    proxy.add_prompt(
+        ProxyPrompt.from_mcp_prompt(base.new, prompt).model_copy(update={"name": "hello"})  # pyright: ignore[reportUnknownMemberType]
+    )
+
+    async with Client(proxy) as client:
+        assert [t.name for t in await client.list_tools()] == ["plus"]
+        assert (await client.call_tool("plus", {"x": 5})).data == 15
+        assert [str(r.uri) for r in await client.list_resources()] == ["notes://everything"]
+        contents = (await client.read_resource("notes://everything"))[0]
+        assert isinstance(contents, TextResourceContents)
+        assert contents.text == "all notes"
+        contents = (await client.read_resource("note://7"))[0]
+        assert isinstance(contents, TextResourceContents)
+        assert contents.text == "note 7"
+        assert [p.name for p in await client.list_prompts()] == ["hello"]
+        content = (await client.get_prompt("hello", {"name": "Ann"})).messages[0].content
+        assert isinstance(content, TextContent)
+        assert content.text == "Hello Ann"
+
+
+async def test_a_server_announces_the_name_it_was_built_with_and_live_instructions() -> None:
+    server = FastMCP("built-name", instructions="first")
+
+    async with Client(server) as client:
+        assert client.server_info is not None
+        assert client.server_info.name == "built-name"
+        assert client.instructions == "first"
+    server.instructions = "second"
+    async with Client(server) as client:
+        assert client.instructions == "second"

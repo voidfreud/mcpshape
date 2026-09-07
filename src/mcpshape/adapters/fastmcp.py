@@ -1,8 +1,13 @@
 """The FastMCP adapter: the only module that imports FastMCP (ADR 0001).
 
 The rest of mcpshape sees two things: ``scan``, which turns an Upstream into a Catalog, and
-``proxy_app``, an ASGI app per Proxy that serves lists from a Catalog it is handed and
-forwards calls to the Upstream.
+``proxy_app``, an ASGI app per Proxy that serves lists from what it is handed and forwards
+calls to the Upstream under Catalog names.
+
+FastMCP's proxy components keep the backend name when they are copied under a new one, which
+is how a renamed tool, resource, or prompt still reaches its Catalog item. The server name is
+fixed when the server is built (the MCP SDK caches its identity), so a Proxy whose exposed
+server name changes is rebuilt by its owner; ``ProxyApp.name`` says what it was built with.
 """
 
 from __future__ import annotations
@@ -24,9 +29,11 @@ from fastmcp.server.providers.proxy import (
     ProxyTool,
 )
 from mcp.shared.exceptions import MCPError
+from pydantic import AnyUrl, PrivateAttr
 
-from mcpshape.catalog import Catalog
+from mcpshape.catalog import Catalog, Item
 from mcpshape.model import MemoryTransport
+from mcpshape.proxy import ArgumentMap, Exposed
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Awaitable, Callable, Sequence
@@ -34,7 +41,9 @@ if TYPE_CHECKING:
 
     from fastmcp.prompts import Prompt
     from fastmcp.resources import Resource, ResourceTemplate
+    from fastmcp.server.context import Context
     from fastmcp.tools import Tool
+    from fastmcp.tools.base import ToolResult
     from pydantic import BaseModel
     from starlette.types import ASGIApp
 
@@ -51,35 +60,42 @@ class UpstreamTargetError(Exception):
 class ProxyApp:
     """A Proxy as an ASGI app serving MCP at ``MCP_PATH``, plus the lifespan it needs.
 
-    ``serve`` replaces what the Proxy exposes; Clients see the new Catalog on their next
-    request.
+    ``serve`` replaces what the Proxy exposes; Clients see the new set on their next request.
+    The server ``name`` cannot change: build a new app for a new name.
     """
 
+    name: str
     asgi: ASGIApp
     lifespan: Callable[[], AbstractAsyncContextManager[None]]
-    serve: Callable[[Catalog], None]
+    serve: Callable[[Exposed], None]
 
 
-def proxy_app(upstream: Upstream, proxy_name: str, catalog: Catalog) -> ProxyApp:
-    """The Proxy ``proxy_name`` of ``upstream``, exposing ``catalog`` and forwarding calls."""
+def server_name(upstream: Upstream, proxy_name: str, exposed: Exposed) -> str:
+    """The name the Proxy's server announces: the user's, else ``<upstream>/<proxy>``."""
+    return exposed.name or f"{upstream.name}/{proxy_name}"
+
+
+def proxy_app(upstream: Upstream, proxy_name: str, exposed: Exposed) -> ProxyApp:
+    """The Proxy ``proxy_name`` of ``upstream``, exposing ``exposed`` and forwarding calls."""
     target = _resolve(upstream.transport)
     base: ProxyClient[Any] = ProxyClient(target)
     provider = _CatalogProvider(base.new)
-    server = FastMCP(name=f"{upstream.name}/{proxy_name}")
+    name = server_name(upstream, proxy_name, exposed)
+    server = FastMCP(name=name)
     server.add_provider(provider)
     app = server.http_app(path=MCP_PATH)
 
-    def serve(catalog: Catalog) -> None:
-        provider.serve(catalog)
-        server.instructions = catalog.instructions
+    def serve(exposed: Exposed) -> None:
+        provider.serve(exposed)
+        server.instructions = exposed.catalog.instructions
 
     @asynccontextmanager
     async def lifespan() -> AsyncGenerator[None]:
         async with app.router.lifespan_context(app):
             yield
 
-    serve(catalog)
-    return ProxyApp(asgi=app, lifespan=lifespan, serve=serve)
+    serve(exposed)
+    return ProxyApp(name=name, asgi=app, lifespan=lifespan, serve=serve)
 
 
 async def scan(transport: Transport) -> Catalog:
@@ -115,8 +131,24 @@ def _raw(definition: BaseModel) -> dict[str, Any]:
     return definition.model_dump(mode="json", by_alias=True, exclude_none=True)
 
 
+class _CuratedTool(ProxyTool):
+    """A ProxyTool whose exposed arguments are mapped back onto the Catalog tool's on each call."""
+
+    _arguments: ArgumentMap = PrivateAttr(default_factory=ArgumentMap)
+
+    def map_arguments(self, arguments: ArgumentMap) -> None:
+        self._arguments = arguments
+
+    async def run(self, arguments: dict[str, Any], context: Context | None = None) -> ToolResult:
+        return await super().run(self._arguments.to_catalog(arguments), context)
+
+
 class _CatalogProvider(Provider):
-    """Serves lists from a Catalog and forwards calls, reads, and gets to the Upstream."""
+    """Serves lists from what it is handed and forwards calls, reads, and gets to the Upstream.
+
+    Each component is built under its Catalog name and then copied under its exposed name, so
+    FastMCP keeps the Catalog name as the backend name to forward with.
+    """
 
     def __init__(self, client_factory: Callable[[], Client[Any]]) -> None:
         super().__init__()
@@ -126,32 +158,60 @@ class _CatalogProvider(Provider):
         self._templates: list[ResourceTemplate] = []
         self._prompts: list[Prompt] = []
 
-    def serve(self, catalog: Catalog) -> None:
+    def serve(self, exposed: Exposed) -> None:
         factory = self._client_factory
+        catalog = exposed.catalog
         self._tools = [
-            ProxyTool.from_mcp_tool(  # pyright: ignore[reportUnknownMemberType]  # FastMCP's factory type is unparameterised
-                factory, mcp_types.Tool.model_validate(raw)
-            )
-            for raw in catalog.tools.values()
+            self._tool(factory, exposed, name, raw) for name, raw in catalog.tools.items()
         ]
         self._resources = [
-            ProxyResource.from_mcp_resource(  # pyright: ignore[reportUnknownMemberType]  # FastMCP's factory type is unparameterised
-                factory, mcp_types.Resource.model_validate(raw)
+            _renamed(
+                ProxyResource.from_mcp_resource(  # pyright: ignore[reportUnknownMemberType]  # FastMCP's factory type is unparameterised
+                    factory, mcp_types.Resource.model_validate(raw)
+                ),
+                exposed.origin(Item("resource", uri)),
+                uri,
+                "uri",
+                AnyUrl(uri),
             )
-            for raw in catalog.resources.values()
+            for uri, raw in catalog.resources.items()
         ]
         self._templates = [
-            ProxyTemplate.from_mcp_template(  # pyright: ignore[reportUnknownMemberType]  # FastMCP's factory type is unparameterised
-                factory, mcp_types.ResourceTemplate.model_validate(raw)
+            _renamed(
+                ProxyTemplate.from_mcp_template(  # pyright: ignore[reportUnknownMemberType]  # FastMCP's factory type is unparameterised
+                    factory, mcp_types.ResourceTemplate.model_validate(raw)
+                ),
+                exposed.origin(Item("resource_template", uri)),
+                uri,
+                "uri_template",
+                uri,
             )
-            for raw in catalog.resource_templates.values()
+            for uri, raw in catalog.resource_templates.items()
         ]
         self._prompts = [
-            ProxyPrompt.from_mcp_prompt(  # pyright: ignore[reportUnknownMemberType]  # FastMCP's factory type is unparameterised
-                factory, mcp_types.Prompt.model_validate(raw)
+            _renamed(
+                ProxyPrompt.from_mcp_prompt(  # pyright: ignore[reportUnknownMemberType]  # FastMCP's factory type is unparameterised
+                    factory, mcp_types.Prompt.model_validate(raw)
+                ),
+                exposed.origin(Item("prompt", name)),
+                name,
+                "name",
+                name,
             )
-            for raw in catalog.prompts.values()
+            for name, raw in catalog.prompts.items()
         ]
+
+    @staticmethod
+    def _tool(
+        factory: Callable[[], Client[Any]], exposed: Exposed, name: str, raw: dict[str, Any]
+    ) -> Tool:
+        origin = exposed.origin(Item("tool", name))
+        built = _CuratedTool.from_mcp_tool(  # pyright: ignore[reportUnknownMemberType]  # FastMCP's factory type is unparameterised
+            factory, mcp_types.Tool.model_validate({**raw, "name": origin})
+        )
+        tool = _renamed(cast("_CuratedTool", built), origin, name, "name", name)
+        tool.map_arguments(exposed.arguments.get(name, ArgumentMap()))
+        return tool
 
     async def _list_tools(self) -> Sequence[Tool]:
         return self._tools
@@ -164,6 +224,13 @@ class _CatalogProvider(Provider):
 
     async def _list_prompts(self) -> Sequence[Prompt]:
         return self._prompts
+
+
+def _renamed[C: BaseModel](component: C, origin: str, exposed: str, key: str, value: object) -> C:
+    """``component`` under its exposed identity, still forwarding to ``origin``."""
+    if exposed == origin:
+        return component
+    return component.model_copy(update={key: value})
 
 
 def _resolve(transport: Transport) -> FastMCP[Any]:

@@ -17,10 +17,10 @@ from starlette.applications import Starlette
 from starlette.routing import Mount
 
 from mcpshape import catalog as catalogs
-from mcpshape.adapters.fastmcp import UpstreamTargetError, proxy_app, scan
+from mcpshape.adapters.fastmcp import UpstreamTargetError, proxy_app, scan, server_name
 from mcpshape.config import ConfigError, load_proxy, load_settings, load_upstreams, proxy_file
 from mcpshape.model import DEFAULT_PROXY_NAME
-from mcpshape.proxy import exposed_catalog
+from mcpshape.proxy import Exposed, OverrideError, expose
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
@@ -34,8 +34,46 @@ if TYPE_CHECKING:
 log = logging.getLogger("mcpshape.daemon")
 
 
+class _Held:
+    """A Proxy app's lifespan, held open by one task so it is entered and left in one context.
+
+    FastMCP's lifespan sets context variables it must reset where it set them; entering it in a
+    request task and leaving it in another would fail.
+    """
+
+    def __init__(self, app: ProxyApp) -> None:
+        self._stop = asyncio.Event()
+        self._ready: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        self._task = asyncio.create_task(self._hold(app))
+
+    async def _hold(self, app: ProxyApp) -> None:
+        try:
+            async with app.lifespan():
+                self._ready.set_result(None)
+                await self._stop.wait()
+        except Exception as exc:
+            if not self._ready.done():
+                self._ready.set_exception(exc)
+            raise
+
+    async def ready(self) -> None:
+        await self._ready
+
+    async def close(self) -> None:
+        self._stop.set()
+        try:
+            await self._task
+        except Exception:
+            log.warning("a Proxy app did not shut down cleanly", exc_info=True)
+
+
 class _Proxy:
-    """One Proxy, re-reading its Catalog and Proxy file whenever either changes on disk."""
+    """One Proxy, re-reading its Catalog and Proxy file whenever either changes on disk.
+
+    A change to what is exposed is served in place. A change to the exposed server name needs
+    a new app, since a server's identity is fixed when it is built: the old app is closed after
+    the new one is up, and Clients with an old session reconnect.
+    """
 
     def __init__(self, config_dir: Path, state_dir: Path, upstream: Upstream, name: str) -> None:
         self._sources = (
@@ -50,24 +88,47 @@ class _Proxy:
             name,
         )
         self._stamp: tuple[tuple[int, int] | None, ...] | None = None
-        self.app: ProxyApp = proxy_app(upstream, name, _empty())
+        self._lock = asyncio.Lock()
+        self._held: _Held | None = None
+        self.app: ProxyApp = proxy_app(upstream, name, _nothing())
 
-    def refresh(self) -> None:
-        stamp = tuple(_stamp(path) for path in self._sources)
-        if stamp == self._stamp:
-            return
-        try:
-            stored = catalogs.load_catalog(self._state_dir, self._upstream.name) or _empty()
-            proxy = load_proxy(self._config_dir, self._upstream.name, self._name)
-        except (catalogs.CatalogError, ConfigError):
-            log.warning("Proxy %s keeps its last exposed set", self._label, exc_info=True)
-            return
-        self._stamp = stamp
-        self.app.serve(exposed_catalog(stored, proxy))
+    async def start(self) -> None:
+        self._held = _Held(self.app)
+        await self._held.ready()
+
+    async def stop(self) -> None:
+        if self._held is not None:
+            await self._held.close()
+            self._held = None
+
+    async def refresh(self) -> None:
+        async with self._lock:
+            stamp = tuple(_stamp(path) for path in self._sources)
+            if stamp == self._stamp:
+                return
+            try:
+                stored = catalogs.load_catalog(self._state_dir, self._upstream.name) or _empty()
+                proxy = load_proxy(self._config_dir, self._upstream.name, self._name)
+                exposed = expose(stored, proxy)
+            except (catalogs.CatalogError, ConfigError, OverrideError):
+                log.warning("Proxy %s keeps its last exposed set", self._label, exc_info=True)
+                return
+            self._stamp = stamp
+            if server_name(self._upstream, self._name, exposed) == self.app.name:
+                self.app.serve(exposed)
+                return
+            await self._rebuild(exposed)
+
+    async def _rebuild(self, exposed: Exposed) -> None:
+        previous = self._held
+        self.app = proxy_app(self._upstream, self._name, exposed)
+        await self.start()
+        if previous is not None:
+            await previous.close()
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] == "http":
-            self.refresh()
+            await self.refresh()
         await self.app.asgi(scope, receive, send)
 
 
@@ -81,6 +142,11 @@ def _stamp(path: Path) -> tuple[int, int] | None:
 
 def _empty() -> catalogs.Catalog:
     return catalogs.Catalog(scanned_at=datetime.now(UTC))
+
+
+def _nothing() -> Exposed:
+    """What a Proxy exposes before its first refresh."""
+    return Exposed(catalog=_empty(), name=None)
 
 
 async def rescan(state_dir: Path, upstream: Upstream) -> None:
@@ -116,10 +182,13 @@ def build_app(config_dir: Path, state_dir: Path) -> Starlette:
     async def lifespan(_app: Starlette) -> AsyncGenerator[None]:
         for upstream in upstreams:
             await rescan(state_dir, upstream)
-        async with contextlib.AsyncExitStack() as stack:
-            for proxy in proxies.values():
-                await stack.enter_async_context(proxy.app.lifespan())
+        for proxy in proxies.values():
+            await proxy.start()
+        try:
             yield
+        finally:
+            for proxy in reversed(proxies.values()):
+                await proxy.stop()
 
     return Starlette(routes=routes, lifespan=lifespan)
 

@@ -1,29 +1,219 @@
-"""What one Proxy exposes: the Upstream's accepted Catalog, curated by the Proxy file."""
+"""What one Proxy exposes: the Upstream's accepted Catalog, curated by the Proxy file.
+
+Overrides are applied here, with no FastMCP in sight, so the result can be checked by
+``doctor``, shown by the CLI, and property-tested. Identity stays the Catalog name: every
+exposed item remembers where it came from, and every curated tool remembers how its exposed
+arguments map back onto the Catalog tool's, so a call under the exposed name reaches the
+Upstream under the Catalog name with the arguments it expects. Schema types are never changed.
+"""
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+import copy
+import re
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any, cast
 
 from mcpshape.catalog import KINDS, Item
+from mcpshape.config import ArgumentOverride, PromptOverride, ResourceOverride, ToolOverride
 
 if TYPE_CHECKING:
-    from mcpshape.catalog import Catalog
-    from mcpshape.config import ProxyFile
+    from mcpshape.catalog import Catalog, Kind
+    from mcpshape.config import ItemOverride, ProxyFile
+
+TEMPLATE_PARAMETER = re.compile(r"\{([^}]*)\}")
 
 
-def hidden_items(proxy: ProxyFile) -> frozenset[Item]:
-    """Every item the Proxy file hides, under both resource kinds for resource keys."""
-    return frozenset(
-        Item(kind, name)
-        for kind in KINDS
-        for name, override in proxy.overrides(kind).items()
-        if override.hidden
+class OverrideError(ValueError):
+    """An Override that cannot be applied: a collision, or a hidden argument nothing supplies."""
+
+
+@dataclass(frozen=True)
+class ArgumentMap:
+    """How a curated tool's exposed arguments map back onto the Catalog tool's."""
+
+    renamed: dict[str, str] = field(default_factory=dict[str, str])
+    """Exposed argument name to Catalog argument name, for the arguments that were renamed."""
+    defaults: dict[str, Any] = field(default_factory=dict[str, Any])
+    """Catalog argument name to the value sent when the Client gives none, hidden ones included."""
+
+    def to_catalog(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        """The arguments the Catalog tool receives for ``arguments`` given under exposed names."""
+        mapped = {self.renamed.get(name, name): value for name, value in arguments.items()}
+        return {**self.defaults, **mapped}
+
+
+@dataclass(frozen=True)
+class Exposed:
+    """Everything a Proxy exposes, under exposed names, and the way back to Catalog names."""
+
+    catalog: Catalog
+    """The exposed items, keyed by exposed name, with their curated definitions."""
+    name: str | None
+    """The exposed server name, or ``None`` for mcpshape's default."""
+    origins: dict[Item, str] = field(default_factory=dict[Item, str])
+    """Each exposed item to the Catalog name it stands for."""
+    arguments: dict[str, ArgumentMap] = field(default_factory=dict[str, ArgumentMap])
+    """By exposed tool name, for the tools whose arguments were curated."""
+
+    def origin(self, item: Item) -> str:
+        return self.origins.get(item, item.name)
+
+
+def expose(catalog: Catalog, proxy: ProxyFile) -> Exposed:
+    """Apply the Proxy file's Overrides to ``catalog``. Raises ``OverrideError`` when it cannot."""
+    exposed = catalog.model_copy(deep=True)
+    exposed.instructions = (
+        proxy.instructions if proxy.instructions is not None else catalog.instructions
     )
+    origins: dict[Item, str] = {}
+    arguments: dict[str, ArgumentMap] = {}
+    for kind in KINDS:
+        items = exposed.items(kind)
+        items.clear()
+        for name, definition in catalog.items(kind).items():
+            override = proxy.overrides(kind).get(name)
+            if override is not None and override.hidden:
+                continue
+            curated = copy.deepcopy(definition)
+            exposed_name = _curate(kind, name, curated, override, arguments)
+            _claim(exposed, kind, exposed_name, name, origins)
+            items[exposed_name] = curated
+    return Exposed(catalog=exposed, name=proxy.name, origins=origins, arguments=arguments)
 
 
-def exposed_catalog(catalog: Catalog, proxy: ProxyFile) -> Catalog:
-    """The Catalog as Clients of this Proxy see it."""
-    return catalog.keep(hidden_items(proxy))
+def _claim(
+    exposed: Catalog, kind: Kind, exposed_name: str, name: str, origins: dict[Item, str]
+) -> None:
+    """Take ``exposed_name`` for ``name``; resources and templates share the URI space."""
+    rivals = ("resource", "resource_template") if kind.startswith("resource") else (kind,)
+    for rival in rivals:
+        if exposed_name in exposed.items(rival):
+            taken = origins[Item(rival, exposed_name)]
+            msg = (
+                f"{Item(kind, name)} and {Item(rival, taken)} would both be exposed as "
+                f"{exposed_name!r}; rename or hide one of them"
+            )
+            raise OverrideError(msg)
+    origins[Item(kind, exposed_name)] = name
+
+
+def _curate(
+    kind: Kind,
+    name: str,
+    definition: dict[str, Any],
+    override: ItemOverride | None,
+    arguments: dict[str, ArgumentMap],
+) -> str:
+    """Rewrite ``definition`` in place per ``override`` and return the exposed name."""
+    if override is None:
+        return name
+    _replace(definition, override, "title", "description")
+    match override:
+        case ToolOverride():
+            _set_annotations(definition, override)
+            argument_map = _curate_arguments(name, definition, override)
+            exposed_name = override.name or name
+            if argument_map.renamed or argument_map.defaults:
+                arguments[exposed_name] = argument_map
+            return exposed_name
+        case ResourceOverride():
+            _replace(definition, override, "name")
+            if override.uri is None:
+                return name
+            if kind == "resource_template":
+                _check_parameters(name, override.uri)
+            return override.uri
+        case PromptOverride():
+            return override.name or name
+
+
+def _replace(
+    definition: dict[str, Any], override: ItemOverride | ArgumentOverride, *keys: str
+) -> None:
+    """Copy each of ``keys`` the user set onto the raw definition."""
+    for key in keys:
+        value: object = getattr(override, key)
+        if value is not None:
+            definition[key] = value
+
+
+def _set_annotations(definition: dict[str, Any], override: ToolOverride) -> None:
+    if override.annotations is None:
+        return
+    current: dict[str, Any] = dict(definition.get("annotations") or {})
+    definition["annotations"] = {**current, **override.annotations.as_mcp()}
+
+
+def _curate_arguments(tool: str, definition: dict[str, Any], override: ToolOverride) -> ArgumentMap:
+    """Apply the argument Overrides that name an argument the schema has; the rest are orphans."""
+    schema: dict[str, Any] = definition.setdefault("inputSchema", {"type": "object"})
+    properties: dict[str, Any] = schema.get("properties") or {}
+    required: list[str] = list(schema.get("required") or [])
+    renamed: dict[str, str] = {}
+    defaults: dict[str, Any] = {}
+    curated: dict[str, Any] = {}
+    for name, property_schema in properties.items():
+        argument = override.args.get(name)
+        if argument is None:
+            curated[name] = property_schema
+            continue
+        if argument.default is not None:
+            defaults[name] = argument.default
+        if argument.hidden:
+            _check_hideable(tool, name, argument, required)
+            required = [item for item in required if item != name]
+            continue
+        exposed_name = argument.name or name
+        if exposed_name != name:
+            renamed[exposed_name] = name
+        curated[exposed_name] = _curate_property(property_schema, argument)
+        required = _required(required, name, exposed_name, flag=argument.required)
+    if "properties" in schema or curated:
+        schema["properties"] = curated
+    if required:
+        schema["required"] = required
+    else:
+        schema.pop("required", None)
+    return ArgumentMap(renamed=renamed, defaults=defaults)
+
+
+def _check_hideable(tool: str, name: str, argument: ArgumentOverride, required: list[str]) -> None:
+    if name in required and argument.default is None:
+        msg = (
+            f"tool {tool}: argument {name!r} is required by the Upstream, so hiding it needs a "
+            "default to send in its place"
+        )
+        raise OverrideError(msg)
+
+
+def _required(required: list[str], name: str, exposed_name: str, *, flag: bool | None) -> list[str]:
+    """The required list under the exposed name, with the user's say on whether it belongs."""
+    kept = [exposed_name if item == name else item for item in required]
+    if flag is True and exposed_name not in kept:
+        kept.append(exposed_name)
+    if flag is False:
+        kept = [item for item in kept if item != exposed_name]
+    return kept
+
+
+def _curate_property(property_schema: dict[str, Any], argument: ArgumentOverride) -> dict[str, Any]:
+    curated = dict(property_schema)
+    _replace(curated, argument, "description", "default")
+    return curated
+
+
+def _check_parameters(name: str, uri: str) -> None:
+    before, after = TEMPLATE_PARAMETER.findall(name), TEMPLATE_PARAMETER.findall(uri)
+    if sorted(before) != sorted(after):
+        msg = (
+            f"resource template {name} cannot be exposed as {uri}: the parameters must stay "
+            f"{', '.join('{' + p + '}' for p in before) or 'none'}"
+        )
+        raise OverrideError(msg)
+
+
+# --- what doctor reports -----------------------------------------------------------------------
 
 
 def orphaned_overrides(catalog: Catalog, proxy: ProxyFile) -> list[Item]:
@@ -35,3 +225,22 @@ def orphaned_overrides(catalog: Catalog, proxy: ProxyFile) -> list[Item]:
         if name not in catalog.items(kind)
         and (kind != "resource" or name not in catalog.resource_templates)
     ]
+
+
+def orphaned_arguments(catalog: Catalog, proxy: ProxyFile) -> list[tuple[str, str]]:
+    """Argument Overrides naming an argument the Catalog tool lacks, as ``(tool, argument)``."""
+    return [
+        (tool, argument)
+        for tool, override in proxy.tools.items()
+        if tool in catalog.tools
+        for argument in override.args
+        if argument not in _properties(catalog.tools[tool])
+    ]
+
+
+def _properties(definition: dict[str, Any]) -> dict[str, Any]:
+    schema: object = definition.get("inputSchema")
+    if not isinstance(schema, dict):
+        return {}
+    properties: object = cast("dict[str, Any]", schema).get("properties")
+    return cast("dict[str, Any]", properties) if isinstance(properties, dict) else {}

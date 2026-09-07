@@ -27,7 +27,7 @@ from mcpshape.cli.common import (
 from mcpshape.cli.listing import proxies_table, proxy_url, toml_file
 from mcpshape.names import check_name
 from mcpshape.profiles import entry_name
-from mcpshape.proxy import exposed_catalog
+from mcpshape.proxy import expose
 
 if TYPE_CHECKING:
     from mcpshape.profiles import Profile
@@ -159,8 +159,8 @@ def budget_report(
     stored = catalog.load_catalog(state_dir, upstream)
     if stored is None:
         return [unscanned_note(upstream, profile)]
-    exposed = exposed_catalog(stored, config.load_proxy(config_dir, upstream, proxy))
-    return profile.name_violations(server, exposed.tools)
+    exposed = expose(stored, config.load_proxy(config_dir, upstream, proxy))
+    return profile.name_violations(server, exposed.catalog.tools)
 
 
 def json_snippet(container: tuple[str, ...], name: str, entry: dict[str, Any]) -> str:

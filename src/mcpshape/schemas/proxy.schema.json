@@ -3,18 +3,320 @@
   "$id": "https://raw.githubusercontent.com/voidfreud/mcpshape/main/src/mcpshape/schemas/proxy.schema.json",
   "title": "ProxyFile",
   "$defs": {
-    "ItemOverride": {
+    "Annotations": {
       "additionalProperties": false,
-      "description": "How one Catalog item is presented, keyed by its Catalog name.",
+      "description": "Tool annotations set by the user; an unset hint keeps what the Upstream advertises.",
+      "properties": {
+        "read_only": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The tool changes nothing.",
+          "title": "Read Only"
+        },
+        "destructive": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The tool may destroy data.",
+          "title": "Destructive"
+        },
+        "idempotent": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Repeating a call changes nothing.",
+          "title": "Idempotent"
+        },
+        "open_world": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The tool reaches outside systems.",
+          "title": "Open World"
+        }
+      },
+      "title": "Annotations",
+      "type": "object"
+    },
+    "ArgumentOverride": {
+      "additionalProperties": false,
+      "description": "How one argument of a tool is presented, keyed by its name in the Catalog.",
       "properties": {
         "hidden": {
           "default": false,
           "description": "Do not expose this item at all.",
           "title": "Hidden",
           "type": "boolean"
+        },
+        "name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Exposed argument name.",
+          "title": "Name"
+        },
+        "description": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Replaces the description.",
+          "title": "Description"
+        },
+        "default": {
+          "anyOf": [
+            {},
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Default the Client sees, and what is sent when the Client omits the argument. Required for a hidden argument the Upstream requires.",
+          "title": "Default"
+        },
+        "required": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Whether the Client must give it.",
+          "title": "Required"
         }
       },
-      "title": "ItemOverride",
+      "title": "ArgumentOverride",
+      "type": "object"
+    },
+    "PromptOverride": {
+      "additionalProperties": false,
+      "description": "How one prompt is presented, keyed by its Catalog name.",
+      "properties": {
+        "hidden": {
+          "default": false,
+          "description": "Do not expose this item at all.",
+          "title": "Hidden",
+          "type": "boolean"
+        },
+        "name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Exposed prompt name.",
+          "title": "Name"
+        },
+        "title": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Replaces the title.",
+          "title": "Title"
+        },
+        "description": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Replaces the description.",
+          "title": "Description"
+        }
+      },
+      "title": "PromptOverride",
+      "type": "object"
+    },
+    "ResourceOverride": {
+      "additionalProperties": false,
+      "description": "How one resource or resource template is presented, keyed by its Catalog URI.",
+      "properties": {
+        "hidden": {
+          "default": false,
+          "description": "Do not expose this item at all.",
+          "title": "Hidden",
+          "type": "boolean"
+        },
+        "uri": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Exposed URI, or URI template with the same parameters. Clients read it by this.",
+          "title": "Uri"
+        },
+        "name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Replaces the display name.",
+          "title": "Name"
+        },
+        "title": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Replaces the title.",
+          "title": "Title"
+        },
+        "description": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Replaces the description.",
+          "title": "Description"
+        }
+      },
+      "title": "ResourceOverride",
+      "type": "object"
+    },
+    "ToolOverride": {
+      "additionalProperties": false,
+      "description": "How one tool is presented, keyed by its Catalog name.",
+      "properties": {
+        "hidden": {
+          "default": false,
+          "description": "Do not expose this item at all.",
+          "title": "Hidden",
+          "type": "boolean"
+        },
+        "name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Exposed tool name.",
+          "title": "Name"
+        },
+        "title": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Replaces the title.",
+          "title": "Title"
+        },
+        "description": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Replaces the description.",
+          "title": "Description"
+        },
+        "annotations": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Annotations"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Hints to set."
+        },
+        "args": {
+          "additionalProperties": {
+            "$ref": "#/$defs/ArgumentOverride"
+          },
+          "description": "Argument Overrides by Catalog argument name.",
+          "title": "Args",
+          "type": "object"
+        }
+      },
+      "title": "ToolOverride",
       "type": "object"
     }
   },
@@ -27,9 +329,35 @@
       "title": "Version",
       "type": "integer"
     },
+    "name": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Server name Clients see; default: <upstream>/<proxy>.",
+      "title": "Name"
+    },
+    "instructions": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Replaces the Upstream's instructions.",
+      "title": "Instructions"
+    },
     "tools": {
       "additionalProperties": {
-        "$ref": "#/$defs/ItemOverride"
+        "$ref": "#/$defs/ToolOverride"
       },
       "description": "Overrides by tool name.",
       "title": "Tools",
@@ -37,7 +365,7 @@
     },
     "resources": {
       "additionalProperties": {
-        "$ref": "#/$defs/ItemOverride"
+        "$ref": "#/$defs/ResourceOverride"
       },
       "description": "Overrides by resource URI or resource template.",
       "title": "Resources",
@@ -45,7 +373,7 @@
     },
     "prompts": {
       "additionalProperties": {
-        "$ref": "#/$defs/ItemOverride"
+        "$ref": "#/$defs/PromptOverride"
       },
       "description": "Overrides by prompt name.",
       "title": "Prompts",

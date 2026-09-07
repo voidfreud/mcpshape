@@ -58,16 +58,6 @@ class Catalog(BaseModel):
             case "prompt":
                 return self.prompts
 
-    def keep(self, hidden: frozenset[Item]) -> Catalog:
-        """This Catalog without the ``hidden`` items."""
-        kept = self.model_copy(deep=True)
-        for kind in KINDS:
-            items = kept.items(kind)
-            for name in list(items):
-                if Item(kind, name) in hidden:
-                    del items[name]
-        return kept
-
 
 @dataclass(frozen=True, order=True)
 class Item:
