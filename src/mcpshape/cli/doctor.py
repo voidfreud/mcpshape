@@ -11,11 +11,13 @@ from rich.markup import escape
 from mcpshape import catalog, config
 from mcpshape.cli.common import client_profile, console, state, unscanned_note
 from mcpshape.hooks import UserCode, UserCodeError, load_user_code
+from mcpshape.model import CapError, CapSettings
 from mcpshape.names import InvalidNameError, check_name
 from mcpshape.profiles import Profile, entry_name
 from mcpshape.proxy import (
     Exposed,
     OverrideError,
+    cap,
     expose,
     orphaned_arguments,
     orphaned_hooks,
@@ -56,9 +58,11 @@ class Curation:
     catalog: catalog.Catalog
     proxy: config.ProxyFile
     code: UserCode
+    caps: CapSettings
+    """This Proxy's Caps, already resolved through global and Upstream."""
 
     def expose(self) -> Exposed:
-        return expose(self.catalog, self.proxy, self.code)
+        return cap(expose(self.catalog, self.proxy, self.code), self.caps, self.proxy)
 
 
 def load_code(config_dir: Path, upstream: str, proxy: str) -> UserCode | config.Problem:
@@ -73,30 +77,45 @@ def load_code(config_dir: Path, upstream: str, proxy: str) -> UserCode | config.
 def curations(config_dir: Path, state_dir: Path) -> list[Curation | config.Problem]:
     """Every Proxy file with its Upstream's stored Catalog; unscanned Upstreams are skipped."""
     found: list[Curation | config.Problem] = []
+    global_caps = config.load_settings(config_dir).caps
     for upstream in config.load_upstreams(config_dir):
         stored = catalog.load_catalog(state_dir, upstream.name)
         if stored is None:
             continue
+        try:
+            upstream_caps = upstream.caps.over(global_caps, f"Upstream {upstream.name}")
+        except CapError as exc:
+            where = config.upstream_dir(config_dir, upstream.name)
+            found.append(config.Problem(where, "", str(exc)))
+            continue
         for proxy in upstream.proxies:
             code = load_code(config_dir, upstream.name, proxy)
+            path = config.proxy_file(config_dir, upstream.name, proxy)
             if isinstance(code, config.Problem):
                 found.append(code)
                 continue
+            proxy_file = config.load_proxy(config_dir, upstream.name, proxy)
+            try:
+                proxy_caps = proxy_file.caps.over(upstream_caps, f"Proxy {upstream.name}/{proxy}")
+            except CapError as exc:
+                found.append(config.Problem(path, "", str(exc)))
+                continue
             found.append(
                 Curation(
-                    config.proxy_file(config_dir, upstream.name, proxy),
+                    path,
                     entry_name(upstream.name, proxy),
                     stored,
-                    config.load_proxy(config_dir, upstream.name, proxy),
+                    proxy_file,
                     code,
+                    proxy_caps,
                 )
             )
     return found
 
 
 def override_problems(config_dir: Path, state_dir: Path) -> list[config.Problem]:
-    """What would leave a Proxy unhealthy: Overrides that cannot be applied, user code that
-    cannot be loaded, a Virtual Tool colliding with an exposed tool."""
+    """What would leave a Proxy unhealthy: Overrides or Caps that cannot be applied, user code
+    that cannot be loaded, a Virtual Tool colliding with an exposed tool."""
     problems: list[config.Problem] = []
     for curation in curations(config_dir, state_dir):
         if isinstance(curation, config.Problem):
@@ -104,7 +123,7 @@ def override_problems(config_dir: Path, state_dir: Path) -> list[config.Problem]
             continue
         try:
             curation.expose()
-        except OverrideError as exc:
+        except (OverrideError, CapError) as exc:
             problems.append(config.Problem(curation.path, "", str(exc)))
     return problems
 
@@ -179,7 +198,7 @@ def review(config_dir: Path, state_dir: Path, client: Profile) -> Review:
         found.notes.append(
             f"{client.name}: the Caps this Profile recommends are {caps.tool_description} "
             f"characters for a tool description and {caps.instructions} for instructions "
-            f"({caps.source}). Nothing applies them yet."
+            f"({caps.source}). Set config.toml's [caps] to these or lower to apply them."
         )
     found.notes += [
         unscanned_note(upstream.name, client)
@@ -191,7 +210,7 @@ def review(config_dir: Path, state_dir: Path, client: Profile) -> Review:
             continue  # reported as a problem already
         try:
             exposed = curation.expose()
-        except OverrideError:
+        except (OverrideError, CapError):
             continue  # reported as a problem already
         found.check_proxy(curation.path, curation.server, exposed)
     return found
@@ -215,6 +234,7 @@ def doctor(ctx: typer.Context, for_client: ForOpt = None) -> None:
     problems = name_problems(config_dir)
     for path, kind in files:
         problems.extend(config.check_file(path, kind))
+    problems.extend(config.secret_problems(config_dir))
     console.print(f"Checked {len(files)} file(s) in {config_dir}")
     for problem in problems:
         console.print(f"[red]✗[/] {escape(str(problem))}")

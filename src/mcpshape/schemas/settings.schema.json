@@ -3,6 +3,49 @@
   "$id": "https://raw.githubusercontent.com/voidfreud/mcpshape/main/src/mcpshape/schemas/settings.schema.json",
   "title": "SettingsFile",
   "$defs": {
+    "CapSettings": {
+      "additionalProperties": false,
+      "description": "The global master Cap per kind, in ``config.toml``. Every Upstream, Proxy, and tool\ninherits these, and may only lower what it inherits (global, then Upstream, then Proxy,\nthen tool).",
+      "properties": {
+        "tool_name": {
+          "default": 64,
+          "description": "Ceiling on an exposed tool name, in characters.",
+          "exclusiveMinimum": 0,
+          "title": "Tool Name",
+          "type": "integer"
+        },
+        "tool_description": {
+          "default": 1800,
+          "description": "Ceiling on an exposed tool description, in characters.",
+          "exclusiveMinimum": 0,
+          "title": "Tool Description",
+          "type": "integer"
+        },
+        "argument_description": {
+          "default": 400,
+          "description": "Ceiling on an exposed argument description, in characters.",
+          "exclusiveMinimum": 0,
+          "title": "Argument Description",
+          "type": "integer"
+        },
+        "instructions": {
+          "default": 1800,
+          "description": "Ceiling on the Proxy's exposed instructions, in characters.",
+          "exclusiveMinimum": 0,
+          "title": "Instructions",
+          "type": "integer"
+        },
+        "tool_output": {
+          "default": 20000,
+          "description": "Ceiling on a tool call's answer, in characters.",
+          "exclusiveMinimum": 0,
+          "title": "Tool Output",
+          "type": "integer"
+        }
+      },
+      "title": "CapSettings",
+      "type": "object"
+    },
     "DaemonSettings": {
       "additionalProperties": false,
       "properties": {
@@ -19,6 +62,19 @@
           "minimum": 1,
           "title": "Port",
           "type": "integer"
+        },
+        "token": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Bearer token every request to Proxies, the API, and the dashboard must carry. Required to bind a non-loopback host.",
+          "title": "Token"
         }
       },
       "title": "DaemonSettings",
@@ -102,6 +158,10 @@
     "lifecycle": {
       "$ref": "#/$defs/LifecycleSettings",
       "description": "Defaults for every Upstream connection; an Upstream file may override."
+    },
+    "caps": {
+      "$ref": "#/$defs/CapSettings",
+      "description": "The global master Cap per kind. An Upstream, a Proxy, or a tool may only lower what it inherits."
     }
   },
   "required": [

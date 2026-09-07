@@ -38,7 +38,7 @@ import logging
 import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Awaitable, Callable
@@ -55,6 +55,12 @@ BACKOFF_BASE = 1.0
 
 BACKOFF_CAP = 60.0
 """The longest the exponential backoff between retries ever grows to."""
+
+KEEPER_RESTART_CAP = 5
+"""How many times the keeper restarts itself after an unexpected exception before giving up.
+
+Past the cap the Upstream is moved to ``unavailable`` with the reason visible in the
+management API, rather than left connected with no idle disconnect, ping, or retry running."""
 
 _Due = Literal["nothing", "ping", "sleep", "retry"]
 """What the keeper does when the timer it armed runs out."""
@@ -187,17 +193,40 @@ class Connection:
     # --- the keeper ------------------------------------------------------------------------
 
     async def _keep(self) -> None:
-        """Run every time-based transition: the idle timer, the pings, and the backoff."""
-        try:
-            while not self._stopping():
-                self._wake.clear()
-                due, delay = self._plan()
-                if await self._wait(delay) and not self._stopping():
-                    await self._fire(due)
-        except asyncio.CancelledError:
-            raise
-        except Exception:  # an Upstream must never take the Daemon down
-            log.exception("Upstream %s stopped being supervised", self._name)
+        """Run every time-based transition: the idle timer, the pings, and the backoff.
+
+        An unexpected exception restarts this loop rather than leaving the Upstream connected
+        with nothing supervising it; past ``KEEPER_RESTART_CAP`` restarts the Upstream is
+        moved to ``unavailable`` instead, with the reason visible in the management API.
+        """
+        failures = 0
+        while not self._stopping():
+            try:
+                await self._keep_loop()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # an Upstream must never take the Daemon down
+                failures += 1
+                log.exception(
+                    "Upstream %s: the keeper failed (%d/%d)",
+                    self._name,
+                    failures,
+                    KEEPER_RESTART_CAP,
+                )
+                if failures >= KEEPER_RESTART_CAP:
+                    await self._fail(
+                        f"the keeper stopped supervising after {failures} failures: {exc}"
+                    )
+                    return
+            else:
+                return
+
+    async def _keep_loop(self) -> None:
+        while not self._stopping():
+            self._wake.clear()
+            due, delay = self._plan()
+            if await self._wait(delay) and not self._stopping():
+                await self._fire(due)
 
     def _plan(self) -> tuple[_Due, float | None]:
         """Arm the timer this state calls for: what runs out, and in how long."""
@@ -346,6 +375,30 @@ class Connection:
         await self._wake.wait()
 
 
+class TimedOutError(Exception):
+    """A ``bounded`` call did not finish within its timeout, on the clock it ran on."""
+
+
+async def bounded[T](coro: Awaitable[T], seconds: float, clock: Clock) -> T:
+    """Run ``coro``, raising ``TimedOutError`` if it outlasts ``seconds`` of ``clock`` time.
+
+    Used for the start-up rescan (#20): a hung Upstream must not hold up the Daemon's other
+    Upstreams, so each is bounded by its own ``connect_timeout`` on the same clock the
+    lifecycle runs on, not on wall-clock time a fake clock cannot see.
+    """
+    task: asyncio.Task[T] = asyncio.ensure_future(coro)
+    timing = asyncio.create_task(clock.sleep(seconds))
+    try:
+        done, pending = await asyncio.wait({task, timing}, return_when=asyncio.FIRST_COMPLETED)
+    except asyncio.CancelledError:
+        await _finish(task, timing)
+        raise
+    await _finish(*pending)
+    if task not in done:
+        raise TimedOutError
+    return task.result()
+
+
 def _left(timeout: float, elapsed: float) -> float:
     return max(0.0, timeout - elapsed)
 
@@ -365,7 +418,7 @@ async def _first_of(*tasks: asyncio.Task[None]) -> set[asyncio.Task[None]]:
     return done
 
 
-async def _finish(*tasks: asyncio.Task[None] | None) -> None:
+async def _finish(*tasks: asyncio.Task[Any] | None) -> None:
     """Cancel whatever is still running and wait for it, swallowing what it raises."""
     running = [task for task in tasks if task is not None]
     for task in running:

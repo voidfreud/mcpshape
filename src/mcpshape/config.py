@@ -7,6 +7,7 @@ and ``upstreams/<name>/<proxy>.toml`` per Proxy. Every file carries ``version``.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import partial
 from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
 
 import tomlkit
@@ -15,14 +16,24 @@ from tomlkit.exceptions import TOMLKitError
 
 from mcpshape.model import (
     DEFAULT_PROXY_NAME,
+    CapOverrides,
+    CapSettings,
     HttpTransport,
     LifecycleOverrides,
     LifecycleSettings,
     MemoryTransport,
     SseTransport,
     StdioTransport,
+    ToolCapOverrides,
     Transport,
     Upstream,
+)
+from mcpshape.secrets import (
+    SECRETS_FILE,
+    SecretError,
+    Secrets,
+    check_mode,
+    unset_message,
 )
 
 if TYPE_CHECKING:
@@ -37,7 +48,7 @@ UPSTREAMS_DIR = "upstreams"
 UPSTREAM_FILE = "upstream.toml"
 SCHEMA_URL_BASE = "https://raw.githubusercontent.com/voidfreud/mcpshape/main/src/mcpshape/schemas/"
 
-FileKind = Literal["settings", "upstream", "proxy"]
+FileKind = Literal["settings", "upstream", "proxy", "secrets"]
 
 
 class _File(BaseModel):
@@ -51,6 +62,13 @@ class DaemonSettings(BaseModel):
 
     host: str = Field(default="127.0.0.1", description="Address the Daemon binds to.")
     port: int = Field(default=8321, ge=1, le=65535, description="Port the Daemon listens on.")
+    token: str | None = Field(
+        default=None,
+        description=(
+            "Bearer token every request to Proxies, the API, and the dashboard must carry. "
+            "Required to bind a non-loopback host."
+        ),
+    )
 
 
 class DriftSettings(BaseModel):
@@ -70,6 +88,25 @@ class SettingsFile(_File):
     lifecycle: LifecycleSettings = Field(
         default_factory=LifecycleSettings,
         description="Defaults for every Upstream connection; an Upstream file may override.",
+    )
+    caps: CapSettings = Field(
+        default_factory=CapSettings,
+        description=(
+            "The global master Cap per kind. An Upstream, a Proxy, or a tool may only lower "
+            "what it inherits."
+        ),
+    )
+
+
+class SecretsFile(_File):
+    """``secrets.toml``: what a ``${VAR}`` reference resolves to when the environment has none.
+
+    Mode 0600, in the config directory. The Daemon environment wins over what is written here.
+    """
+
+    secrets: dict[str, str] = Field(
+        default_factory=dict[str, str],
+        description="Values by variable name, as ${VAR} references in Upstream files name them.",
     )
 
 
@@ -149,6 +186,10 @@ class ToolOverride(_Override):
     args: dict[str, ArgumentOverride] = Field(
         default_factory=dict, description="Argument Overrides by Catalog argument name."
     )
+    caps: ToolCapOverrides = Field(
+        default_factory=ToolCapOverrides,
+        description="This tool's Caps, over what it inherits from the Proxy.",
+    )
 
 
 class ResourceOverride(_Override):
@@ -183,6 +224,16 @@ class ProxyFile(_File):
     instructions: str | None = Field(
         default=None, description="Replaces the Upstream's instructions."
     )
+    caps: CapOverrides = Field(
+        default_factory=CapOverrides,
+        description="This Proxy's Caps, over what it inherits from the Upstream.",
+    )
+    port: int | None = Field(
+        default=None,
+        ge=1,
+        le=65535,
+        description="Serve this Proxy on an additional port, besides its path on the main one.",
+    )
     tools: dict[str, ToolOverride] = Field(
         default_factory=dict, description="Overrides by tool name."
     )
@@ -213,6 +264,10 @@ class _UpstreamFile(_File):
         default_factory=LifecycleOverrides,
         description="This Upstream's lifecycle settings, over the defaults in config.toml.",
     )
+    caps: CapOverrides = Field(
+        default_factory=CapOverrides,
+        description="This Upstream's Caps, over the global master Caps in config.toml.",
+    )
 
 
 class StdioUpstreamFile(_UpstreamFile, StdioTransport):
@@ -241,6 +296,7 @@ FILE_MODELS: dict[FileKind, TypeAdapter[Any]] = {
     "settings": TypeAdapter(SettingsFile),
     "upstream": TypeAdapter(UpstreamFile),
     "proxy": TypeAdapter(ProxyFile),
+    "secrets": TypeAdapter(SecretsFile),
 }
 
 
@@ -361,6 +417,7 @@ def load_upstream(
         transport=cast("Transport", file),
         proxies=list_proxies(config_dir, name),
         lifecycle=file.lifecycle.over(defaults),
+        caps=file.caps,
     )
 
 
@@ -377,11 +434,67 @@ def load_upstreams(config_dir: Path) -> list[Upstream]:
     ]
 
 
+# --- secrets -----------------------------------------------------------------------------------
+
+
+def secrets_file(config_dir: Path) -> Path:
+    return config_dir / SECRETS_FILE
+
+
+def load_secret_values(config_dir: Path) -> dict[str, str]:
+    """What the secrets file holds, or nothing when there is none.
+
+    Raises ``SecretError`` when the file may be read by anyone else, or does not say what it
+    must. Neither message carries a value.
+    """
+    path = secrets_file(config_dir)
+    if not path.is_file():
+        return {}
+    check_mode(path)
+    try:
+        return SecretsFile.model_validate(_load(path, "secrets")).secrets
+    except ConfigError as exc:
+        raise SecretError(str(exc)) from exc
+
+
+def secrets_for(config_dir: Path) -> Secrets:
+    """Where ``${VAR}`` is looked up for the Upstreams under ``config_dir``, read on each use."""
+    return Secrets(partial(load_secret_values, config_dir))
+
+
+def secret_problems(config_dir: Path) -> list[Problem]:
+    """Every reference no environment variable and no secrets entry answers, file by file.
+
+    Only the transport is looked at, since that is where a reference is resolved: when the
+    Upstream is reached, not when its file is loaded, so a value edited while the Daemon runs
+    counts the next time. A secrets file anyone else can read is the first problem, and the
+    only one reported then: nothing was read, so nothing else can be judged.
+    """
+    try:
+        values = load_secret_values(config_dir)
+    except SecretError as exc:
+        return [Problem(secrets_file(config_dir), "", str(exc))]
+    secrets = Secrets(lambda: values)
+    problems: list[Problem] = []
+    for path, kind in all_files(config_dir):
+        if kind != "upstream":
+            continue
+        try:
+            upstream = load_upstream(config_dir, path.parent.name)
+        except ConfigError:
+            continue  # unreadable, which check_file reports on its own
+        if missing := secrets.missing(upstream.transport.model_dump()):
+            problems.append(Problem(path, "", unset_message(missing)))
+    return problems
+
+
 def all_files(config_dir: Path) -> list[tuple[Path, FileKind]]:
     """Every config file under ``config_dir`` with its kind, for ``doctor``."""
     files: list[tuple[Path, FileKind]] = []
     if (settings := config_dir / SETTINGS_FILE).is_file():
         files.append((settings, "settings"))
+    if (secrets := secrets_file(config_dir)).is_file():
+        files.append((secrets, "secrets"))
     upstreams_dir = config_dir / UPSTREAMS_DIR
     if upstreams_dir.is_dir():
         for directory in sorted(upstreams_dir.iterdir()):
@@ -471,6 +584,11 @@ def set_override(path: Path, item: Item, key: str, value: object, note: str = ""
 def set_argument_override(path: Path, tool: str, argument: str, key: str, value: object) -> None:
     """Write ``key = value`` on the Override for ``argument`` of ``tool``."""
     _set_key(path, ("tools", tool, "args", argument), key, value, "")
+
+
+def set_tool_cap(path: Path, tool: str, key: str, value: object) -> None:
+    """Write ``key = value`` on the Cap Overrides for ``tool``."""
+    _set_key(path, ("tools", tool, "caps"), key, value, "")
 
 
 def _set_key(path: Path, keys: tuple[str, ...], key: str, value: object, note: str) -> None:

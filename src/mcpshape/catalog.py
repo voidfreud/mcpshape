@@ -7,18 +7,32 @@ then the accepted Catalog does not change, whatever the Upstream advertises.
 
 Item identity is the Catalog name: a tool's or prompt's ``name``, a resource's ``uri``, a
 resource template's ``uriTemplate``. Definitions are kept as the raw MCP JSON observed.
+
+The Daemon's reconnect rescans and the CLI's ``upstream sync`` are separate processes, both
+of which read then write ``catalog.json`` and ``drift.json`` for the same Upstream (#21): a
+rescan and an ``accept`` racing unlocked can each work from a stale read of the other's file
+and undo it. ``_locked`` holds an ``fcntl.flock`` on a per-Upstream lock file across each
+function's whole read-then-write, so one writer finishes before the next one starts reading,
+in this process and across processes alike (macOS and Linux only, matching the rest of
+mcpshape). Readers stay lock-free; ``_write`` writes to a temp file in the same directory and
+``os.replace``s it over the target, so a reader never sees a torn file either way.
 """
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
+import os
+import tempfile
 from dataclasses import dataclass
 from datetime import datetime  # noqa: TC003  # pydantic resolves annotations at runtime
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 if TYPE_CHECKING:
-    from pathlib import Path
+    from collections.abc import Generator
 
 Kind = Literal["tool", "resource", "resource_template", "prompt"]
 KINDS: tuple[Kind, ...] = ("tool", "resource", "resource_template", "prompt")
@@ -28,6 +42,7 @@ Items = dict[str, dict[str, Any]]
 UPSTREAMS_DIR = "upstreams"
 CATALOG_FILE = "catalog.json"
 DRIFT_FILE = "drift.json"
+LOCK_FILE = ".lock"
 
 
 class CatalogError(Exception):
@@ -150,8 +165,46 @@ def _read(path: Path) -> Catalog | None:
 
 
 def _write(path: Path, catalog: Catalog) -> None:
+    """Write ``catalog`` to ``path`` atomically: a temp file in the same directory, then replace.
+
+    So a reader (the Daemon's own request handling, ``ls``, ``doctor``, ...) never opens
+    ``path`` mid-write and sees a torn, unparseable file.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(catalog.model_dump_json(indent=2, exclude_defaults=True) + "\n")
+    data = catalog.model_dump_json(indent=2, exclude_defaults=True) + "\n"
+    handle, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(handle, "w") as tmp_file:
+            tmp_file.write(data)
+        tmp_path.replace(path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            tmp_path.unlink()
+        raise
+
+
+def _lock_path(state_dir: Path, upstream: str) -> Path:
+    return upstream_state_dir(state_dir, upstream) / LOCK_FILE
+
+
+@contextlib.contextmanager
+def _locked(state_dir: Path, upstream: str) -> Generator[None]:
+    """Hold the one lock for ``upstream``'s state directory across a read-then-write.
+
+    ``fcntl.flock`` on a dedicated lock file: it works across processes (the Daemon and the
+    CLI), and, unlike POSIX record locks taken through ``fcntl.lockf``, a second lock request
+    from the very same process still blocks, which matters for the Daemon's own background
+    rescans and its request handling sharing one process.
+    """
+    directory = upstream_state_dir(state_dir, upstream)
+    directory.mkdir(parents=True, exist_ok=True)
+    with _lock_path(state_dir, upstream).open("a+") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
 def load_catalog(state_dir: Path, upstream: str) -> Catalog | None:
@@ -197,29 +250,36 @@ class Scan:
 
 def record_scan(state_dir: Path, upstream: str, observed: Catalog) -> Scan:
     """Store ``observed`` as the Catalog on a first scan, else record its Drift for review."""
-    stored = load_catalog(state_dir, upstream)
-    if stored is None:
+    with _locked(state_dir, upstream):
+        stored = load_catalog(state_dir, upstream)
+        if stored is None:
+            _write(catalog_path(state_dir, upstream), observed)
+            return Scan(catalog=observed, drift=Drift(), first=True)
+        drift = drift_between(stored, observed)
+        if not drift:
+            drift_path(state_dir, upstream).unlink(missing_ok=True)
+            _write(catalog_path(state_dir, upstream), observed)
+            return Scan(catalog=observed, drift=drift, first=False)
+        _write(drift_path(state_dir, upstream), observed)
+        return Scan(catalog=stored, drift=drift, first=False)
+
+
+def accept_scan(state_dir: Path, upstream: str, observed: Catalog) -> Scan:
+    """Make ``observed`` the Catalog, in one locked step: what ``upstream sync --accept`` does.
+
+    Recording the observation and then accepting whatever is pending would be two locked
+    steps, and a Daemon rescan landing between them would make the accepted Catalog one the
+    user was never shown. What is accepted is exactly what this scan saw.
+
+    Between writing the Catalog and unlinking the pending file a lock-free reader sees the
+    new Catalog with a pending observation identical to it, whose Drift is empty: nothing.
+    """
+    with _locked(state_dir, upstream):
+        stored = load_catalog(state_dir, upstream)
+        drift = Drift() if stored is None else drift_between(stored, observed)
         _write(catalog_path(state_dir, upstream), observed)
-        return Scan(catalog=observed, drift=Drift(), first=True)
-    drift = drift_between(stored, observed)
-    if not drift:
         drift_path(state_dir, upstream).unlink(missing_ok=True)
-        _write(catalog_path(state_dir, upstream), observed)
-        return Scan(catalog=observed, drift=drift, first=False)
-    _write(drift_path(state_dir, upstream), observed)
-    return Scan(catalog=stored, drift=drift, first=False)
-
-
-def accept(state_dir: Path, upstream: str) -> tuple[Catalog, Drift]:
-    """Make the pending observation the Catalog. Returns it with the Drift that was applied."""
-    drift = load_drift(state_dir, upstream)
-    pending = _read(drift_path(state_dir, upstream))
-    if drift is None or pending is None:
-        msg = f"no Drift to accept for {upstream!r}"
-        raise CatalogError(msg)
-    _write(catalog_path(state_dir, upstream), pending)
-    drift_path(state_dir, upstream).unlink()
-    return pending, drift
+        return Scan(catalog=observed, drift=drift, first=stored is None)
 
 
 def forget(state_dir: Path, upstream: str) -> None:

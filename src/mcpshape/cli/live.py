@@ -13,8 +13,8 @@ from typing import TYPE_CHECKING
 
 from pydantic import ValidationError
 
-from mcpshape.config import load_settings
-from mcpshape.daemon import STATUS_PATH, LiveState
+from mcpshape.config import DaemonSettings, load_settings
+from mcpshape.daemon import SHUTDOWN_PATH, STATUS_PATH, LiveState
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -59,18 +59,37 @@ class Live:
         return found.health if found is not None else UNKNOWN
 
 
+def _headers(daemon: DaemonSettings) -> dict[str, str]:
+    """``Authorization`` when a bearer token is configured. Never logs it."""
+    return {"Authorization": f"Bearer {daemon.token}"} if daemon.token else {}
+
+
 def read_live(config_dir: Path) -> Live:
     """Ask the Daemon what everything is doing. A Daemon that is down is not an error."""
     daemon = load_settings(config_dir).daemon
     url = f"http://{daemon.host}:{daemon.port}"
+    request = urllib.request.Request(f"{url}{STATUS_PATH}", headers=_headers(daemon))  # noqa: S310
     try:
-        with urllib.request.urlopen(  # noqa: S310  # our own loopback Daemon, at an address we built
-            f"{url}{STATUS_PATH}", timeout=TIMEOUT
-        ) as answer:
+        with urllib.request.urlopen(request, timeout=TIMEOUT) as answer:  # noqa: S310
             body: bytes = answer.read()
         return Live(url, LiveState.model_validate_json(body))
     except (OSError, ValidationError, ValueError):
         return Live(url)
+
+
+def stop_daemon(config_dir: Path) -> bool:
+    """Ask the Daemon to stop. ``False`` when nothing answered to ask."""
+    daemon = load_settings(config_dir).daemon
+    url = f"http://{daemon.host}:{daemon.port}"
+    request = urllib.request.Request(  # noqa: S310
+        f"{url}{SHUTDOWN_PATH}", method="POST", headers=_headers(daemon)
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=TIMEOUT):  # noqa: S310
+            pass
+    except OSError:
+        return False
+    return True
 
 
 def how_long(seconds: float) -> str:

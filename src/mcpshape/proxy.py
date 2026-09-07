@@ -10,9 +10,10 @@ Upstream under the Catalog name with the arguments it expects. Schema types are 
 from __future__ import annotations
 
 import copy
+import itertools
 import re
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from mcpshape import catalog as catalogs
 from mcpshape.catalog import KINDS, Item
@@ -22,6 +23,7 @@ from mcpshape.hooks import UserCode
 if TYPE_CHECKING:
     from mcpshape.catalog import Catalog, Kind
     from mcpshape.config import ItemOverride, ProxyFile
+    from mcpshape.model import CapSettings
 
 TEMPLATE_PARAMETER = re.compile(r"\{([^}]*)\}")
 
@@ -59,6 +61,8 @@ class Exposed:
     """By exposed tool name, for the tools whose arguments were curated."""
     code: UserCode = field(default_factory=UserCode)
     """The Hooks that run on calls, and the Virtual Tools exposed beside the Catalog's."""
+    output_caps: dict[str, int] = field(default_factory=dict[str, int])
+    """By exposed tool name: the tool output Cap a call through it answers under."""
 
     def origin(self, item: Item) -> str:
         return self.origins.get(item, item.name)
@@ -235,6 +239,144 @@ def _check_parameters(name: str, uri: str) -> None:
             f"{', '.join('{' + p + '}' for p in before) or 'none'}"
         )
         raise OverrideError(msg)
+
+
+# --- Caps: cut what expose() built down to what a Cap allows, second and separately -------------
+#
+# A Cap is pure work over what expose() already decided to show: nothing here hides, renames by
+# choice, or re-describes anything an Override did not already touch, it only shortens. Only a
+# tool's own name, description, argument descriptions, and output may be cut; a Proxy's
+# instructions are cut too, but at the Proxy level, since a tool has none of its own.
+
+MARKER = "…"
+"""What a name, description, or the instructions end with once a Cap cuts them."""
+
+
+def cap(exposed: Exposed, caps: CapSettings, proxy: ProxyFile) -> Exposed:
+    """Cut ``exposed`` down to ``caps``, the Cap already resolved through global, Upstream, and
+    Proxy. A tool's own Cap Override may lower ``caps`` further for its own name, description,
+    argument descriptions, and output.
+
+    Raises ``CapError`` when a tool's Cap tries to raise what it inherits, and ``OverrideError``
+    when cutting a tool's name to its Cap cannot keep every exposed name unique, exactly as
+    ``expose`` refuses a collision Overrides caused.
+    """
+    tools: dict[str, dict[str, Any]] = {}
+    origins = dict(exposed.origins)
+    arguments = dict(exposed.arguments)
+    output_caps: dict[str, int] = dict.fromkeys(exposed.code.tools, caps.tool_output)
+    taken = set(exposed.code.tools)  # Virtual Tool names are fixed; claimed before any cutting
+    for name, definition in exposed.catalog.tools.items():
+        origin_name = exposed.origin(Item("tool", name))
+        override = proxy.tools.get(origin_name)
+        tool_caps = override.caps.over(caps, f"tool {origin_name}") if override else caps
+        cut_name = _cut_unique(name, tool_caps.tool_name, taken)
+        taken.add(cut_name)
+        if cut_name != name:
+            origins[Item("tool", cut_name)] = origins.pop(Item("tool", name))
+            if name in arguments:
+                arguments[cut_name] = arguments.pop(name)
+        tools[cut_name] = _cap_tool(definition, tool_caps)
+        output_caps[cut_name] = tool_caps.tool_output
+    instructions = exposed.catalog.instructions
+    if instructions is not None:
+        instructions = _cut(instructions, caps.instructions)
+    capped = exposed.catalog.model_copy(update={"tools": tools, "instructions": instructions})
+    return Exposed(
+        catalog=capped,
+        name=exposed.name,
+        origins=origins,
+        arguments=arguments,
+        code=exposed.code,
+        output_caps=output_caps,
+    )
+
+
+def _cap_tool(definition: dict[str, Any], caps: CapSettings) -> dict[str, Any]:
+    """``definition`` with its description and its arguments' descriptions cut to ``caps``."""
+    curated = dict(definition)
+    if (description := curated.get("description")) is not None:
+        curated["description"] = _cut(str(description), caps.tool_description)
+    schema: object = curated.get("inputSchema")
+    properties: object = (
+        cast("dict[str, Any]", schema).get("properties") if isinstance(schema, dict) else None
+    )
+    if isinstance(schema, dict) and isinstance(properties, dict):
+        typed_schema = cast("dict[str, Any]", schema)
+        typed_properties = cast("dict[str, dict[str, Any]]", properties)
+        curated["inputSchema"] = {
+            **typed_schema,
+            "properties": {
+                argument: _cap_argument(property_schema, caps.argument_description)
+                for argument, property_schema in typed_properties.items()
+            },
+        }
+    return curated
+
+
+def _cap_argument(property_schema: dict[str, Any], ceiling: int) -> dict[str, Any]:
+    if (description := property_schema.get("description")) is None:
+        return property_schema
+    return {**property_schema, "description": _cut(str(description), ceiling)}
+
+
+def _cut(text: str, ceiling: int) -> str:
+    """``text`` as is when it already fits ``ceiling``; cut with ``MARKER`` at the end otherwise."""
+    if len(text) <= ceiling:
+        return text
+    if ceiling <= len(MARKER):
+        return MARKER[:ceiling]
+    return text[: ceiling - len(MARKER)] + MARKER
+
+
+def _cut_unique(text: str, ceiling: int, taken: set[str]) -> str:
+    """``_cut(text, ceiling)``, extending the marker rather than colliding with ``taken``.
+
+    A name a Cap did not have to touch is never renamed here, so two names ``expose`` already
+    kept apart stay apart; only names a Cap cuts to the same result are told apart, by how much
+    longer a marker each carries. When even that runs out of room, the collision is refused
+    like any other Override collision: two different tools cannot share one exposed name.
+    """
+    cut = _cut(text, ceiling)
+    if cut not in taken:
+        return cut
+    if len(text) <= ceiling:
+        msg = (
+            f"tool {text!r} would be exposed as {cut!r}, the same as another tool a Cap cut to "
+            "it; rename or hide one of them"
+        )
+        raise OverrideError(msg)
+    for number in itertools.count(2):
+        suffix = f"{MARKER}{number}"
+        if ceiling <= len(suffix):
+            msg = (
+                f"tool {text!r} cannot be cut to a name unique under a Cap of {ceiling} "
+                f"characters; every name that short is already taken"
+            )
+            raise OverrideError(msg)
+        candidate = text[: ceiling - len(suffix)] + suffix
+        if candidate not in taken:
+            return candidate
+    raise AssertionError  # pragma: no cover  # itertools.count never stops on its own
+
+
+def cut_output(text: str, ceiling: int) -> str:
+    """``text`` as is when it already fits ``ceiling``; otherwise cut, with a note at the end
+    saying how many characters were cut, instead of ``MARKER``: the model is told a number, not
+    shown a mark it has no context for.
+
+    The note counts what the model does not see, itself included in what fits under the Cap.
+    A Cap with no room for the note at all still gets the note, on its own: then the model is
+    told that everything was cut, which is the one thing it must know.
+    """
+    if len(text) <= ceiling:
+        return text
+    kept = ceiling
+    while True:
+        note = f" [{len(text) - kept} characters cut]"
+        if kept + len(note) <= ceiling or kept == 0:
+            return text[:kept] + note
+        kept = max(0, ceiling - len(note))
 
 
 # --- what doctor reports -----------------------------------------------------------------------

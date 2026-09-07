@@ -1,0 +1,12 @@
+[Unit]
+Description=mcpshape Daemon
+After=network.target
+
+[Service]
+ExecStart=/home/tester/.local/bin/mcpshape daemon up
+Restart=on-failure
+StandardOutput=append:/home/tester/.local/state/mcpshape/log/daemon.out.log
+StandardError=append:/home/tester/.local/state/mcpshape/log/daemon.err.log
+
+[Install]
+WantedBy=default.target

@@ -29,3 +29,17 @@ def _xdg_dir(override_env: str, xdg_env: str, fallback: Path) -> Path:
     xdg = os.environ.get(xdg_env)
     base = Path(xdg).expanduser() if xdg else fallback
     return base / "mcpshape"
+
+
+def log_dir(state_dir: Path) -> Path:
+    """Where the Daemon's app log lives."""
+    return state_dir / "log"
+
+
+def daemon_log_file(state_dir: Path) -> Path:
+    return log_dir(state_dir) / "daemon.log"
+
+
+def daemon_lock_file(state_dir: Path) -> Path:
+    """Held for the life of a running Daemon, so a second start sees the first (#13)."""
+    return state_dir / "daemon.lock"

@@ -21,6 +21,7 @@ is this module's ``_Handle`` over the Upstream's shared client.
 from __future__ import annotations
 
 import base64
+import contextlib
 import importlib
 import json
 import logging
@@ -31,7 +32,11 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 
 import mcp_types
 from fastmcp import Client, FastMCP
-from fastmcp.client.transports import StreamableHttpTransport
+from fastmcp.client.transports import (
+    SSETransport,
+    StreamableHttpTransport,
+)
+from fastmcp.client.transports import StdioTransport as StdioClientTransport
 from fastmcp.exceptions import FastMCPError, PromptError, ResourceError, ToolError
 from fastmcp.prompts import Message, PromptResult
 from fastmcp.resources import ResourceContent, ResourceResult
@@ -53,13 +58,14 @@ from mcpshape import hooks
 from mcpshape.catalog import Catalog, Item
 from mcpshape.connection import Connection, UpstreamUnavailableError
 from mcpshape.hooks import Call, UpstreamError, UserCode
-from mcpshape.model import MemoryTransport
-from mcpshape.proxy import ArgumentMap, Exposed
+from mcpshape.model import HttpTransport, MemoryTransport, SseTransport, StdioTransport
+from mcpshape.proxy import ArgumentMap, Exposed, cut_output
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Awaitable, Callable, Sequence
     from contextlib import AbstractAsyncContextManager
 
+    from fastmcp.client.transports import ClientTransport
     from fastmcp.prompts import Prompt
     from fastmcp.resources import Resource, ResourceTemplate
     from fastmcp.server.context import Context
@@ -70,6 +76,7 @@ if TYPE_CHECKING:
     from mcpshape.connection import Clock, Status
     from mcpshape.hooks import VirtualTool
     from mcpshape.model import Transport, Upstream
+    from mcpshape.secrets import Secrets
 
 log = logging.getLogger("mcpshape.adapter")
 
@@ -108,8 +115,9 @@ class _Link:
     a Daemon restart.
     """
 
-    def __init__(self, transport: Transport) -> None:
-        self._transport = transport
+    def __init__(self, transport: Transport, secrets: Secrets) -> None:
+        self.transport = transport
+        self.secrets = secrets
         self._open: AsyncExitStack | None = None
         self._client: Client[Any] | None = None
 
@@ -121,11 +129,23 @@ class _Link:
         return self._client
 
     async def open(self) -> None:
-        target = _resolve(self._transport)
+        """Connect, leaving nothing behind if the attempt is given up on halfway.
+
+        The cleanup is registered before the connect starts, not after it returns: a connect
+        cancelled by the connect timeout inside ``__aenter__`` would otherwise leave a
+        half-spawned child process nobody owns.
+        """
         stack = AsyncExitStack()
-        client: ProxyClient[Any] = ProxyClient(target)
-        self._client = await stack.enter_async_context(client)
         self._open = stack
+        try:
+            async with _concealing(self.transport, self.secrets):
+                client: ProxyClient[Any] = ProxyClient(_target(self.transport, self.secrets))
+                stack.push_async_callback(client.close)
+                self._client = await stack.enter_async_context(client)
+        except BaseException:
+            with contextlib.suppress(Exception):  # what a client that never connected raises
+                await self.close()  # on closing is the connect failure again, already reported
+            raise
 
     async def close(self) -> None:
         stack, self._open, self._client = self._open, None, None
@@ -149,13 +169,32 @@ class UpstreamConnection:
     def __init__(
         self,
         upstream: Upstream,
+        secrets: Secrets,
         clock: Clock | None = None,
-        on_reconnect: Callable[[], Awaitable[None]] | None = None,
+        on_catalog: Callable[[Catalog], Awaitable[None]] | None = None,
     ) -> None:
-        self._link = _Link(upstream.transport)
+        self._link = _Link(upstream.transport, secrets)
+        self._on_catalog = on_catalog
         self._connection = Connection(
-            upstream.name, self._link, upstream.lifecycle, clock, on_reconnect=on_reconnect
+            upstream.name,
+            self._link,
+            upstream.lifecycle,
+            clock,
+            on_reconnect=None if on_catalog is None else self._rescan,
         )
+
+    async def _rescan(self) -> None:
+        """Look again over the connection that has just come back, opening no second one.
+
+        Borrowing the shared client is what keeps a reconnect from spawning a second child
+        process for an stdio Upstream.
+        """
+        if self._on_catalog is None:
+            return
+        client = self._link.client
+        async with _concealing(self._link.transport, self._link.secrets), client:
+            observed = await _catalog_of(client)
+        await self._on_catalog(observed)
 
     def status(self) -> Status:
         return self._connection.status()
@@ -203,15 +242,38 @@ def proxy_app(
     return ProxyApp(name=name, asgi=app, lifespan=lifespan, serve=serve, fail=runtime.fail)
 
 
-async def scan(transport: Transport) -> Catalog:
-    """Everything the Upstream behind ``transport`` advertises right now."""
-    target = _resolve(transport)
-    async with Client(target) as client:
-        tools = await _listed(client.list_tools)
-        resources = await _listed(client.list_resources)
-        templates = await _listed(client.list_resource_templates)
-        prompts = await _listed(client.list_prompts)
-        instructions = client.instructions
+async def scan(transport: Transport, secrets: Secrets) -> Catalog:
+    """Everything the Upstream behind ``transport`` advertises right now.
+
+    This opens a connection of its own. An Upstream the Daemon is already connected to is
+    looked at over that connection instead, by ``UpstreamConnection``.
+    """
+    async with _concealing(transport, secrets), Client(_target(transport, secrets)) as client:
+        return await _catalog_of(client)
+
+
+@asynccontextmanager
+async def _concealing(transport: Transport, secrets: Secrets) -> AsyncGenerator[None]:
+    """Let nothing fail with a resolved value in its message.
+
+    Whatever reaching the Upstream raises is re-raised as ``UpstreamTargetError`` with every
+    resolved ``${VAR}`` written back as the reference, since the message goes on to the log,
+    the status, and the terminal. The original is dropped, as its text is what leaks.
+    """
+    try:
+        yield
+    except Exception as exc:  # noqa: BLE001  # whatever it was, its text must not leak
+        message = secrets.concealed(str(exc) or type(exc).__name__, transport)
+        raise UpstreamTargetError(message) from None
+
+
+async def _catalog_of(client: Client[Any]) -> Catalog:
+    """What the Upstream ``client`` is connected to advertises right now."""
+    tools = await _listed(client.list_tools)
+    resources = await _listed(client.list_resources)
+    templates = await _listed(client.list_resource_templates)
+    prompts = await _listed(client.list_prompts)
+    instructions = client.instructions
     return Catalog(
         scanned_at=datetime.now(UTC),
         instructions=instructions,
@@ -222,14 +284,18 @@ async def scan(transport: Transport) -> Catalog:
     )
 
 
-def run_shim(url: str) -> None:
+def run_shim(url: str, token: str | None = None) -> None:
     """Speak MCP over stdio and forward every request to the Proxy served at ``url``.
 
     The other half of the hidden ``serve`` command, for the Clients that accept stdio only.
     Runs until the Client closes the pipe. stdout carries the protocol, so the banner FastMCP
-    would otherwise print is off.
+    would otherwise print is off. ``token`` is sent as a bearer token when the Daemon requires
+    one; never logged.
     """
-    create_proxy(StreamableHttpTransport(url)).run(transport="stdio", show_banner=False)
+    headers = {"Authorization": f"Bearer {token}"} if token else None
+    create_proxy(StreamableHttpTransport(url, headers=headers)).run(
+        transport="stdio", show_banner=False
+    )
 
 
 async def _listed[T](method: Callable[[], Awaitable[Sequence[T]]]) -> Sequence[T]:
@@ -318,6 +384,7 @@ class _Runtime:
         forward: Callable[[Call], Awaitable[R]],
         of: Callable[[object], R],
         error: type[FastMCPError],
+        cap: Callable[[R], R] | None = None,
     ) -> R:
         """``call`` through the Hooks, with user failures turned into ``error`` for the Client."""
         if self.failure is not None:
@@ -325,11 +392,25 @@ class _Runtime:
             raise error(msg, log_level=logging.WARNING)
         with hooks.bound(self.handle):
             try:
-                return await hooks.run_call(self.code, call, forward, of)
+                return await hooks.run_call(self.code, call, forward, of, cap)
             except FastMCPError:
                 raise
             except Exception as exc:
                 raise error(str(exc) or type(exc).__name__, log_level=logging.WARNING) from exc
+
+
+def _capped_output(ceiling: int | None) -> Callable[[hooks.ToolResult], hooks.ToolResult] | None:
+    """What ``_Runtime.run`` cuts a tool's answer with, or ``None`` before a Cap is known."""
+    if ceiling is None:
+        return None
+
+    def apply(result: hooks.ToolResult) -> hooks.ToolResult:
+        cut = cut_output(result.text, ceiling)
+        if cut != result.text:
+            result.text = cut
+        return result
+
+    return apply
 
 
 class _CuratedTool(ProxyTool):
@@ -338,9 +419,13 @@ class _CuratedTool(ProxyTool):
     _arguments: ArgumentMap = PrivateAttr(default_factory=ArgumentMap)
     _runtime: _Runtime = PrivateAttr()
     _origin: str = PrivateAttr(default="")
+    _output_cap: int | None = PrivateAttr(default=None)
 
-    def curate(self, runtime: _Runtime, origin: str, arguments: ArgumentMap) -> None:
+    def curate(
+        self, runtime: _Runtime, origin: str, arguments: ArgumentMap, output_cap: int | None = None
+    ) -> None:
         self._runtime, self._origin, self._arguments = runtime, origin, arguments
+        self._output_cap = output_cap
 
     async def run(self, arguments: dict[str, Any], context: Context | None = None) -> ToolResult:
         run_upstream = super().run
@@ -353,7 +438,9 @@ class _CuratedTool(ProxyTool):
             return result
 
         call = Call("tool", self._origin, self._arguments.to_catalog(arguments))
-        result = await self._runtime.run(call, forward, hooks.ToolResult.of, ToolError)
+        result = await self._runtime.run(
+            call, forward, hooks.ToolResult.of, ToolError, _capped_output(self._output_cap)
+        )
         return _to_tool_result(result, self.output_schema)
 
 
@@ -446,14 +533,18 @@ class _VirtualTool(FunctionTool):
     """
 
     _runtime: _Runtime = PrivateAttr()
+    _output_cap: int | None = PrivateAttr(default=None)
 
     @classmethod
-    def build(cls, runtime: _Runtime, virtual: VirtualTool) -> _VirtualTool:
+    def build(
+        cls, runtime: _Runtime, virtual: VirtualTool, output_cap: int | None = None
+    ) -> _VirtualTool:
         built = cls.from_function(
             virtual.fn, name=virtual.name, description=virtual.description, run_in_thread=False
         )
         tool = cast("_VirtualTool", built)
         tool._runtime = runtime  # noqa: SLF001  # our own private attribute
+        tool._output_cap = output_cap  # noqa: SLF001  # our own private attribute
         return tool
 
     async def run(self, arguments: dict[str, Any]) -> ToolResult:
@@ -470,7 +561,9 @@ class _VirtualTool(FunctionTool):
             return _tool_result_of(raw.content, raw.structured_content)
 
         call = Call("tool", self.name, dict(arguments))
-        result = await self._runtime.run(call, forward, hooks.ToolResult.of, ToolError)
+        result = await self._runtime.run(
+            call, forward, hooks.ToolResult.of, ToolError, _capped_output(self._output_cap)
+        )
         return _to_tool_result(result, self.output_schema)
 
     def convert_result(self, raw_value: Any) -> ToolResult:  # noqa: ANN401  # whatever the user returned
@@ -594,7 +687,8 @@ class _CatalogProvider(Provider):
         catalog = exposed.catalog
         self._tools = [self._tool(exposed, name, raw) for name, raw in catalog.tools.items()]
         self._tools += [
-            _VirtualTool.build(self._runtime, virtual) for virtual in exposed.code.tools.values()
+            _VirtualTool.build(self._runtime, virtual, exposed.output_caps.get(virtual.name))
+            for virtual in exposed.code.tools.values()
         ]
         self._resources = [
             self._resource(exposed, uri, raw) for uri, raw in catalog.resources.items()
@@ -611,7 +705,12 @@ class _CatalogProvider(Provider):
             self._client_factory, mcp_types.Tool.model_validate({**raw, "name": origin})
         )
         tool = _renamed(cast("_CuratedTool", built), origin, name, "name", name)
-        tool.curate(self._runtime, origin, exposed.arguments.get(name, ArgumentMap()))
+        tool.curate(
+            self._runtime,
+            origin,
+            exposed.arguments.get(name, ArgumentMap()),
+            exposed.output_caps.get(name),
+        )
         return tool
 
     def _resource(self, exposed: Exposed, uri: str, raw: dict[str, Any]) -> Resource:
@@ -662,13 +761,27 @@ def _renamed[C: BaseModel](component: C, origin: str, exposed: str, key: str, va
     return component.model_copy(update={key: value})
 
 
-def _resolve(transport: Transport) -> FastMCP[Any]:
-    match transport:
-        case MemoryTransport():
-            return _import_server(transport.module, transport.attribute)
-        case _:
-            msg = f"{transport.transport} Upstreams are not supported yet"
-            raise UpstreamTargetError(msg)
+def _target(transport: Transport, secrets: Secrets) -> ClientTransport | FastMCP[Any]:
+    """How FastMCP reaches this Upstream, with every ``${VAR}`` in it resolved.
+
+    An stdio Upstream is a child process of the Daemon: ``keep_alive`` is off, because when
+    the connection is let go the process goes with it (the Upstream's lifecycle decides that,
+    not FastMCP).
+    """
+    match secrets.expanded(transport):
+        case StdioTransport() as stdio:
+            return StdioClientTransport(
+                command=stdio.command,
+                args=list(stdio.args),
+                env=dict(stdio.env) or None,
+                keep_alive=False,
+            )
+        case HttpTransport() as http:
+            return StreamableHttpTransport(http.url)
+        case SseTransport() as sse:
+            return SSETransport(sse.url)
+        case MemoryTransport() as memory:
+            return _import_server(memory.module, memory.attribute)
 
 
 def _import_server(module: str, attribute: str) -> FastMCP[Any]:

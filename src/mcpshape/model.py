@@ -20,6 +20,14 @@ class StdioTransport(_Transport):
     transport: Literal["stdio"]
     command: str
     args: list[str] = Field(default_factory=list[str])
+    env: dict[str, str] = Field(
+        default_factory=dict[str, str],
+        description=(
+            "Environment variables the child process is given, on top of the small set "
+            "(HOME, LOGNAME, PATH, SHELL, TERM, USER) the MCP SDK passes on. A value may be "
+            "a ${VAR} reference, resolved from the Daemon environment or the secrets file."
+        ),
+    )
 
 
 class HttpTransport(_Transport):
@@ -127,6 +135,109 @@ class LifecycleOverrides(BaseModel):
         return defaults.model_copy(update=self.model_dump(exclude_none=True))
 
 
+# --- Caps: ceilings on how long a kind of text a Proxy exposes may be --------------------------
+
+CAP_KINDS = ("tool_name", "tool_description", "argument_description", "instructions", "tool_output")
+"""Every kind of text a Cap ceilings: a tool's exposed name, its description, one of its
+argument's descriptions, the Proxy's instructions, and a tool call's answer."""
+
+CAP_HELP = {
+    "tool_name": "Ceiling on an exposed tool name, in characters.",
+    "tool_description": "Ceiling on an exposed tool description, in characters.",
+    "argument_description": "Ceiling on an exposed argument description, in characters.",
+    "instructions": "Ceiling on the Proxy's exposed instructions, in characters.",
+    "tool_output": "Ceiling on a tool call's answer, in characters.",
+}
+"""One wording per Cap kind, so the global master and every level that may lower it never
+describe the same kind differently."""
+
+
+class CapError(ValueError):
+    """A Cap tried to raise what it inherits; a Cap may only be lowered."""
+
+
+class CapSettings(BaseModel):
+    """The global master Cap per kind, in ``config.toml``. Every Upstream, Proxy, and tool
+    inherits these, and may only lower what it inherits (global, then Upstream, then Proxy,
+    then tool)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    # The defaults for descriptions and instructions sit under every documented Client
+    # cutoff (docs/clients.md), so a Proxy nobody tuned survives intact everywhere. The
+    # Profiles carry the numbers with their sources; doctor --for reports them.
+    tool_name: int = Field(default=64, gt=0, description=CAP_HELP["tool_name"])
+    tool_description: int = Field(default=1800, gt=0, description=CAP_HELP["tool_description"])
+    argument_description: int = Field(
+        default=400, gt=0, description=CAP_HELP["argument_description"]
+    )
+    instructions: int = Field(default=1800, gt=0, description=CAP_HELP["instructions"])
+    tool_output: int = Field(default=20_000, gt=0, description=CAP_HELP["tool_output"])
+
+
+def _lowered(inherited: CapSettings, level: str, given: dict[str, int]) -> CapSettings:
+    """``inherited`` with ``given`` applied over it, each one only ever lowering it."""
+    for kind, value in given.items():
+        ceiling = getattr(inherited, kind)
+        if value > ceiling:
+            label = kind.replace("_", " ")
+            msg = (
+                f"{level}: the {label} Cap is {value}, higher than the {ceiling} it inherits; "
+                "a Cap may only be lowered"
+            )
+            raise CapError(msg)
+    return inherited.model_copy(update=given)
+
+
+class CapOverrides(BaseModel):
+    """One Upstream's or one Proxy's Caps: unset keeps what it inherits, set only ever lowers
+    it."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    tool_name: int | None = Field(default=None, gt=0, description=CAP_HELP["tool_name"])
+    tool_description: int | None = Field(
+        default=None, gt=0, description=CAP_HELP["tool_description"]
+    )
+    argument_description: int | None = Field(
+        default=None, gt=0, description=CAP_HELP["argument_description"]
+    )
+    instructions: int | None = Field(default=None, gt=0, description=CAP_HELP["instructions"])
+    tool_output: int | None = Field(default=None, gt=0, description=CAP_HELP["tool_output"])
+
+    def over(self, inherited: CapSettings, level: str) -> CapSettings:
+        """The Caps this level exposes: ``inherited``, lowered by whatever it sets.
+
+        Raises ``CapError`` naming ``level`` when a set value would raise what it inherits.
+        """
+        return _lowered(inherited, level, self.model_dump(exclude_none=True))
+
+
+class ToolCapOverrides(BaseModel):
+    """One tool's Caps: name, description, argument description, and output. A tool has no
+    instructions of its own, so there is no Cap for that kind at this level."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: int | None = Field(default=None, gt=0, description=CAP_HELP["tool_name"])
+    description: int | None = Field(default=None, gt=0, description=CAP_HELP["tool_description"])
+    argument_description: int | None = Field(
+        default=None, gt=0, description=CAP_HELP["argument_description"]
+    )
+    output: int | None = Field(default=None, gt=0, description=CAP_HELP["tool_output"])
+
+    def over(self, inherited: CapSettings, level: str) -> CapSettings:
+        """The Caps this tool exposes: ``inherited``, lowered by whatever it sets."""
+        mapped = {
+            "tool_name": self.name,
+            "tool_description": self.description,
+            "argument_description": self.argument_description,
+            "tool_output": self.output,
+        }
+        given = {kind: value for kind, value in mapped.items() if value is not None}
+        return _lowered(inherited, level, given)
+
+
 @dataclass(frozen=True)
 class Upstream:
     """An existing MCP server the user added once. Reachable through its Proxies."""
@@ -135,3 +246,4 @@ class Upstream:
     transport: Transport
     proxies: tuple[str, ...]
     lifecycle: LifecycleSettings = field(default_factory=LifecycleSettings)
+    caps: CapOverrides = field(default_factory=CapOverrides)

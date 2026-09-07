@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Annotated
 import typer
 
 from mcpshape import catalog, config
-from mcpshape.adapters.fastmcp import UpstreamTargetError, scan
+from mcpshape.adapters.fastmcp import scan
 from mcpshape.cli import scan as scanning
 from mcpshape.cli.common import (
     HELP_OPTIONS,
@@ -146,10 +146,14 @@ def sync(
 
 def sync_one(config_dir: Path, state_dir: Path, upstream: Upstream, *, accept: bool) -> None:
     try:
-        observed = asyncio.run(scan(upstream.transport))
-    except UpstreamTargetError as exc:
+        observed = asyncio.run(scan(upstream.transport, config.secrets_for(config_dir)))
+    except Exception as exc:  # noqa: BLE001  # however the Upstream failed, the user gets the why
         fail(f"cannot scan {upstream.name}: {exc}")
-    result = catalog.record_scan(state_dir, upstream.name, observed)
+    result = (
+        catalog.accept_scan(state_dir, upstream.name, observed)
+        if accept
+        else catalog.record_scan(state_dir, upstream.name, observed)
+    )
     label = f"[bold]{upstream.name}[/bold]"
     if result.first:
         console.print(f"Scanned {label}: {counts(result.catalog)}")
@@ -164,11 +168,10 @@ def sync_one(config_dir: Path, state_dir: Path, upstream: Upstream, *, accept: b
         print_drift(result.drift)
         console.print(f"Accept with: [bold]mcpshape upstream sync {upstream.name} --accept[/bold]")
         return
-    accepted, drift = catalog.accept(state_dir, upstream.name)
     console.print(f"Accepted Drift in {label}:")
-    print_drift(drift)
-    apply_drift_default(config_dir, upstream, drift.added)
-    report_orphans(config_dir, upstream, accepted)
+    print_drift(result.drift)
+    apply_drift_default(config_dir, upstream, result.drift.added)
+    report_orphans(config_dir, upstream, result.catalog)
     console.print(
         "Clients connected to its Proxies see the change on their next request. "
         f"These Clients need a reconnect to notice: {', '.join(clients_needing_reconnect())}."

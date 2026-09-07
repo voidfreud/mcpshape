@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import socket
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, NoReturn
 
@@ -11,6 +12,7 @@ from rich.console import Console
 
 from mcpshape.catalog import CatalogError, pending_drift
 from mcpshape.config import ConfigError
+from mcpshape.model import CapError
 from mcpshape.names import InvalidNameError
 from mcpshape.profiles import Profile, UnknownClientError, profile
 from mcpshape.proxy import OverrideError
@@ -20,6 +22,9 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 HELP_OPTIONS = {"help_option_names": ["-h", "--help"]}
+
+PROBE_TIMEOUT = 0.5
+"""Seconds to wait for a raw TCP probe of whether something answers at an address."""
 
 console = Console(soft_wrap=True)
 errors = Console(stderr=True, soft_wrap=True)
@@ -57,10 +62,10 @@ def fail(message: str) -> NoReturn:
 
 @contextlib.contextmanager
 def reporting_errors() -> Generator[None]:
-    """Turn config, Catalog, Override, and name errors into one red line and exit code 1."""
+    """Turn config, Catalog, Override, Cap, and name errors into one red line and exit code 1."""
     try:
         yield
-    except (ConfigError, CatalogError, InvalidNameError, OverrideError) as exc:
+    except (ConfigError, CatalogError, InvalidNameError, OverrideError, CapError) as exc:
         fail(str(exc))
 
 
@@ -97,3 +102,12 @@ def parse_proxy_ref(ref: str) -> tuple[str, str]:
     if not sep or not upstream or not proxy or "/" in proxy:
         fail(f"expected <upstream>/<proxy>, got {ref!r}")
     return upstream, proxy
+
+
+def answering(host: str, port: int) -> bool:
+    """Whether anything accepts a connection there right now."""
+    try:
+        with socket.create_connection((host, port), timeout=PROBE_TIMEOUT):
+            return True
+    except OSError:
+        return False

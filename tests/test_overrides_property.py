@@ -13,12 +13,14 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
+import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
 from mcpshape.catalog import KINDS, Catalog, Item
 from mcpshape.config import ProxyFile
-from mcpshape.proxy import Exposed, OverrideError, expose
+from mcpshape.model import CapError, CapSettings, ToolCapOverrides
+from mcpshape.proxy import Exposed, OverrideError, cap, expose
 
 names = st.from_regex(r"[a-c][a-z0-9_]{0,3}", fullmatch=True)
 types = st.sampled_from(["string", "integer", "boolean", "array"])
@@ -167,6 +169,121 @@ def _exposed_or_reason(catalog: Catalog, proxy: ProxyFile) -> Exposed | str:
         return str(refused)
 
 
+def _capped_or_reason(exposed: Exposed, caps: CapSettings, proxy: ProxyFile) -> Exposed | str:
+    """What Caps do to ``exposed``, or the one-line reason cutting a name could not stay unique.
+
+    ``tool_cap_overrides`` never generates a value above what it inherits, so a ``CapError``
+    here would mean the property's own setup is wrong, not something ``cap`` should refuse.
+    """
+    try:
+        return cap(exposed, caps, proxy)
+    except OverrideError as refused:
+        return str(refused)
+    except CapError as raised:
+        pytest.fail(f"a Cap that only ever lowers should never raise: {raised}")
+
+
 def _hidden(proxy: ProxyFile, kind: str, name: str) -> bool:
     override = proxy.overrides(kind).get(name)  # type: ignore[arg-type]
     return override is not None and override.hidden
+
+
+# --- Caps: cutting what expose() built keeps names unique and every length within its Cap ------
+#
+# Ticket #7's rule for a name Cap versus uniqueness: a name Cap never touches a name it did not
+# have to cut, so two names `expose` already told apart stay apart; a name a Cap does cut is
+# told apart from another cut the same way by how much longer a marker it carries, and only
+# when even that runs out of room is the collision refused, exactly like an Override collision.
+# Generating tool names that share a long common prefix (below) is what forces that path.
+
+_small = st.integers(min_value=1, max_value=6)
+"""A tool name Cap small enough that generated names collide once cut."""
+_modest = st.integers(min_value=1, max_value=20)
+
+
+@st.composite
+def cap_settings(draw: st.DrawFn) -> CapSettings:
+    return CapSettings(
+        tool_name=draw(_small),
+        tool_description=draw(_modest),
+        argument_description=draw(_modest),
+        instructions=draw(_modest),
+        tool_output=draw(_modest),
+    )
+
+
+@st.composite
+def tool_cap_overrides(draw: st.DrawFn, base: CapSettings) -> ToolCapOverrides:
+    """A tool's own Caps: unset, or lower than ``base``, so applying them never raises."""
+
+    def maybe(ceiling: int) -> int | None:
+        return draw(st.none() | st.integers(min_value=1, max_value=ceiling))
+
+    return ToolCapOverrides(
+        name=maybe(base.tool_name),
+        description=maybe(base.tool_description),
+        argument_description=maybe(base.argument_description),
+        output=maybe(base.tool_output),
+    )
+
+
+@st.composite
+def capped_cases(draw: st.DrawFn) -> tuple[Catalog, ProxyFile, CapSettings]:
+    catalog, proxy = draw(cases())
+    caps = draw(cap_settings())
+    capped_tools = {
+        name: override.model_copy(update={"caps": draw(tool_cap_overrides(caps))})
+        for name, override in proxy.tools.items()
+    }
+    proxy = proxy.model_copy(update={"tools": capped_tools})
+    return catalog, proxy, caps
+
+
+@given(capped_cases())
+def test_capping_keeps_names_unique_every_length_within_its_cap_and_origins_intact(
+    case: tuple[Catalog, ProxyFile, CapSettings],
+) -> None:
+    catalog, proxy, caps = case
+    try:
+        exposed = expose(catalog, proxy)
+    except OverrideError:
+        return  # the Override property already covers why this refuses
+    capped = _capped_or_reason(exposed, caps, proxy)
+    if isinstance(capped, str):
+        # only a Cap-caused name collision that no marker could tell apart may refuse here.
+        assert "cannot be cut to a name unique" in capped
+        return
+
+    _assert_names_unique_and_origins_intact(catalog, proxy, capped)
+    if capped.catalog.instructions is not None:
+        assert len(capped.catalog.instructions) <= caps.instructions
+    for name, definition in capped.catalog.tools.items():
+        origin_name = capped.origin(Item("tool", name))
+        override = proxy.tools.get(origin_name)
+        effective = override.caps.over(caps, "tool") if override is not None else caps
+        _assert_tool_within_its_caps(name, definition, effective)
+
+
+def _assert_names_unique_and_origins_intact(
+    catalog: Catalog, proxy: ProxyFile, capped: Exposed
+) -> None:
+    for kind in KINDS:
+        kind_names = list(capped.catalog.items(kind))
+        assert len(kind_names) == len(set(kind_names))
+        visible = {name for name in catalog.items(kind) if not _hidden(proxy, kind, name)}
+        origins = {capped.origin(Item(kind, name)) for name in kind_names}
+        assert origins == visible
+
+
+def _assert_tool_within_its_caps(
+    name: str, definition: dict[str, Any], effective: CapSettings
+) -> None:
+    assert len(name) <= effective.tool_name
+    description = definition.get("description")
+    if description is not None:
+        assert len(str(description)) <= effective.tool_description
+    properties = definition.get("inputSchema", {}).get("properties", {})
+    for property_schema in properties.values():
+        argument_description = property_schema.get("description")
+        if argument_description is not None:
+            assert len(str(argument_description)) <= effective.argument_description
