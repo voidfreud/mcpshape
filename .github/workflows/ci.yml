@@ -16,6 +16,7 @@ jobs:
       - name: Title and every commit are Conventional Commits, no merge commits on the branch
         env:
           TITLE: ${{ github.event.pull_request.title }}
+          BODY: ${{ github.event.pull_request.body }}
           BASE: ${{ github.event.pull_request.base.sha }}
           HEAD: ${{ github.event.pull_request.head.sha }}
         run: |
@@ -33,6 +34,10 @@ jobs:
               echo "::error::$sha is not a Conventional Commit: $subject"; fail=1
             fi
           done < <(git log --format='%H %s' "$BASE..$HEAD")
+          if git diff --name-only "$(git merge-base "$BASE" "$HEAD")" "$HEAD" | grep -Eq '^(src|tests)/' \
+             && ! printf '%s\n' "$BODY" | grep -Eiq '\bcloses #[0-9]+'; then
+            echo "::error::the pull request changes src/ or tests/ but its body has no 'Closes #<n>' line"; fail=1
+          fi
           exit $fail
   test:
     strategy:

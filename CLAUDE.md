@@ -10,7 +10,7 @@ A local proxy that reshapes what MCP servers expose. Python, built on unmodified
 - `docs/clients.md`: dated facts about Clients and FastMCP; update it, not the brief, when facts change.
 - `docs/sessions/`: the verbatim design transcript. History, not rules; the brief wins where
   they differ.
-- Spec: GitHub issue #2, the map; its sub-issues are the tickets. How a ticket is chosen,
+- Spec: GitHub issue #2; its sub-issues are the tickets. How a ticket is chosen,
   claimed, filed, and closed is in `docs/agents/issue-tracker.md`. Read the ticket before
   implementing it.
 
