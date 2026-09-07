@@ -31,6 +31,21 @@ def test_serve_is_registered_but_hidden(config_dir: ConfigDir) -> None:
     assert "stdio" in result.output
 
 
+def test_serve_documents_both_ways_of_naming_a_proxy(config_dir: ConfigDir) -> None:
+    result = run_cli(config_dir, "serve", "--help")
+
+    assert result.exit_code == 0
+    assert "UPSTREAM[/PROXY]" in result.output, "the form proxy install writes"
+    assert "[PROXY]" in result.output, "and the Proxy given separately"
+
+
+def test_upstream_help_lists_scan(config_dir: ConfigDir) -> None:
+    result = run_cli(config_dir, "upstream", "--help")
+
+    assert result.exit_code == 0
+    assert " scan " in result.output
+
+
 def command_paths() -> list[list[str]]:
     def walk(command: object, path: list[str]) -> list[list[str]]:
         paths = [path]

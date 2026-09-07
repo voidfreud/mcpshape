@@ -8,6 +8,7 @@ from typing import Annotated
 import typer
 
 from mcpshape.cli import daemon, doctor, proxy, tool, upstream
+from mcpshape.cli import serve as serving
 from mcpshape.cli.common import HELP_OPTIONS, State, console, drift_notice, example, fail
 from mcpshape.paths import CONFIG_DIR_ENV, STATE_DIR_ENV, default_config_dir, default_state_dir
 
@@ -85,10 +86,6 @@ def ui() -> None:
     fail("the dashboard is not available in this version")
 
 
-@app.command("serve", hidden=True, epilog=example("serve github/default"))
-def serve(ref: Annotated[str, typer.Argument(metavar="UPSTREAM/PROXY")]) -> None:
-    """Speak stdio to a Client and forward to a Proxy, starting the Daemon if needed."""
-    fail(f"the stdio shim is not available in this version (asked for {ref})")
-
+app.command("serve", hidden=True, epilog=serving.EPILOG)(serving.serve)
 
 __all__ = ["app", "console"]

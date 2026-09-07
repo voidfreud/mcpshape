@@ -101,19 +101,29 @@ class CliResult:
     """Only what went to stdout, so a test can parse what a command was asked to print."""
 
 
-def run_cli(cfg: ConfigDir, *args: str, env: dict[str, str] | None = None) -> CliResult:
-    """Run the mcpshape CLI against ``cfg`` through Typer's runner, with ``env`` on top."""
+def run_cli(
+    cfg: ConfigDir,
+    *args: str,
+    env: dict[str, str] | None = None,
+    answers: str | None = None,
+) -> CliResult:
+    """Run the mcpshape CLI against ``cfg`` through Typer's runner.
+
+    ``env`` goes on top of the plain terminal every test gets; ``answers`` is typed at
+    whatever the command asks, one line per prompt.
+    """
     result = CliRunner().invoke(
         app,
         ["--config-dir", str(cfg.path), "--state-dir", str(cfg.state), *args],
         env={**CLI_ENV, **(env or {})},
+        input=answers,
     )
     return _result(result)
 
 
-def run_cli_with_env(env: dict[str, str], *args: str) -> CliResult:
+def run_cli_with_env(env: dict[str, str], *args: str, answers: str | None = None) -> CliResult:
     """Run the CLI without ``--config-dir``, letting ``env`` decide where config lives."""
-    result = CliRunner().invoke(app, list(args), env={**CLI_ENV, **env})
+    result = CliRunner().invoke(app, list(args), env={**CLI_ENV, **env}, input=answers)
     return _result(result)
 
 
