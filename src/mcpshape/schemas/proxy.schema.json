@@ -2,6 +2,22 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://raw.githubusercontent.com/voidfreud/mcpshape/main/src/mcpshape/schemas/proxy.schema.json",
   "title": "ProxyFile",
+  "$defs": {
+    "ItemOverride": {
+      "additionalProperties": false,
+      "description": "How one Catalog item is presented, keyed by its Catalog name.",
+      "properties": {
+        "hidden": {
+          "default": false,
+          "description": "Do not expose this item at all.",
+          "title": "Hidden",
+          "type": "boolean"
+        }
+      },
+      "title": "ItemOverride",
+      "type": "object"
+    }
+  },
   "additionalProperties": false,
   "description": "``<proxy>.toml``: one curation of an Upstream.",
   "properties": {
@@ -10,6 +26,30 @@
       "description": "Format version of this file.",
       "title": "Version",
       "type": "integer"
+    },
+    "tools": {
+      "additionalProperties": {
+        "$ref": "#/$defs/ItemOverride"
+      },
+      "description": "Overrides by tool name.",
+      "title": "Tools",
+      "type": "object"
+    },
+    "resources": {
+      "additionalProperties": {
+        "$ref": "#/$defs/ItemOverride"
+      },
+      "description": "Overrides by resource URI or resource template.",
+      "title": "Resources",
+      "type": "object"
+    },
+    "prompts": {
+      "additionalProperties": {
+        "$ref": "#/$defs/ItemOverride"
+      },
+      "description": "Overrides by prompt name.",
+      "title": "Prompts",
+      "type": "object"
     }
   },
   "required": [

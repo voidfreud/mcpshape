@@ -38,6 +38,7 @@ class ConfigDir:
     """A temp config directory that tests populate before building the Daemon."""
 
     path: Path
+    state: Path
     _registered: list[str] = field(default_factory=list[str])
 
     def add_memory_upstream(self, name: str, server: FastMCP) -> None:
@@ -58,7 +59,7 @@ class ConfigDir:
 
 @pytest.fixture
 def config_dir(tmp_path: Path) -> Generator[ConfigDir]:
-    cfg = ConfigDir(tmp_path / "config")
+    cfg = ConfigDir(tmp_path / "config", tmp_path / "state")
     cfg.path.mkdir()
     try:
         yield cfg
@@ -83,7 +84,7 @@ class RunningDaemon:
 @contextlib.asynccontextmanager
 async def running_daemon(cfg: ConfigDir) -> AsyncGenerator[RunningDaemon]:
     """Build the Daemon app from ``cfg`` and run its lifespan for the duration."""
-    app = build_app(cfg.path)
+    app = build_app(cfg.path, cfg.state)
     async with app.router.lifespan_context(app):
         yield RunningDaemon(app)
 
@@ -98,7 +99,9 @@ class CliResult:
 
 def run_cli(cfg: ConfigDir, *args: str) -> CliResult:
     """Run the mcpshape CLI against ``cfg`` through Typer's runner."""
-    result = CliRunner().invoke(app, ["--config-dir", str(cfg.path), *args], env=CLI_ENV)
+    result = CliRunner().invoke(
+        app, ["--config-dir", str(cfg.path), "--state-dir", str(cfg.state), *args], env=CLI_ENV
+    )
     return CliResult(exit_code=result.exit_code, output=ANSI.sub("", result.output))
 
 

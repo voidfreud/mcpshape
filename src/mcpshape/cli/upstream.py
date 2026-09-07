@@ -1,13 +1,16 @@
-"""``mcpshape upstream``: add, ls, show, rm."""
+"""``mcpshape upstream``: add, ls, show, sync, rm."""
 
 from __future__ import annotations
 
+import asyncio
 import shlex
-from typing import Annotated
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Annotated
 
 import typer
 
-from mcpshape import config
+from mcpshape import catalog, config
+from mcpshape.adapters.fastmcp import UpstreamTargetError, scan
 from mcpshape.cli.common import (
     HELP_OPTIONS,
     confirm_or_abort,
@@ -18,8 +21,12 @@ from mcpshape.cli.common import (
     state,
 )
 from mcpshape.cli.listing import proxy_url, toml_file, upstreams_table
-from mcpshape.model import HttpTransport, SseTransport, StdioTransport, Transport
+from mcpshape.model import HttpTransport, SseTransport, StdioTransport, Transport, Upstream
 from mcpshape.names import check_name
+from mcpshape.proxy import orphaned_overrides
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 app = typer.Typer(
     help="Manage Upstreams: the MCP servers mcpshape sits in front of.",
@@ -40,6 +47,9 @@ UrlOpt = Annotated[
 ]
 SseOpt = Annotated[bool, typer.Option("--sse", help="With --url: the server speaks legacy SSE.")]
 YesOpt = Annotated[bool, typer.Option("-y", "--yes", help="Do not ask for confirmation.")]
+AcceptOpt = Annotated[
+    bool, typer.Option("--accept", help="Make what the Upstream advertises now the Catalog.")
+]
 
 
 def transport_from_options(stdio: str | None, url: str | None, *, sse: bool) -> Transport:
@@ -108,13 +118,118 @@ def show(ctx: typer.Context, name: NameArg) -> None:
     console.print(upstreams_table(config_dir, [upstream]))
 
 
+@app.command("sync", epilog=example("upstream sync github --accept"))
+def sync(
+    ctx: typer.Context,
+    name: Annotated[
+        str | None, typer.Argument(help="The Upstream to scan; every Upstream when omitted.")
+    ] = None,
+    *,
+    accept: AcceptOpt = False,
+) -> None:
+    """Scan an Upstream into its Catalog, show the Drift since, and accept it on request."""
+    config_dir, state_dir = state(ctx).config_dir, state(ctx).state_dir
+    with reporting_errors():
+        upstreams = (
+            [config.load_upstream(config_dir, name)] if name else config.load_upstreams(config_dir)
+        )
+        if not upstreams:
+            console.print("No Upstreams yet. Add one with [bold]mcpshape add[/bold].")
+            return
+        for upstream in upstreams:
+            sync_one(config_dir, state_dir, upstream, accept=accept)
+            state(ctx).reviewed.add(upstream.name)
+
+
+def sync_one(config_dir: Path, state_dir: Path, upstream: Upstream, *, accept: bool) -> None:
+    try:
+        observed = asyncio.run(scan(upstream.transport))
+    except UpstreamTargetError as exc:
+        fail(f"cannot scan {upstream.name}: {exc}")
+    result = catalog.record_scan(state_dir, upstream.name, observed)
+    label = f"[bold]{upstream.name}[/bold]"
+    if result.first:
+        console.print(f"Scanned {label}: {counts(result.catalog)}")
+        return
+    if not result.drift:
+        console.print(f"No Drift in {label}: {counts(result.catalog)}")
+        if accept:
+            console.print("Nothing to accept.")
+        return
+    if not accept:
+        console.print(f"Drift in {label} since {when(result.catalog)}:")
+        print_drift(result.drift)
+        console.print(f"Accept with: [bold]mcpshape upstream sync {upstream.name} --accept[/bold]")
+        return
+    accepted, drift = catalog.accept(state_dir, upstream.name)
+    console.print(f"Accepted Drift in {label}:")
+    print_drift(drift)
+    apply_drift_default(config_dir, upstream, drift.added)
+    report_orphans(config_dir, upstream, accepted)
+    console.print(
+        "Clients connected to its Proxies see the change on their next request; "
+        "most Clients need a reconnect to notice."
+    )
+
+
+def apply_drift_default(
+    config_dir: Path, upstream: Upstream, added: tuple[catalog.Item, ...]
+) -> None:
+    """Hide ``added`` in every Proxy of ``upstream`` unless the global setting says visible."""
+    if not added:
+        return
+    names = ", ".join(str(item) for item in added)
+    if config.load_settings(config_dir).drift.new_items == "visible":
+        console.print(
+            f'  New items are visible in every Proxy (drift.new_items = "visible"): {names}'
+        )
+        return
+    note = f"new in the Upstream since {datetime.now(UTC):%Y-%m-%d}; set to false to expose it"
+    for proxy in upstream.proxies:
+        config.hide_items(config.proxy_file(config_dir, upstream.name, proxy), added, note)
+    console.print(f"  New items are hidden in every Proxy until you expose them: {names}")
+
+
+def report_orphans(config_dir: Path, upstream: Upstream, accepted: catalog.Catalog) -> None:
+    """Overrides whose item vanished are kept; say so, per Proxy."""
+    for proxy in upstream.proxies:
+        for item in orphaned_overrides(
+            accepted, config.load_proxy(config_dir, upstream.name, proxy)
+        ):
+            console.print(
+                f"  [yellow]![/] {upstream.name}/{proxy}: orphaned Override for {item}, kept"
+            )
+
+
+def print_drift(drift: catalog.Drift) -> None:
+    for sign, items in drift.by_sign():
+        for item in items:
+            console.print(f"  {sign} {item}")
+    if drift.instructions_changed:
+        console.print("  ~ instructions")
+
+
+def counts(stored: catalog.Catalog) -> str:
+    parts = [
+        (len(stored.tools), "tool"),
+        (len(stored.resources) + len(stored.resource_templates), "resource"),
+        (len(stored.prompts), "prompt"),
+    ]
+    return ", ".join(f"{count} {noun}{'' if count == 1 else 's'}" for count, noun in parts)
+
+
+def when(stored: catalog.Catalog) -> str:
+    return f"{stored.scanned_at.astimezone():%Y-%m-%d %H:%M}"
+
+
 @app.command("rm", epilog=example("upstream rm github"))
 def rm(ctx: typer.Context, name: NameArg, *, yes: YesOpt = False) -> None:
-    """Remove an Upstream and every one of its Proxies."""
-    config_dir = state(ctx).config_dir
+    """Remove an Upstream, every one of its Proxies, and its Catalog."""
+    config_dir, state_dir = state(ctx).config_dir, state(ctx).state_dir
     with reporting_errors():
         upstream = config.load_upstream(config_dir, name)
         proxies = ", ".join(upstream.proxies)
         confirm_or_abort(f"Remove Upstream {name} and its Proxies ({proxies})?", yes=yes)
         config.remove_upstream(config_dir, name)
+        catalog.forget(state_dir, name)
     console.print(f"Removed Upstream [bold]{name}[/bold]")

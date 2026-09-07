@@ -8,8 +8,8 @@ from typing import Annotated
 import typer
 
 from mcpshape.cli import doctor, proxy, upstream
-from mcpshape.cli.common import HELP_OPTIONS, State, console, example, fail
-from mcpshape.paths import CONFIG_DIR_ENV, default_config_dir
+from mcpshape.cli.common import HELP_OPTIONS, State, console, drift_notice, example, fail
+from mcpshape.paths import CONFIG_DIR_ENV, STATE_DIR_ENV, default_config_dir, default_state_dir
 
 app = typer.Typer(
     name="mcpshape",
@@ -34,8 +34,21 @@ def main(
             help="Config directory (default: $XDG_CONFIG_HOME/mcpshape or ~/.config/mcpshape).",
         ),
     ] = None,
+    state_dir: Annotated[
+        Path | None,
+        typer.Option(
+            "--state-dir",
+            envvar=STATE_DIR_ENV,
+            show_default=False,
+            help="State directory (default: $XDG_STATE_HOME/mcpshape or ~/.local/state/mcpshape).",
+        ),
+    ] = None,
 ) -> None:
-    ctx.obj = State(config_dir=config_dir or default_config_dir())
+    ctx.obj = State(
+        config_dir=config_dir or default_config_dir(),
+        state_dir=state_dir or default_state_dir(),
+    )
+    ctx.call_on_close(lambda: drift_notice(ctx.obj.state_dir, ctx.obj.reviewed))
 
 
 @app.command(

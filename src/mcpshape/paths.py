@@ -6,12 +6,26 @@ import os
 from pathlib import Path
 
 CONFIG_DIR_ENV = "MCPSHAPE_CONFIG_DIR"
+STATE_DIR_ENV = "MCPSHAPE_STATE_DIR"
 
 
 def default_config_dir() -> Path:
     """``$MCPSHAPE_CONFIG_DIR``, else ``$XDG_CONFIG_HOME/mcpshape``, else ``~/.config/mcpshape``."""
-    if override := os.environ.get(CONFIG_DIR_ENV):
+    return _xdg_dir(CONFIG_DIR_ENV, "XDG_CONFIG_HOME", Path.home() / ".config")
+
+
+def default_state_dir() -> Path:
+    """``$MCPSHAPE_STATE_DIR``, else ``$XDG_STATE_HOME/mcpshape``, else ``~/.local/state/mcpshape``.
+
+    Catalogs, Drift, tokens, and logs live here: what mcpshape learned, as opposed to what the
+    user wrote.
+    """
+    return _xdg_dir(STATE_DIR_ENV, "XDG_STATE_HOME", Path.home() / ".local" / "state")
+
+
+def _xdg_dir(override_env: str, xdg_env: str, fallback: Path) -> Path:
+    if override := os.environ.get(override_env):
         return Path(override).expanduser()
-    xdg = os.environ.get("XDG_CONFIG_HOME")
-    base = Path(xdg).expanduser() if xdg else Path.home() / ".config"
+    xdg = os.environ.get(xdg_env)
+    base = Path(xdg).expanduser() if xdg else fallback
     return base / "mcpshape"
