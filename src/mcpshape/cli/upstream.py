@@ -28,6 +28,7 @@ from mcpshape.model import HttpTransport, SseTransport, StdioTransport, Transpor
 from mcpshape.names import check_name
 from mcpshape.profiles import clients_needing_reconnect
 from mcpshape.proxy import orphaned_overrides
+from mcpshape.secrets import REFERENCE
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -61,14 +62,50 @@ DeviceOpt = Annotated[
         help="With OAuth: pair by device code instead of a browser, for a headless machine.",
     ),
 ]
+EnvOpt = Annotated[
+    list[str] | None,
+    typer.Option(
+        "--env",
+        metavar="NAME=VALUE",
+        help="With --stdio: set NAME=VALUE in the [env] block; repeatable. "
+        "VALUE may be a ${VAR} reference.",
+    ),
+]
 YesOpt = Annotated[bool, typer.Option("-y", "--yes", help="Do not ask for confirmation.")]
 AcceptOpt = Annotated[
     bool, typer.Option("--accept", help="Make what the Upstream advertises now the Catalog.")
 ]
 
 
-def transport_from_options(
-    stdio: str | None, url: str | None, *, sse: bool, oauth: bool = False, device: bool = False
+def parse_env(items: list[str] | None) -> dict[str, str]:
+    """``NAME=VALUE`` items into a dict, failing naming the first one that is not that shape."""
+    env: dict[str, str] = {}
+    for item in items or []:
+        name, sep, value = item.partition("=")
+        if not sep or not name:
+            fail(f"--env needs NAME=VALUE, got {item!r}")
+        env[name] = value
+    return env
+
+
+def secret_note(env: dict[str, str]) -> str | None:
+    """Once, when any of ``env``'s values is a literal, not a whole ``${VAR}`` reference (#43)."""
+    if not env or all(REFERENCE.fullmatch(value) for value in env.values()):
+        return None
+    return (
+        "A secret belongs in the Daemon's environment or in "
+        f"{config.SECRETS_FILE}, not in this file: write it as ${{NAME}} and set NAME there."
+    )
+
+
+def transport_from_options(  # noqa: PLR0913  # one option per way of naming and authorizing an Upstream
+    stdio: str | None,
+    url: str | None,
+    *,
+    sse: bool,
+    oauth: bool = False,
+    device: bool = False,
+    env: list[str] | None = None,
 ) -> Transport:
     if (stdio is None) == (url is None):
         fail("give exactly one of --stdio or --url")
@@ -82,7 +119,9 @@ def transport_from_options(
         command, *args = shlex.split(stdio)
         if not command:
             fail("--stdio needs a command")
-        return StdioTransport(transport="stdio", command=command, args=args)
+        return StdioTransport(transport="stdio", command=command, args=args, env=parse_env(env))
+    if env:
+        fail("--env only applies to --stdio")
     assert url is not None  # noqa: S101  # the check above guarantees it
     auth: Literal["oauth"] | None = "oauth" if oauth else None
     if sse:
@@ -100,6 +139,10 @@ def add_upstream(
         f"Added Upstream [bold]{upstream.name}[/bold] with its default Proxy at "
         f"{proxy_url(config_dir, upstream.name, 'default')}"
     )
+    if isinstance(upstream.transport, StdioTransport) and (
+        note := secret_note(upstream.transport.env)
+    ):
+        console.print(note)
     if oauth_upstream(upstream.transport):
         log_in(config_dir, state(ctx).state_dir, upstream, device=device)
 
@@ -143,10 +186,33 @@ def add(  # noqa: PLR0913  # one option per way of naming and authorizing an Ups
     sse: SseOpt = False,
     oauth: OAuthOpt = False,
     device: DeviceOpt = False,
+    env: EnvOpt = None,
 ) -> None:
     """Add an Upstream and its default Proxy."""
-    transport = transport_from_options(stdio, url, sse=sse, oauth=oauth, device=device)
+    transport = transport_from_options(stdio, url, sse=sse, oauth=oauth, device=device, env=env)
     add_upstream(ctx, name, transport, device=device)
+
+
+@app.command("env", epilog=example("upstream env github TOKEN='${GH_TOKEN}'"))
+def env_cmd(
+    ctx: typer.Context,
+    name: NameArg,
+    pairs: Annotated[
+        list[str],
+        typer.Argument(metavar="NAME=VALUE...", help="Set each in the Upstream's [env] block."),
+    ],
+) -> None:
+    """Set environment variables on an existing stdio Upstream, keeping its comments."""
+    config_dir = state(ctx).config_dir
+    parsed = parse_env(pairs)
+    with reporting_errors():
+        upstream = config.load_upstream(config_dir, name)
+        if not isinstance(upstream.transport, StdioTransport):
+            fail(f"{name} is not a stdio Upstream, so it has no environment to set")
+        config.set_env(config_dir, name, parsed)
+    console.print(f"Set {', '.join(parsed)} in Upstream [bold]{name}[/bold]'s environment")
+    if note := secret_note(parsed):
+        console.print(note)
 
 
 @app.command("ls", epilog=example("upstream ls"))

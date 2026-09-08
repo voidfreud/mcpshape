@@ -64,9 +64,12 @@ def add(  # noqa: PLR0913  # one option per way of naming and authorizing an Ups
     sse: upstream.SseOpt = False,
     oauth: upstream.OAuthOpt = False,
     device: upstream.DeviceOpt = False,
+    env: upstream.EnvOpt = None,
 ) -> None:
     """Add an Upstream and its default Proxy. Same as `upstream add`."""
-    transport = upstream.transport_from_options(stdio, url, sse=sse, oauth=oauth, device=device)
+    transport = upstream.transport_from_options(
+        stdio, url, sse=sse, oauth=oauth, device=device, env=env
+    )
     upstream.add_upstream(ctx, name, transport, device=device)
 
 

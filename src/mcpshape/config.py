@@ -637,6 +637,18 @@ def add_proxy(config_dir: Path, upstream: str, proxy: str) -> Path:
     return path
 
 
+def set_env(config_dir: Path, name: str, env: Mapping[str, str]) -> None:
+    """Set each of ``env`` in the Upstream ``name``'s ``[env]`` block, replacing a key already
+    there; comments elsewhere in the file survive."""
+
+    def edit(document: tomlkit.TOMLDocument) -> None:
+        table = _table_at(document, "env")
+        for key, value in env.items():
+            table[key] = value
+
+    rewrite(upstream_dir(config_dir, name) / UPSTREAM_FILE, edit)
+
+
 def _table_at(document: tomlkit.TOMLDocument, *keys: str) -> Any:  # noqa: ANN401  # tomlkit's containers are untyped
     """The table under ``keys``, made on the way as ``[a.b.c]`` headers rather than inline."""
     node: Any = document
