@@ -75,6 +75,10 @@ Claude Code is the first and best-integrated Profile, never a special case in th
   an error, moves the Upstream to `unavailable` at once and is answered with the same
   configurable message; the backoff and reconnect follow as after a failed connect (settled
   in #22). A warm Upstream's failed ping does the same.
+- The keeper's restart cap is a rate, five failures within ten minutes on the Daemon's clock,
+  so failures spread over a long life never end supervision (settled in #50). Past it the
+  Upstream is `unavailable` with the reason, `daemon status` says the keeper stopped, and
+  `daemon reload` starts a keeper again.
 - Health of every Upstream and Proxy is shown by `ls`, `daemon status`, and the dashboard.
 
 ### Catalog and Drift
@@ -122,6 +126,9 @@ Claude Code is the first and best-integrated Profile, never a special case in th
   so `import helpers` finds `upstreams/<name>/helpers.py`; a helper is re-imported on every
   load, so every Proxy of the Upstream re-reads its files when a helper changes, and a
   helper of one Upstream is never seen by another's Proxy. `doctor` loads files the same way.
+- Settled in #45: a Virtual Tool's name is its identity, so a Cap never cuts it; one longer
+  than the tool name Cap in force is a load error naming the tool and the Cap, and `doctor`
+  reports it.
 - Hooks run in-process with no sandbox. Exceptions become tool errors and log lines. An async
   Hook that blocks forever stalls the Daemon, and `sys.exit` anywhere in user code is not
   guarded against; this is documented, not solved.

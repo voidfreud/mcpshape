@@ -101,6 +101,8 @@ class UpstreamState(BaseModel):
     state: str
     seconds: float
     error: str | None = None
+    supervised: bool = True
+    """False once the keeper gave up on this Upstream, until a reload starts one (#50)."""
     proxies: list[ProxyState] = Field(default_factory=list[ProxyState])
 
 
@@ -326,6 +328,7 @@ class Management:
             state=status.state,
             seconds=round(status.seconds, 3),
             error=status.error,
+            supervised=status.supervised,
             proxies=[await self.proxies[upstream.name, name].state() for name in upstream.proxies],
         )
 
@@ -335,9 +338,15 @@ class Management:
         return _answer(await self.live())
 
     async def _reload(self, _request: Request) -> JSONResponse:
-        """Every Proxy re-reads its files now, changed or not (#10), and says how it went."""
+        """Every Proxy re-reads its files now, changed or not (#10), and says how it went.
+
+        Every connection is supervised again on the way, which is what brings back a keeper
+        that gave up (#50) and nothing at all for an Upstream whose keeper is still running.
+        """
         for proxy in self.proxies.values():
             await proxy.reload()
+        for connection in self.connections.values():
+            await connection.reload()
         return _answer(await self.live())
 
     async def _shutdown(self, _request: Request) -> JSONResponse:
@@ -372,7 +381,8 @@ class Management:
 
         Bounded by the Upstream's own ``connect_timeout``, as the start-up scan is (#20).
         Recording holds the Upstream's lock (#21), off the event loop. Raises
-        ``_ScanFailedError`` with the reason when the Upstream could not be scanned.
+        ``_ScanFailedError`` with the reason when the Upstream could not be scanned, or when
+        its state was removed while the scan waited for the lock (#49).
         """
         connection = self.connections[upstream.name]
         try:
@@ -388,9 +398,12 @@ class Management:
         except Exception as exc:  # however the Upstream failed, the caller gets the why
             msg = f"{upstream.name} could not be scanned: {exc}"
             raise _ScanFailedError(msg) from exc
-        scan = await asyncio.to_thread(
-            catalogs.record_scan, self.state_dir, upstream.name, observed
-        )
+        try:
+            scan = await asyncio.to_thread(
+                catalogs.record_scan, self.state_dir, upstream.name, observed
+            )
+        except catalogs.ForgottenError as exc:  # an upstream rm won the lock first (#49)
+            raise _ScanFailedError(str(exc)) from None
         return SyncState(first=scan.first, drift=DriftState.of(scan.drift) if scan.drift else None)
 
     async def _login_state(self, request: Request) -> JSONResponse:

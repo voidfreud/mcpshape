@@ -19,6 +19,7 @@ from mcpshape import catalog as catalogs
 from mcpshape.catalog import KINDS, Item
 from mcpshape.config import ArgumentOverride, PromptOverride, ResourceOverride, ToolOverride
 from mcpshape.hooks import UserCode
+from mcpshape.model import CapError
 
 if TYPE_CHECKING:
     from mcpshape.catalog import Catalog, Kind
@@ -246,7 +247,9 @@ def _check_parameters(name: str, uri: str) -> None:
 # A Cap is pure work over what expose() already decided to show: nothing here hides, renames by
 # choice, or re-describes anything an Override did not already touch, it only shortens. Only a
 # tool's own name, description, argument descriptions, and output may be cut; a Proxy's
-# instructions are cut too, but at the Proxy level, since a tool has none of its own.
+# instructions are cut too, but at the Proxy level, since a tool has none of its own. A Virtual
+# Tool's name is its identity, not a Catalog name a Cap may shorten, so it is only ever checked
+# against the tool name Cap in force, never cut: one over the Cap is a load error.
 
 MARKER = "…"
 """What a name, description, or the instructions end with once a Cap cuts them."""
@@ -255,12 +258,22 @@ MARKER = "…"
 def cap(exposed: Exposed, caps: CapSettings, proxy: ProxyFile) -> Exposed:
     """Cut ``exposed`` down to ``caps``, the Cap already resolved through global, Upstream, and
     Proxy. A tool's own Cap Override may lower ``caps`` further for its own name, description,
-    argument descriptions, and output.
+    argument descriptions, and output. A Virtual Tool's name is its identity, so it is checked
+    against ``caps.tool_name``, never cut.
 
-    Raises ``CapError`` when a tool's Cap tries to raise what it inherits, and ``OverrideError``
-    when cutting a tool's name to its Cap cannot keep every exposed name unique, exactly as
-    ``expose`` refuses a collision Overrides caused.
+    Raises ``CapError`` when a tool's Cap tries to raise what it inherits, or when a Virtual
+    Tool's name is longer than the tool name Cap in force, and ``OverrideError`` when cutting a
+    tool's name to its Cap cannot keep every exposed name unique, exactly as ``expose`` refuses
+    a collision Overrides caused.
     """
+    for virtual in exposed.code.tools.values():
+        if len(virtual.name) > caps.tool_name:
+            msg = (
+                f"Virtual Tool {virtual.name!r} is {len(virtual.name)} characters, over the "
+                f"tool name Cap of {caps.tool_name}; its name is its identity, so it cannot be "
+                "cut: shorten it, or set a higher tool name Cap"
+            )
+            raise CapError(msg)
     tools: dict[str, dict[str, Any]] = {}
     origins = dict(exposed.origins)
     arguments = dict(exposed.arguments)

@@ -58,10 +58,15 @@ BACKOFF_CAP = 60.0
 """The longest the exponential backoff between retries ever grows to."""
 
 KEEPER_RESTART_CAP = 5
-"""How many times the keeper restarts itself after an unexpected exception before giving up.
+"""How many failures within ``KEEPER_RESTART_WINDOW`` the keeper restarts itself through.
 
-Past the cap the Upstream is moved to ``unavailable`` with the reason visible in the
-management API, rather than left connected with no idle disconnect, ping, or retry running."""
+The cap is a rate, not a running total (#50): reaching it means the keeper is failing now, not
+that it has failed this often over a long life. Past it the Upstream is moved to
+``unavailable`` with the reason visible in the management API, rather than left connected with
+no idle disconnect, ping, or retry running, and only ``reload()`` starts a keeper again."""
+
+KEEPER_RESTART_WINDOW = 600.0
+"""How long one keeper failure counts against ``KEEPER_RESTART_CAP``, on the injected clock."""
 
 _Due = Literal["nothing", "ping", "sleep", "retry"]
 """What the keeper does when the timer it armed runs out."""
@@ -108,6 +113,8 @@ class Status:
     """How long it has been in this state."""
     error: str | None
     """Why the last connect or ping failed, while that is what put it here."""
+    supervised: bool = True
+    """Whether a keeper is running. False once one gave up, until ``reload()`` (#50)."""
 
 
 class Connection:
@@ -135,6 +142,7 @@ class Connection:
         self._checked_at = self._since
         self._error: str | None = None
         self._failures = 0
+        self._supervised = True
         self._attempted = False
         self._wake = asyncio.Event()
         self._keeper: asyncio.Task[None] | None = None
@@ -144,7 +152,12 @@ class Connection:
     # --- what the Daemon drives ------------------------------------------------------------
 
     def status(self) -> Status:
-        return Status(state=self._state, seconds=self._clock.now() - self._since, error=self._error)
+        return Status(
+            state=self._state,
+            seconds=self._clock.now() - self._since,
+            error=self._error,
+            supervised=self._supervised,
+        )
 
     @asynccontextmanager
     async def running(self) -> AsyncGenerator[None]:
@@ -160,6 +173,21 @@ class Connection:
         self._keeper = asyncio.create_task(self._keep())
         if self._settings.warm:
             self._begin_connect()
+
+    async def reload(self) -> None:
+        """Supervise this Upstream again when the keeper gave up, and try to connect (#50).
+
+        What ``daemon reload`` reaches every connection with. A keeper still running is left
+        exactly as it is, so a reload of a healthy Upstream is nothing; only one that gave up
+        past ``KEEPER_RESTART_CAP`` is started again, with an empty record of failures, and
+        the Upstream it left ``unavailable`` is connected as ``retry()`` connects it.
+        """
+        if self._stopping() or (self._keeper is not None and not self._keeper.done()):
+            return
+        log.info("Upstream %s: supervising again", self._name)
+        self._supervised = True
+        self._keeper = asyncio.create_task(self._keep())
+        self.retry()
 
     async def stop(self) -> None:
         self._enter("stopping")
@@ -228,26 +256,34 @@ class Connection:
         """Run every time-based transition: the idle timer, the pings, and the backoff.
 
         An unexpected exception restarts this loop rather than leaving the Upstream connected
-        with nothing supervising it; past ``KEEPER_RESTART_CAP`` restarts the Upstream is
-        moved to ``unavailable`` instead, with the reason visible in the management API.
+        with nothing supervising it. Only the failures within ``KEEPER_RESTART_WINDOW`` count
+        against ``KEEPER_RESTART_CAP``, so failures spread over a long life never end
+        supervision and a quiet window empties the record (#50); reaching the cap moves the
+        Upstream to ``unavailable`` with the reason visible in the management API, and nothing
+        but ``reload()`` supervises it again.
         """
-        failures = 0
+        failures: list[float] = []
         while not self._stopping():
             try:
                 await self._keep_loop()
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # an Upstream must never take the Daemon down
-                failures += 1
+                now = self._clock.now()
+                failures = [at for at in failures if now - at < KEEPER_RESTART_WINDOW]
+                failures.append(now)
                 log.exception(
-                    "Upstream %s: the keeper failed (%d/%d)",
+                    "Upstream %s: the keeper failed (%d/%d within %.0fs)",
                     self._name,
-                    failures,
+                    len(failures),
                     KEEPER_RESTART_CAP,
+                    KEEPER_RESTART_WINDOW,
                 )
-                if failures >= KEEPER_RESTART_CAP:
+                if len(failures) >= KEEPER_RESTART_CAP:
+                    self._supervised = False
                     await self._fail(
-                        f"the keeper stopped supervising after {failures} failures: {exc}"
+                        f"the keeper stopped supervising after {len(failures)} failures "
+                        f"within {KEEPER_RESTART_WINDOW:.0f}s: {exc}"
                     )
                     return
             else:

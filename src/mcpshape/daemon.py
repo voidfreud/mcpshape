@@ -321,8 +321,16 @@ async def rescan(state_dir: Path, secrets: Secrets, upstream: Upstream) -> bool:
 
 
 async def record_observation(state_dir: Path, name: str, observed: Catalog) -> None:
-    """Keep what a reconnected Upstream advertises: its first Catalog, or the Drift since."""
-    await asyncio.to_thread(catalogs.record_scan, state_dir, name, observed)
+    """Keep what a reconnected Upstream advertises: its first Catalog, or the Drift since.
+
+    An ``upstream rm`` can remove the Upstream's state while this scan waits for its lock
+    (#49). There is then nothing left to keep, which is ordinary: one line says so, rather
+    than the traceback the rescan would otherwise log.
+    """
+    try:
+        await asyncio.to_thread(catalogs.record_scan, state_dir, name, observed)
+    except catalogs.ForgottenError:
+        log.info("Upstream %s was removed while its scan waited; dropping what it saw", name)
 
 
 async def _bounded_rescan(
