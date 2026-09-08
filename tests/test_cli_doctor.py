@@ -5,10 +5,13 @@ from __future__ import annotations
 import sys
 from typing import TYPE_CHECKING
 
+from mcpshape import autostart
 from tests.support.seam import run_cli, run_cli_with_env
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    import pytest
 
     from tests.support.seam import ConfigDir
 
@@ -97,3 +100,33 @@ def test_a_users_file_cannot_name_a_memory_transport(tmp_path: Path) -> None:
     assert "upstream.toml: transport" in result.output
     assert "'memory' is the test seam's transport" in result.output
     assert "stdio, http, or sse" in result.output
+
+
+def test_doctor_reports_a_unit_whose_executable_no_longer_exists(
+    config_dir: ConfigDir, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    plist = tmp_path / "org.voidfreud.mcpshape.plist"
+    unit = tmp_path / "mcpshape.service"
+    monkeypatch.setattr("mcpshape.autostart.launchd_plist_path", lambda: plist)
+    monkeypatch.setattr("mcpshape.autostart.systemd_unit_path", lambda: unit)
+    missing = tmp_path / "gone" / "mcpshape"
+    paths = autostart.AutostartPaths(log_dir=tmp_path / "log", command=(str(missing),))
+    autostart.write_launchd(paths)
+    autostart.write_systemd(paths)
+
+    result = run_cli(config_dir, "doctor")
+
+    assert result.exit_code == 1
+    assert str(plist) in result.output or str(unit) in result.output
+    assert str(missing) in result.output
+
+
+def test_doctor_is_unaffected_when_no_autostart_unit_is_installed(
+    config_dir: ConfigDir, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("mcpshape.autostart.launchd_plist_path", lambda: tmp_path / "none.plist")
+    monkeypatch.setattr("mcpshape.autostart.systemd_unit_path", lambda: tmp_path / "none.service")
+
+    result = run_cli(config_dir, "doctor")
+
+    assert result.exit_code == 0, result.output

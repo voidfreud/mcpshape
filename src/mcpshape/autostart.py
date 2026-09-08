@@ -8,6 +8,7 @@ out to ``launchctl`` or ``systemctl``, the one thin edge no test executes.
 from __future__ import annotations
 
 import getpass
+import platform
 import plistlib
 import shlex
 import shutil
@@ -15,6 +16,7 @@ import subprocess  # the one thin edge: registering the unit with the OS
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from typing import cast
 
 from mcpshape.paths import CONFIG_DIR_ENV, STATE_DIR_ENV
 
@@ -135,6 +137,64 @@ def remove_systemd() -> bool:
     existed = target.is_file()
     target.unlink(missing_ok=True)
     return existed
+
+
+# --- comparing: whether an installed unit still matches what this version writes (#47) ------------
+
+
+def installed_unit_differs(path: Path, rendered: bytes | str) -> bool:
+    """Whether the unit already at ``path`` differs from ``rendered``, what the writer would
+    produce now. A missing file counts as differing, so a first install and a stale rewrite
+    look the same to the caller."""
+    if not path.is_file():
+        return True
+    try:
+        current: bytes | str = (
+            path.read_bytes() if isinstance(rendered, bytes) else path.read_text()
+        )
+    except OSError:
+        return True
+    return current != rendered
+
+
+def unit_executable(path: Path) -> Path | None:
+    """The executable an installed unit invokes, read from the unit itself: a launchd plist's
+    ``ProgramArguments[0]``, or a systemd unit's ``ExecStart`` first token. ``None`` when the
+    unit cannot be read or does not name one."""
+    try:
+        if path.suffix == ".plist":
+            plist: dict[str, object] = plistlib.loads(path.read_bytes())
+            arguments = plist.get("ProgramArguments")
+            if not isinstance(arguments, list):
+                return None
+            command = [str(argument) for argument in cast("list[object]", arguments)]
+            return Path(command[0]) if command else None
+        for line in path.read_text().splitlines():
+            if line.startswith("ExecStart="):
+                tokens = shlex.split(line.removeprefix("ExecStart="))
+                return Path(tokens[0]) if tokens else None
+    except (OSError, plistlib.InvalidFileException, ValueError):
+        return None
+    return None
+
+
+def stale_unit_problems() -> list[str]:
+    """Whichever autostart unit is installed on this platform, one message per unit whose
+    executable has since moved or been removed: a Daemon that cannot start is not a warning."""
+    if platform.system() == "Darwin":
+        candidates = [launchd_plist_path()]
+    elif platform.system() == "Linux":
+        candidates = [systemd_unit_path()]
+    else:
+        candidates = []
+    problems: list[str] = []
+    for path in candidates:
+        if not path.is_file():
+            continue
+        executable = unit_executable(path)
+        if executable is not None and not executable.exists():
+            problems.append(f"{path}: the installed unit runs {executable}, which no longer exists")
+    return problems
 
 
 # --- registering: the thin edge, never called in tests -------------------------------------------

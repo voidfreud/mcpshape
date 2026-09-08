@@ -272,26 +272,56 @@ def _autostart_paths(config_dir: Path, state_dir: Path) -> autostart.AutostartPa
     )
 
 
+def _up_to_date_message(kind: str, path: Path) -> str:
+    return f"The {kind} at {path} is already installed and up to date"
+
+
+def _updated_message(kind: str, path: Path, *, existed: bool) -> str:
+    if existed:
+        return f"Updated the {kind} at {path}; it no longer matched what this version writes"
+    return f"Installed the {kind} at {path}"
+
+
+def _install_launchd(paths: autostart.AutostartPaths) -> None:
+    path = autostart.launchd_plist_path()
+    rendered = autostart.render_launchd_plist(paths)
+    if not autostart.installed_unit_differs(path, rendered):
+        console.print(_up_to_date_message("launchd agent", path))
+        return
+    existed = path.is_file()
+    autostart.write_launchd(paths)
+    try:
+        autostart.register_launchd(path)
+    except OSError as exc:
+        console.print(f"[yellow]![/] wrote {path} but could not load it: {exc}")
+        return
+    console.print(_updated_message("launchd agent", path, existed=existed) + ", and loaded it")
+
+
+def _install_systemd(paths: autostart.AutostartPaths) -> None:
+    path = autostart.systemd_unit_path()
+    rendered = autostart.render_systemd_unit(paths)
+    if not autostart.installed_unit_differs(path, rendered):
+        console.print(_up_to_date_message("systemd unit", path))
+        return
+    existed = path.is_file()
+    autostart.write_systemd(paths)
+    try:
+        autostart.register_systemd()
+    except OSError as exc:
+        console.print(f"[yellow]![/] wrote {path} but could not enable it: {exc}")
+        return
+    console.print(_updated_message("systemd unit", path, existed=existed) + ", with linger")
+
+
 def _install_autostart(config_dir: Path, state_dir: Path, *, quiet: bool) -> None:
     system = platform.system()
     paths = _autostart_paths(config_dir, state_dir)
     if system == "Darwin":
-        path = autostart.write_launchd(paths)
-        try:
-            autostart.register_launchd(path)
-        except OSError as exc:
-            console.print(f"[yellow]![/] wrote {path} but could not load it: {exc}")
-        else:
-            console.print(f"Installed and loaded the launchd agent at {path}")
+        _install_launchd(paths)
         return
     if system == "Linux":
-        path = autostart.write_systemd(paths)
-        try:
-            autostart.register_systemd()
-        except OSError as exc:
-            console.print(f"[yellow]![/] wrote {path} but could not enable it: {exc}")
-        else:
-            console.print(f"Installed and enabled the systemd unit at {path}, with linger.")
+        _install_systemd(paths)
         return
     if not quiet:
         console.print(f"[dim]Autostart is not supported on {system}.[/dim]")

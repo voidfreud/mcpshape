@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Annotated
 import typer
 from rich.markup import escape
 
-from mcpshape import catalog, config
+from mcpshape import autostart, catalog, config
 from mcpshape.cli.common import client_profile, console, state, unscanned_note
 from mcpshape.commands import command_missing
 from mcpshape.hooks import UserCode, UserCodeError, load_user_code
@@ -268,6 +268,11 @@ ForOpt = Annotated[
 ]
 
 
+def _print_problems(problems: list[config.Problem] | list[str]) -> None:
+    for problem in problems:
+        console.print(f"[red]✗[/] {escape(str(problem))}")
+
+
 def doctor(ctx: typer.Context, for_client: ForOpt = None) -> None:
     """Validate every config file against its schema and report what is wrong."""
     config_dir, state_dir = state(ctx).config_dir, state(ctx).state_dir
@@ -278,9 +283,10 @@ def doctor(ctx: typer.Context, for_client: ForOpt = None) -> None:
     problems.extend(config.secret_problems(config_dir))
     problems.extend(command_problems(config_dir))
     console.print(f"Checked {len(files)} file(s) in {config_dir}")
-    for problem in problems:
-        console.print(f"[red]✗[/] {escape(str(problem))}")
-    if problems:
+    stale_units = autostart.stale_unit_problems()
+    _print_problems(problems)
+    _print_problems(stale_units)
+    if problems or stale_units:
         raise typer.Exit(1)
     try:
         problems = override_problems(config_dir, state_dir)
@@ -292,8 +298,7 @@ def doctor(ctx: typer.Context, for_client: ForOpt = None) -> None:
         problems, warnings = problems + found.problems, warnings + found.warnings
         for note in found.notes:
             console.print(escape(note))
-    for problem in problems:
-        console.print(f"[red]✗[/] {escape(str(problem))}")
+    _print_problems(problems)
     for warning in warnings:
         console.print(f"[yellow]![/] {escape(str(warning))}")
     if problems:
