@@ -479,26 +479,32 @@ def _summary(path: Path, exc: BaseException) -> str:
 # --- the chain a call runs through -----------------------------------------------------------
 
 
-async def run_call[R](
+async def run_call[R](  # noqa: PLR0913, PLR0917  # every one of these is state the chain needs
     code: UserCode,
     call: Call,
     forward: Callable[[Call], Awaitable[R]],
     of: Callable[[object], R],
     cap: Callable[[R], R] | None = None,
+    check: Callable[[R, str], None] | None = None,
 ) -> R:
     """Run ``call`` through its Hooks: before, the Upstream unless short-circuited, after, Cap.
 
     ``forward`` reaches the Upstream with the arguments as the ``before`` Hooks left them;
     ``of`` turns whatever a Hook returns into the result type. ``cap`` is where the tool output
     Cap slots in: it runs last, on whatever the Hooks leave, short-circuited or not, so what a
-    Client receives never exceeds it either way. A Hook that raises is logged and its exception
-    re-raised for the adapter to turn into the Client's error.
+    Client receives never exceeds it either way. ``check``, when given, runs right after each
+    Hook that returned a value, ``before`` or ``after``, on the result and that Hook's name
+    (its ``__name__``, or ``repr`` when it has none); whatever it raises propagates like a Hook
+    raising. A Hook that raises is logged and its exception re-raised for the adapter to turn
+    into the Client's error.
     """
     result: R | None = None
     for fn in code.hooks("before", call):
         answer = await _invoke(fn, call, call)
         if answer is not None:
             result = of(answer)
+            if check is not None:
+                check(result, _hook_name(fn))
             break
     if result is None:
         result = await forward(call)
@@ -506,6 +512,8 @@ async def run_call[R](
         answer = await _invoke(fn, call, call, result)
         if answer is not None:
             result = of(answer)
+            if check is not None:
+                check(result, _hook_name(fn))
     return cap(result) if cap is not None else result
 
 
@@ -516,6 +524,10 @@ async def _invoke(fn: Callable[..., Any], call: Call, *args: object) -> object:
         if inspect.isawaitable(answer):
             answer = await answer
     except Exception:
-        log.warning("Hook %s on %s raised", getattr(fn, "__name__", fn), call, exc_info=True)
+        log.warning("Hook %s on %s raised", _hook_name(fn), call, exc_info=True)
         raise
     return answer
+
+
+def _hook_name(fn: Callable[..., Any]) -> str:
+    return getattr(fn, "__name__", None) or repr(fn)

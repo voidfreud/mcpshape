@@ -163,6 +163,15 @@ and the Profile writes the common `mcpServers` + `{"type": "http", "url": ...}` 
   is served by `read()`. `ProxyPrompt.render` returns a `PromptResult` of `Message`s. A
   `call_tool_mcp` on the borrowed client answers a failing or unknown tool with an `isError`
   result carrying the message, not by raising.
+- What the Client does when structured content does not fit the output schema it was
+  advertised (checked 2026-09-08, 4.0.3 with `mcp` 2.x). `ClientSession._validate_tool_result`
+  (`mcp/client/session.py`) validates with `jsonschema` and raises
+  `RuntimeError(f"Invalid structured content returned by tool {name}: {error}")`, `error` being
+  the `jsonschema` validation failure, for structured content of the wrong shape; missing
+  structured content on a tool with an output schema is the separate, already-pinned
+  `"...did not return structured content"` `RuntimeError`. Both are the Client's own check,
+  ahead of the caller ever seeing the result, which is why a Hook's mismatched result has to be
+  turned into a tool error before it reaches the Client (#25).
 - What an stdio Upstream's child process gets (checked 2026-09-08, 4.0.3 with `mcp` 2.x). The
   SDK spawns it with `get_default_environment() | transport.env`, and that default is only
   HOME, LOGNAME, PATH, SHELL, TERM and USER. Nothing else of the Daemon's environment reaches

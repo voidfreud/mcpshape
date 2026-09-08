@@ -315,6 +315,21 @@ async def test_a_function_tool_advertises_a_wrapped_output_schema_the_client_che
         with pytest.raises(RuntimeError, match="did not return structured content"):
             await client.call_tool("greet", {"name": "Ann"})
 
+    class WrongShape(Tool):
+        async def run(self, arguments: dict[str, Any]) -> ToolResult:  # noqa: ARG002
+            return ToolResult(
+                content=[TextContent(type="text", text="hi")],
+                structured_content={"oops": "not a string"},
+            )
+
+    misshapen = FastMCP("misshapen")
+    misshapen.add_tool(
+        WrongShape(name="greet", parameters={"type": "object"}, output_schema=schema)
+    )
+    async with Client(misshapen) as client:
+        with pytest.raises(RuntimeError, match="Invalid structured content returned by tool greet"):
+            await client.call_tool("greet", {"name": "Ann"})
+
 
 async def test_a_proxy_template_reads_while_creating_and_a_cached_resource_serves_that() -> None:
     """The chain for a template read runs in ``create_resource``, and hands back a resource

@@ -30,6 +30,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal, cast
 
+import jsonschema
 import mcp_types
 from fastmcp import Client, FastMCP
 from fastmcp.client.transports import (
@@ -378,13 +379,14 @@ class _Runtime:
     def fail(self, reason: str) -> None:
         self.failure = reason
 
-    async def run[R](
+    async def run[R](  # noqa: PLR0913, PLR0917  # every one of these is state the call needs
         self,
         call: Call,
         forward: Callable[[Call], Awaitable[R]],
         of: Callable[[object], R],
         error: type[FastMCPError],
         cap: Callable[[R], R] | None = None,
+        check: Callable[[R, str], None] | None = None,
     ) -> R:
         """``call`` through the Hooks, with user failures turned into ``error`` for the Client."""
         if self.failure is not None:
@@ -392,7 +394,7 @@ class _Runtime:
             raise error(msg, log_level=logging.WARNING)
         with hooks.bound(self.handle):
             try:
-                return await hooks.run_call(self.code, call, forward, of, cap)
+                return await hooks.run_call(self.code, call, forward, of, cap, check)
             except FastMCPError:
                 raise
             except Exception as exc:
@@ -438,7 +440,12 @@ class _CuratedTool(ProxyTool):
 
         call = Call("tool", self._origin, self._arguments.to_catalog(arguments))
         result = await self._runtime.run(
-            call, forward, hooks.ToolResult.of, ToolError, _capped_output(self._output_cap)
+            call,
+            forward,
+            hooks.ToolResult.of,
+            ToolError,
+            _capped_output(self._output_cap),
+            _schema_check(self._origin, self.output_schema),
         )
         if result.is_error:
             raise ToolError(result.text or "the Upstream reported an error")
@@ -566,7 +573,12 @@ class _VirtualTool(FunctionTool):
 
         call = Call("tool", self.name, dict(arguments))
         result = await self._runtime.run(
-            call, forward, hooks.ToolResult.of, ToolError, _capped_output(self._output_cap)
+            call,
+            forward,
+            hooks.ToolResult.of,
+            ToolError,
+            _capped_output(self._output_cap),
+            _schema_check(self.name, self.output_schema),
         )
         return _to_tool_result(result, self.output_schema)
 
@@ -614,6 +626,46 @@ def _loaded(text: str, fallback: object) -> object:
         return json.loads(text)
     except ValueError:
         return fallback
+
+
+def _schema_check(
+    tool: str, schema: dict[str, Any] | None
+) -> Callable[[hooks.ToolResult, str], None] | None:
+    """What a Hook's result must satisfy: the tool's output schema, when it has one.
+
+    ``doctor`` cannot know what a Hook returns, so this is the check: it runs on every result a
+    ``before`` or ``after`` Hook hands back, computes the structured content the Client would be
+    sent (``_structured``), and turns a mismatch into a tool error naming the Hook, the tool,
+    and what the schema expects, instead of letting the Client's own validator refuse the call.
+    """
+    if not schema:
+        return None
+
+    def check(result: hooks.ToolResult, hook_name: str) -> None:
+        if result.is_error:
+            return
+        structured = _structured(result, schema)
+        try:
+            jsonschema.validate(structured, schema)
+        except jsonschema.ValidationError as exc:
+            msg = (
+                f"Hook {hook_name} on tool {tool} returned a result that does not fit its "
+                f"output schema: {exc.message}; the schema expects {_schema_expectation(schema)}"
+            )
+            log.warning(msg)
+            raise ToolError(msg, log_level=logging.WARNING) from exc
+
+    return check
+
+
+def _schema_expectation(schema: dict[str, Any]) -> str:
+    """What the schema wants, in the glossary's words, for the tool error message."""
+    if WRAPPED in schema:
+        properties = cast("dict[str, dict[str, Any]]", schema.get("properties") or {})
+        wrapped = properties.get("result") or {}
+        return f"a single {wrapped.get('type', 'value')} value"
+    required = cast("list[str]", schema.get("required") or [])
+    return f"a JSON object with {', '.join(required)}" if required else "a JSON object"
 
 
 def _resource_result_of(read: str | bytes | ResourceResult) -> hooks.ResourceResult:

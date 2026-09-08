@@ -61,9 +61,15 @@ def tracker() -> tuple[FastMCP[Any], Received]:
         received.append(("triage", {"name": name}))
         return f"Triage {name}"
 
+    def stats() -> dict[str, int]:
+        """How many issues are open and closed."""
+        received.append(("stats", {}))
+        return {"open": 2, "closed": 1}
+
     server.tool(create_issue)
     server.tool(close_issue)
     server.tool(explode)
+    server.tool(stats)
     server.resource("issues://open")(open_issues)
     server.resource("issues://{id}")(issue)
     server.prompt(triage)
@@ -372,6 +378,83 @@ async def test_a_short_circuited_result_reaches_the_after_hook_as_a_success(
         result = await client.call_tool("explode", {})
 
     assert result.data == "is_error=False: refused before reaching the upstream"
+
+
+async def test_an_after_hook_result_that_does_not_fit_the_schema_fails_at_the_proxy(
+    config_dir: ConfigDir, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Settled in #25: the Proxy's own error, naming the Hook and the tool, not the Client's."""
+    server, _ = tracker()
+    await synced(config_dir, server)
+    user_code(
+        config_dir,
+        """
+        @hook.after("create_issue")
+        def reshape(call, result):
+            return {"oops": "not a string"}
+        """,
+    )
+
+    with caplog.at_level(logging.WARNING, logger="mcpshape"):
+        async with running_daemon(config_dir) as daemon, daemon.client("/issues/mcp") as client:
+            result = await client.call_tool("create_issue", {"title": "Bug"}, raise_on_error=False)
+
+    text = error_text(result)
+    assert "reshape" in text
+    assert "create_issue" in text
+    assert "string" in text
+    lines = [record.getMessage() for record in caplog.records if "reshape" in record.getMessage()]
+    assert len(lines) == 1
+    assert "create_issue" in lines[0]
+
+
+async def test_a_before_hook_short_circuit_that_does_not_fit_the_schema_fails_at_the_proxy(
+    config_dir: ConfigDir,
+) -> None:
+    server, _ = tracker()
+    await synced(config_dir, server)
+    user_code(
+        config_dir,
+        """
+        @hook.before("create_issue")
+        def refuse(call):
+            return {"oops": "not a string"}
+        """,
+    )
+
+    async with running_daemon(config_dir) as daemon, daemon.client("/issues/mcp") as client:
+        result = await client.call_tool("create_issue", {"title": "Bug"}, raise_on_error=False)
+
+    text = error_text(result)
+    assert "refuse" in text
+    assert "create_issue" in text
+    assert "string" in text
+
+
+async def test_an_after_hook_result_that_fits_an_object_schema_reaches_the_client(
+    config_dir: ConfigDir,
+) -> None:
+    server, _ = tracker()
+    await synced(config_dir, server)
+    user_code(
+        config_dir,
+        """
+        @hook.after("stats")
+        def relabel(call, result):
+            return {"open": 5, "closed": 9}
+        """,
+    )
+
+    async with running_daemon(config_dir) as daemon, daemon.client("/issues/mcp") as client:
+        result = await client.call_tool("stats", {})
+
+    assert result.structured_content == {"open": 5, "closed": 9}
+
+
+# An error result is never checked against the schema: covered already by
+# test_an_after_hook_rewrites_an_upstream_error_into_a_readable_message (#24), which sets
+# ``result.text`` to plain, non-JSON text on an ``is_error`` result and gets that exact text
+# back at the Client. Nothing added here.
 
 
 # --- resource and prompt Hooks -----------------------------------------------------------------
