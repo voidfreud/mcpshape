@@ -256,7 +256,14 @@ and the Profile writes the common `mcpServers` + `{"type": "http", "url": ...}` 
   new connect ends with `SSE stream ended without a response`, from another process too, while
   a modern-era `Client` and an in-memory `ProxyClient` still work (checked 2026-09-08, 4.0.3).
   mcpshape's Upstream client is a `ProxyClient`, which is legacy-era, so a test that kills an
-  HTTP Upstream serves it from a child process instead of in-process uvicorn.
+  HTTP Upstream serves it from a child process instead of in-process uvicorn. A server that is
+  merely stopped is at the same risk when a session is still open at that moment, which a slow
+  runner makes likely (#76, seen on macOS CI): FastMCP terminates live transports when its
+  lifespan exits, reading `session_manager._server_instances` on the app it mounts at its MCP
+  path, but uvicorn stops the server before that lifespan exits. A closed client's session
+  stays in that dict marked `is_terminated`, so what is open is what is not terminated; the
+  seam waits for every session to be terminated, and terminates what lingers, before stopping
+  any in-process server (checked 2026-09-08, 4.0.3; pinned in `tests/test_fastmcp_contract.py`).
 - The MCP SDK's OAuth client writes the dynamic client registration to its `TokenStorage`
   before any token set, at the start of a login (checked 2026-09-08, `mcp` 2.x behind
   FastMCP 4.0.3). So a token file's existence says a login started, not that it finished; the

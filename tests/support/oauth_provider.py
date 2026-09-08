@@ -31,7 +31,7 @@ from starlette.applications import Starlette
 from starlette.responses import JSONResponse, PlainTextResponse, RedirectResponse
 from starlette.routing import Mount, Route
 
-from tests.support.seam import free_port
+from tests.support.seam import drain_sessions, free_port
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
@@ -305,6 +305,7 @@ async def serving_provider(
             await _wait_for(port)
             yield provider
         finally:
+            await drain_sessions(provider.app)
             running.should_exit = True
             await serving
 

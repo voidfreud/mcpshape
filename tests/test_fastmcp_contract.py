@@ -48,7 +48,13 @@ from starlette.routing import Mount
 from tests.support import child_upstream
 from tests.support.asgi import asgi_client_factory
 from tests.support.oauth_provider import serving_provider
-from tests.support.seam import free_port, restartable_upstream, until
+from tests.support.seam import (
+    free_port,
+    open_sessions,
+    restartable_upstream,
+    session_managers,
+    until,
+)
 from tests.test_proxy_seam import calculator
 
 if TYPE_CHECKING:
@@ -93,6 +99,34 @@ async def test_create_proxy_forwards_to_a_streamable_http_backend() -> None:
     async with served.router.lifespan_context(served), Client(bridge) as client:
         assert [tool.name for tool in await client.list_tools()] == ["echo"]
         assert (await client.call_tool("echo", {"text": "hi"})).data == "hi"
+
+
+async def test_a_streamable_http_app_tracks_the_live_sessions_its_lifespan_terminates() -> None:
+    """What the seam's ``drain_sessions`` reads before stopping an in-process server (#76).
+
+    FastMCP sets a session manager on the app it mounts at its MCP path once its lifespan
+    runs, and that manager's ``_server_instances`` holds every session it has seen; a closed
+    client's session stays listed, marked terminated, so what is open is what is not.
+    """
+    served = echo_server().http_app(path="/mcp")
+    async with served.router.lifespan_context(served):
+        (manager,) = session_managers(served)
+        assert open_sessions(manager) == {}
+
+        transport = StreamableHttpTransport(
+            "http://contract/mcp",
+            httpx_client_factory=asgi_client_factory(served, "http://contract"),
+        )
+        client: ProxyClient[Any] = ProxyClient(transport)
+        async with client:
+            await client.list_tools()
+            assert len(open_sessions(manager)) == 1
+        for _ in range(50):
+            if not open_sessions(manager):
+                break
+            await asyncio.sleep(0.02)
+        assert open_sessions(manager) == {}, "a closed client's session is terminated"
+        assert len(manager._server_instances) == 1, "and still listed"  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
 
 
 async def test_http_app_serves_mcp_under_a_starlette_mount_with_its_own_lifespan() -> None:

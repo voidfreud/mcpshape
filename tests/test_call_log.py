@@ -182,14 +182,17 @@ async def test_rotation_under_the_global_cap(config_dir: ConfigDir) -> None:
 
     log_dir = config_dir.state / "log"
     calls_file = log_dir / "calls.jsonl"
-    assert calls_file.exists()
-    assert calls_file.stat().st_size < 4096
-    assert list(log_dir.glob("calls.jsonl.*"))
+    rotated = sorted(log_dir.glob("calls.jsonl.*"))
+    assert rotated, "150 records are more than one file's share of the cap"
     total = sum(path.stat().st_size for path in log_dir.iterdir() if path.is_file())
     assert total <= 16384
-
-    last_line = calls_file.read_text().splitlines()[-1]
-    last_record = json.loads(last_line)
+    # A file is rotated aside the moment it fills, and the next write starts the next one, so
+    # the latest record is in the current file, or in the newest rotated one when the 150th
+    # write was the one that filled it (#76): where it is depends on how many bytes a record
+    # took, and a slow runner's durations take more.
+    newest = calls_file if calls_file.exists() else log_dir / "calls.jsonl.1"
+    assert newest.stat().st_size <= 4096
+    last_record = json.loads(newest.read_text().splitlines()[-1])
     assert last_record["arguments"] == {"a": 149, "b": 1}
 
     ring_calls = answer["calls"]
