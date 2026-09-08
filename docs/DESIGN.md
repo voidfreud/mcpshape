@@ -79,6 +79,16 @@ Claude Code is the first and best-integrated Profile, never a special case in th
   so failures spread over a long life never end supervision (settled in #50). Past it the
   Upstream is `unavailable` with the reason, `daemon status` says the keeper stopped, and
   `daemon reload` starts a keeper again.
+- Settled in #46 and #62: the Daemon re-reads an Upstream file when it changes, checked on
+  every request as a Proxy's own files are (#10) and on `daemon reload`. A Cap edit is in
+  force on the next request to any of the Upstream's Proxies; a transport or lifecycle edit
+  connects again under the new settings, and that reconnect rescans, since what a changed
+  transport reaches may advertise something else; an Upstream file that cannot be read leaves
+  the connection on its last settings and marks every Proxy of it unhealthy with the reason.
+  An Upstream file that is gone retires the Upstream: its Proxies answer not found, its
+  connection is let go, it is no longer listed, and its state directory is never written
+  again, with a reconnect's rescan that finds the file gone dropping what it saw and removing
+  anything it wrote. `upstream rm` signals a running Daemon, so this happens at once.
 - Health of every Upstream and Proxy is shown by `ls`, `daemon status`, and the dashboard.
 
 ### Catalog and Drift

@@ -148,6 +148,15 @@ class _Link:
         self._open: AsyncExitStack | None = None
         self._client: Client[Any] | None = None
 
+    def retarget(self, upstream: Upstream) -> None:
+        """Aim at what the Upstream file now names, for the next open (#46).
+
+        Only ever called while the link is closed, since the connection is stopped first;
+        ``close`` reads neither of these, so nothing in flight can see them change.
+        """
+        self.upstream = upstream
+        self.transport = upstream.transport
+
     @property
     def client(self) -> Client[Any]:
         if self._client is None:
@@ -274,9 +283,19 @@ class UpstreamConnection:
         """The start-up scan reached nothing, so the first connect rescans (#57)."""
         self._connection.unscanned()
 
-    def running(self) -> AbstractAsyncContextManager[None]:
-        """Warm, time, and finally let the connection go, for the life of the Daemon."""
-        return self._connection.running()
+    async def reconfigure(self, upstream: Upstream) -> None:
+        """Connect again to what the Upstream file now says, transport and all (#46)."""
+        self._link.retarget(upstream)
+        self._lifecycle = upstream.lifecycle
+        await self._connection.reconfigure(upstream.lifecycle)
+
+    async def start(self) -> None:
+        """Start supervising the connection, warming it when the Upstream is ``warm``."""
+        await self._connection.start()
+
+    async def stop(self) -> None:
+        """Let the connection go and stop supervising it."""
+        await self._connection.stop()
 
     async def client(self) -> Client[Any]:
         try:

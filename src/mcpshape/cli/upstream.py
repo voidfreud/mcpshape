@@ -23,7 +23,7 @@ from mcpshape.cli.common import (
     state,
 )
 from mcpshape.cli.listing import print_upstreams, proxy_url, toml_file
-from mcpshape.cli.live import connect_upstream, read_live
+from mcpshape.cli.live import connect_upstream, read_live, reload_daemon
 from mcpshape.model import HttpTransport, SseTransport, StdioTransport, Transport, Upstream
 from mcpshape.names import check_name
 from mcpshape.profiles import clients_needing_reconnect
@@ -435,6 +435,8 @@ def rm(ctx: typer.Context, name: NameArg, *, yes: YesOpt = False) -> None:
         config.remove_upstream(config_dir, name)
         catalog.forget(state_dir, name)
         token_store.forget(state_dir, name)
+    # a running Daemon holds the Upstream until it re-reads the file, so tell it now (#62)
+    reload_daemon(config_dir)
     console.print(f"Removed Upstream [bold]{name}[/bold]")
 
 
