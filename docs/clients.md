@@ -65,8 +65,8 @@ data for Client Profiles. Checked 2026-09-06/07 against primary documentation.
     directory, sibling to the top-level `mcpServers` the `user` scope writes.
     (code.claude.com/docs/en/mcp)
   - Claude Desktop for Linux exists as a beta (`code.claude.com/docs/en/desktop-linux`,
-    apt-installed on Ubuntu/Debian), but no primary source — that page, the install and MCP
-    help-center articles, or the enterprise-configuration article — documents a config file
+    apt-installed on Ubuntu/Debian), but no primary source (that page, the install and MCP
+    help-center articles, or the enterprise-configuration article) documents a config file
     path for `claude_desktop_config.json` on Linux; only macOS's path is documented. Not added
     to the Claude Desktop Profile.
   - Goose and Continue stay YAML-only: mcpshape carries no YAML dependency for a listing, so
