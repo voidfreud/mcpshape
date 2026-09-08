@@ -213,7 +213,7 @@ class _Proxy:
             name,
         )
         self._global_caps = global_caps
-        self._stamp: tuple[tuple[int, int] | None, ...] | None = None
+        self._stamp: tuple[_StampEntry, ...] | None = None
         self._connection = connection
         self._lock = asyncio.Lock()
         self._held: _Held | None = None
@@ -240,10 +240,12 @@ class _Proxy:
 
         This is the file watching: the stamps are checked when a request comes in, so a
         change is served on the next request after it, the affected Proxy alone, and no
-        watcher runs between requests.
+        watcher runs between requests. The fixed sources come first, then every ``*.py``
+        file in the Upstream's directory, sorted by name, so a helper appearing, changing,
+        or vanishing refreshes every Proxy of that Upstream too (#27).
         """
         async with self._lock:
-            stamp = tuple(_stamp(path) for path in self._sources)
+            stamp = (*(_stamp(path) for path in self._sources), *self._helper_stamps())
             if stamp == self._stamp:
                 return
             self._stamp = stamp
@@ -278,6 +280,19 @@ class _Proxy:
                 return
             await self._rebuild(exposed)
 
+    def _helper_stamps(self) -> tuple[tuple[str, _Stat], ...]:
+        """Every ``*.py`` file in the Upstream's directory, by name and stat, sorted by name.
+
+        The Upstream's directory is what ``import helpers`` resolves against (#27); a helper
+        appearing, changing, or vanishing has to be seen here too, not only the Proxy's own
+        fixed files.
+        """
+        try:
+            names = sorted(entry.name for entry in self._code_path.parent.glob("*.py"))
+        except OSError:
+            return ()
+        return tuple((name, _stamp(self._code_path.parent / name)) for name in names)
+
     async def _rebuild(self, exposed: Exposed) -> None:
         previous = self._held
         self.app = proxy_app(self._upstream, self._name, exposed, self._connection)
@@ -295,7 +310,11 @@ class _Proxy:
         await self.app.asgi(scope, receive, send)
 
 
-def _stamp(path: Path) -> tuple[int, int] | None:
+_Stat = tuple[int, int] | None
+_StampEntry = _Stat | tuple[str, _Stat]
+
+
+def _stamp(path: Path) -> _Stat:
     try:
         stat = path.stat()
     except OSError:

@@ -51,13 +51,13 @@ from collections.abc import Callable
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Protocol, cast, overload
 
 from mcpshape.catalog import Item
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Generator
-    from pathlib import Path
 
 log = logging.getLogger("mcpshape.hooks")
 
@@ -439,9 +439,20 @@ MODULE_PREFIX = "mcpshape_user."
 def load_user_code(path: Path, label: str) -> UserCode:
     """Import the Proxy ``label``'s Python file at ``path``; nothing there means no user code.
 
+    While the file loads, its Upstream's directory is importable, so ``import helpers`` finds
+    ``upstreams/<name>/helpers.py``: the directory goes on the front of ``sys.path`` for the
+    duration and comes off again after, in a ``finally``. A helper is dropped from
+    ``sys.modules`` first, so it is re-imported fresh on every load: every Proxy of the
+    Upstream re-reads its files when a helper changes, and a helper of one Upstream is never
+    seen by another Upstream's Proxy, since the module cache never keeps the wrong one bound
+    to a name two Upstreams both use. Bytecode caching is off for the duration too, so a
+    helper edited twice within the same second, which its cached ``.pyc`` would otherwise
+    consider unchanged, is still read fresh.
+
     Raises ``UserCodeError`` when the file cannot be loaded, for whatever reason: a syntax
-    error, an import that fails, an exception at module level. The Daemon never crashes on
-    user code, and ``doctor`` reports the same message.
+    error, an import that fails, an exception at module level, including one raised while
+    importing a helper. The Daemon never crashes on user code, and ``doctor`` reports the
+    same message.
     """
     if not path.is_file():
         return UserCode()
@@ -454,6 +465,10 @@ def load_user_code(path: Path, label: str) -> UserCode:
     code = UserCode()
     token = _loading.set(code)
     sys.modules[name] = module
+    upstream_dir = str(path.parent)
+    _drop_stale_helpers(path.parent.parent.resolve())
+    sys.path.insert(0, upstream_dir)
+    dont_write_bytecode, sys.dont_write_bytecode = sys.dont_write_bytecode, True
     try:
         spec.loader.exec_module(module)
     except Exception as exc:
@@ -461,8 +476,33 @@ def load_user_code(path: Path, label: str) -> UserCode:
         formatted = "".join(traceback.format_exception(exc))
         raise UserCodeError(_summary(path, exc), formatted) from exc
     finally:
+        sys.path.remove(upstream_dir)
+        sys.dont_write_bytecode = dont_write_bytecode
         _loading.reset(token)
     return code
+
+
+def _drop_stale_helpers(upstreams_dir: Path) -> None:
+    """Forget every module already imported from under ``upstreams_dir``.
+
+    Import caches by module name, so a ``helpers`` module one Upstream's Proxy imported would
+    otherwise be handed straight back to another Upstream's Proxy, or to this same Proxy on a
+    later load after the file on disk changed. Dropping it here is what makes the next
+    ``import helpers`` read the file fresh, from whichever Upstream's directory is on
+    ``sys.path`` for this load.
+    """
+    for mod_name, module in list(sys.modules.items()):
+        if mod_name.startswith(MODULE_PREFIX):
+            continue
+        file = getattr(module, "__file__", None)
+        if not file:
+            continue
+        try:
+            resolved = Path(file).resolve()
+        except OSError:
+            continue
+        if upstreams_dir in resolved.parents:
+            del sys.modules[mod_name]
 
 
 def _summary(path: Path, exc: BaseException) -> str:

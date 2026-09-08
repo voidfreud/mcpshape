@@ -10,9 +10,11 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import sys
 import textwrap
 from typing import TYPE_CHECKING, Any
 
+import pytest
 from fastmcp import FastMCP
 from mcp_types import TextContent, TextResourceContents
 
@@ -20,12 +22,30 @@ from tests.support.seam import run_cli, running_daemon, serving_daemon
 from tests.test_overrides import curate, synced
 
 if TYPE_CHECKING:
-    import pytest
+    from collections.abc import Generator
+
     from fastmcp.client.client import CallToolResult
 
     from tests.support.seam import ConfigDir
 
 Received = list[tuple[str, dict[str, Any]]]
+
+
+@pytest.fixture(autouse=True)
+def _no_stale_helper_modules() -> Generator[None]:  # pyright: ignore[reportUnusedFunction]  # pytest autouse
+    """Undo Python's own module cache between tests.
+
+    A Proxy's ``import helpers`` caches by the bare name ``helpers``, which is only ever
+    safe within one Daemon's lifetime: its config directory, and so its Upstreams'
+    directories, never change while it runs, which is what ``load_user_code`` relies on to
+    know a cached ``helpers`` is stale. Tests run many temp config directories in one
+    process, so without this a later test's ``import helpers`` could be handed an earlier
+    test's now-unrelated module of the same name.
+    """
+    before = set(sys.modules)
+    yield
+    for name in set(sys.modules) - before:
+        sys.modules.pop(name, None)
 
 
 def tracker() -> tuple[FastMCP[Any], Received]:
@@ -85,6 +105,12 @@ def user_code(
         "from mcpshape import hook, tool, upstream, Message, UpstreamError\n"
         + textwrap.dedent(text)
     )
+
+
+def helper_code(config_dir: ConfigDir, text: str, upstream: str = "issues") -> None:
+    """Write ``helpers.py`` next to the Upstream's Proxy files, as a user would."""
+    path = config_dir.path / "upstreams" / upstream / "helpers.py"
+    path.write_text(textwrap.dedent(text))
 
 
 def text_of(result: CallToolResult) -> str:
@@ -884,3 +910,163 @@ def test_doctor_loads_user_files_and_reports_the_broken_and_the_orphaned(
     assert "SyntaxError" in result.output
     assert "orphaned Hook" in result.output
     assert "gone" in result.output
+
+
+# --- a Proxy file imports a helper next to it (#27) ---------------------------------------------
+
+
+async def test_two_proxies_of_one_upstream_both_import_the_same_helper(
+    config_dir: ConfigDir,
+) -> None:
+    server, received = tracker()
+    await synced(config_dir, server)
+    run_cli(config_dir, "proxy", "new", "issues/review")
+    helper_code(config_dir, "TAG = 'proxied'\n")
+    hook_body = """
+        import helpers
+
+        @hook.before("create_issue")
+        def label(call):
+            call.args["labels"] = [*(call.args.get("labels") or []), helpers.TAG]
+        """
+    user_code(config_dir, hook_body)
+    user_code(config_dir, hook_body, proxy="review")
+
+    async with running_daemon(config_dir) as daemon:
+        async with daemon.client("/issues/mcp") as client:
+            await client.call_tool("create_issue", {"title": "Bug", "labels": ["p1"]})
+        async with daemon.client("/issues/review/mcp") as client:
+            await client.call_tool("create_issue", {"title": "Bug2", "labels": ["p2"]})
+
+    assert received == [
+        ("create_issue", {"title": "Bug", "labels": ["p1", "proxied"]}),
+        ("create_issue", {"title": "Bug2", "labels": ["p2", "proxied"]}),
+    ]
+
+
+async def test_editing_a_helper_alone_changes_both_proxies_on_the_next_request(
+    config_dir: ConfigDir,
+) -> None:
+    server, received = tracker()
+    await synced(config_dir, server)
+    run_cli(config_dir, "proxy", "new", "issues/review")
+    helper_code(config_dir, "TAG = 'v1'\n")
+    hook_body = """
+        import helpers
+
+        @hook.before("create_issue")
+        def label(call):
+            call.args["labels"] = [helpers.TAG]
+        """
+    user_code(config_dir, hook_body)
+    user_code(config_dir, hook_body, proxy="review")
+
+    async with running_daemon(config_dir) as daemon:
+        async with daemon.client("/issues/mcp") as client:
+            await client.call_tool("create_issue", {"title": "A"})
+        async with daemon.client("/issues/review/mcp") as client:
+            await client.call_tool("create_issue", {"title": "B"})
+
+        await asyncio.sleep(0.01)  # a new mtime, on file systems that count in whole seconds
+        helper_code(config_dir, "TAG = 'v2'\n")
+
+        async with daemon.client("/issues/mcp") as client:
+            await client.call_tool("create_issue", {"title": "C"})
+        async with daemon.client("/issues/review/mcp") as client:
+            await client.call_tool("create_issue", {"title": "D"})
+
+    assert received == [
+        ("create_issue", {"title": "A", "labels": ["v1"]}),
+        ("create_issue", {"title": "B", "labels": ["v1"]}),
+        ("create_issue", {"title": "C", "labels": ["v2"]}),
+        ("create_issue", {"title": "D", "labels": ["v2"]}),
+    ]
+
+
+async def test_a_helper_of_one_upstream_is_never_seen_by_anothers_proxy(
+    config_dir: ConfigDir,
+) -> None:
+    issues_server, issues_received = tracker()
+    await synced(config_dir, issues_server)
+
+    calc_server = FastMCP[Any]("calc")
+    calc_received: Received = []
+
+    def add(a: int, b: int) -> int:
+        calc_received.append(("add", {"a": a, "b": b}))
+        return a + b
+
+    calc_server.tool(add)
+    config_dir.add_memory_upstream("calc", calc_server)
+    synced_calc = await asyncio.to_thread(run_cli, config_dir, "upstream", "sync", "calc")
+    assert synced_calc.exit_code == 0, synced_calc.output
+
+    helper_code(config_dir, "TAG = 'issues-helper'\n", upstream="issues")
+    helper_code(config_dir, "OFFSET = 1000\n", upstream="calc")
+    user_code(
+        config_dir,
+        """
+        import helpers
+
+        @hook.before("create_issue")
+        def label(call):
+            call.args["labels"] = [helpers.TAG]
+        """,
+        upstream="issues",
+    )
+    user_code(
+        config_dir,
+        """
+        import helpers
+
+        @hook.before("add")
+        def offset(call):
+            call.args["a"] += helpers.OFFSET
+        """,
+        upstream="calc",
+    )
+
+    async with running_daemon(config_dir) as daemon:
+        async with daemon.client("/issues/mcp") as client:
+            await client.call_tool("create_issue", {"title": "Bug"})
+        async with daemon.client("/calc/mcp") as client:
+            await client.call_tool("add", {"a": 1, "b": 2})
+
+    assert issues_received == [("create_issue", {"title": "Bug", "labels": ["issues-helper"]})]
+    assert calc_received == [("add", {"a": 1001, "b": 2})]
+
+
+def test_doctor_loads_a_helper_import_without_a_module_not_found_error(
+    config_dir: ConfigDir,
+) -> None:
+    server, _ = tracker()
+    asyncio.run(synced(config_dir, server))
+    helper_code(config_dir, "TAG = 'ok'\n")
+    user_code(
+        config_dir,
+        """
+        import helpers
+
+        @hook.before("create_issue")
+        def label(call):
+            call.args["labels"] = [helpers.TAG]
+        """,
+    )
+
+    result = run_cli(config_dir, "doctor")
+
+    assert result.exit_code == 0, result.output
+    assert "ModuleNotFoundError" not in result.output
+
+
+def test_doctor_reports_a_helper_that_raises_while_loading(config_dir: ConfigDir) -> None:
+    server, _ = tracker()
+    asyncio.run(synced(config_dir, server))
+    helper_code(config_dir, "raise ValueError('boom')\n")
+    user_code(config_dir, "import helpers\n")
+
+    result = run_cli(config_dir, "doctor")
+
+    assert result.exit_code == 1, result.output
+    assert "ValueError" in result.output
+    assert "boom" in result.output
