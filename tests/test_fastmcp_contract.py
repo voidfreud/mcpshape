@@ -106,7 +106,9 @@ async def test_a_streamable_http_app_tracks_the_live_sessions_its_lifespan_termi
 
     FastMCP sets a session manager on the app it mounts at its MCP path once its lifespan
     runs, and that manager's ``_server_instances`` holds every session it has seen; a closed
-    client's session stays listed, marked terminated, so what is open is what is not.
+    client's session stays listed, marked terminated, so what is open is what is not. A
+    modern-era ``Client`` opens the session here: what is pinned holds for any client, and a
+    legacy-era session against an in-process app is the very thing #76 is about.
     """
     served = echo_server().http_app(path="/mcp")
     async with served.router.lifespan_context(served):
@@ -117,8 +119,7 @@ async def test_a_streamable_http_app_tracks_the_live_sessions_its_lifespan_termi
             "http://contract/mcp",
             httpx_client_factory=asgi_client_factory(served, "http://contract"),
         )
-        client: ProxyClient[Any] = ProxyClient(transport)
-        async with client:
+        async with Client(transport) as client:
             await client.list_tools()
             assert len(open_sessions(manager)) == 1
         for _ in range(50):
