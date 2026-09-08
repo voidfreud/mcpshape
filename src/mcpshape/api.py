@@ -245,17 +245,18 @@ class _Login:
     Upstream is scanned, since the Daemon's start-up scan had nothing to log in with, and
     then made to connect at once instead of waiting out its backoff. A login nobody finishes
     is given up after ``CALLBACK_TIMEOUT``, the browser flow's own patience, so a fresh one
-    can start; a start while one is pending joins it.
+    can start; a start while one is pending joins it. The Upstream is read from its owner when
+    a login starts, so an edited file is what the login runs against (#46).
     """
 
     def __init__(
         self,
-        upstream: Upstream,
+        served: ServedLike,
         secrets: Secrets,
         tokens: Tokens,
         on_success: Callable[[], Awaitable[None]],
     ) -> None:
-        self._upstream = upstream
+        self._served = served
         self._secrets = secrets
         self._tokens = tokens
         self._on_success = on_success
@@ -263,6 +264,10 @@ class _Login:
         self._opened = asyncio.Event()
         self.url: str | None = None
         self.error: str | None = None
+
+    @property
+    def _upstream(self) -> Upstream:
+        return self._served.upstream
 
     def state(self) -> LoginState:
         pending = self._task is not None and not self._task.done()
@@ -383,7 +388,7 @@ class Management:
             error=status.error,
             supervised=status.supervised,
             missing_command=self._missing_command(served.upstream),
-            proxies=[await proxy.state() for proxy in served.proxies.values()],
+            proxies=[await proxy.state() for proxy in list(served.proxies.values())],
         )
 
     def _missing_command(self, upstream: Upstream) -> str | None:
@@ -512,7 +517,7 @@ class Management:
         if cached is not None:
             await cached[1].close()
         login = _Login(
-            upstream,
+            served,
             self.secrets,
             Tokens(self.state_dir, upstream.name),
             partial(self._logged_in, served),

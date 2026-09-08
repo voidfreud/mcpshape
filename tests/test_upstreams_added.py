@@ -17,8 +17,7 @@ from typing import TYPE_CHECKING, Any
 from fastmcp import FastMCP
 
 from mcpshape.api import RELOAD_PATH, UPSTREAMS_PATH
-from tests.support.asgi import asgi_client_factory
-from tests.support.seam import BASE_URL, free_port, run_cli, running_daemon
+from tests.support.seam import free_port, run_cli, running_daemon
 from tests.test_catalog_drift import notes
 from tests.test_proxy_seam import calculator
 from tests.test_upstream_files import daemon_log, until_unlisted
@@ -203,18 +202,24 @@ async def test_paths_beside_a_proxy_answer_as_they_did_with_a_mount_per_proxy(
     config_dir.add_memory_upstream("calc", calculator())
     config_dir.add_proxy("calc", "review")
 
-    async with (
-        running_daemon(config_dir) as daemon,
-        asgi_client_factory(daemon.app, BASE_URL)() as http,
-    ):
-        default = await http.post(f"{BASE_URL}/calc/mcp/")
-        named = await http.post(f"{BASE_URL}/calc/review/mcp/")
+    async with running_daemon(config_dir) as daemon:
+        default = await daemon.request("POST", "/calc/mcp/")
+        named = await daemon.request("POST", "/calc/review/mcp/")
         assert default.status_code == named.status_code
         assert default.status_code != 404
 
-        unknown_api = await http.post(f"{BASE_URL}/api/nope")
+        unknown_api = await daemon.request("POST", "/api/nope")
         assert unknown_api.status_code == 404
         assert "Upstream" not in unknown_api.text
+
+        # upstream.toml is a TOML file in the directory too, and is not a Proxy
+        code, answer = await daemon.api("POST", "/calc/upstream/mcp")
+        assert code == 404
+        assert answer == {"error": "no Proxy calc/upstream"}
+        assert [proxy["name"] for proxy in (await daemon.upstream("calc"))["proxies"]] == [
+            "default",
+            "review",
+        ]
 
 
 async def test_an_added_upstream_whose_file_cannot_be_read_is_not_served(

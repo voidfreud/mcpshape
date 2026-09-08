@@ -48,6 +48,7 @@ from mcpshape.config import (
     UPSTREAMS_DIR,
     ConfigError,
     DaemonSettings,
+    list_proxies,
     load_proxy,
     load_settings,
     load_upstream,
@@ -212,10 +213,10 @@ class _Proxy:
         return self._owner.upstream
 
     async def start(self) -> None:
-        """Idempotent for the app currently held: a Proxy adopted during its Upstream's
-        launch is already held by the time the launch's own ``start()`` reaches it (#67).
-        ``_rebuild`` clears ``self._held`` first, so a changed server name still gets a
-        fresh hold on its new app.
+        """Idempotent for the app currently held: a status look during the Upstream's launch
+        refreshes this Proxy, and a changed server name then rebuilds and holds its app before
+        the launch's own ``start()`` reaches it (#67). ``_rebuild`` clears ``self._held``
+        first, so a rebuilt app still gets a fresh hold.
         """
         if self._held is not None:
             return
@@ -496,7 +497,7 @@ class _Served:
 
     async def start(self) -> None:
         """Start every Proxy, then supervise the connection: what the launch task calls."""
-        for proxy in self.proxies.values():
+        for proxy in list(self.proxies.values()):
             await proxy.start()
         await self.connection.start()
 
@@ -509,7 +510,7 @@ class _Served:
                 await launch
         await self._settle_retirement()
         await self.connection.stop()
-        for proxy in self.proxies.values():
+        for proxy in list(self.proxies.values()):
             await proxy.stop()
 
     async def reload(self) -> None:
@@ -520,7 +521,7 @@ class _Served:
         await self.refresh()
         if self.retired:
             return
-        for proxy in self.proxies.values():
+        for proxy in list(self.proxies.values()):
             await proxy.reload()
         await self.connection.reload()
 
@@ -591,12 +592,14 @@ class _Served:
         """The held Proxy called ``name``, adopting it now if its file appeared since (#67).
 
         The route's fallback so a request never depends on the directory stamp alone: a Proxy
-        added and requested before any other look at the Upstream is still found.
+        added and requested before any other look at the Upstream is still found. Only a name
+        the directory lists as a Proxy counts: ``upstream.toml`` is a TOML file too, and is not
+        one.
         """
         held = self.proxies.get(name)
         if held is not None:
             return held
-        if not proxy_file(self._config_dir, self._name, name).is_file():
+        if name not in list_proxies(self._config_dir, self._name):
             return None
         async with self._lock:
             held = self.proxies.get(name)
@@ -643,7 +646,7 @@ class _Served:
         self.retired = True
         log.info("Upstream %s was removed; letting its connection go", self._name)
         await self.connection.stop()
-        for proxy in self.proxies.values():
+        for proxy in list(self.proxies.values()):
             await proxy.stop()
 
     async def _settle_retirement(self) -> None:
@@ -769,8 +772,9 @@ class _Upstreams:
         self._held = held
 
     def held(self) -> Mapping[str, _Served]:
-        """What is held now, retired owners included: what ``Management`` filters."""
-        return self._held
+        """What is held now, retired owners included, as a snapshot: a lookup can add an
+        owner while the caller is still awaiting something for another (#67)."""
+        return dict(self._held)
 
     async def lookup(self, name: str) -> _Served | None:
         """The Upstream called ``name``, adopting it now if its directory appeared since.
@@ -854,13 +858,14 @@ class _Upstreams:
         Awaiting the launch task itself, not just ``ready()``, is what lets an exception at
         Daemon start still propagate as it did before #67.
         """
-        for owner in self._held.values():
+        owners = list(self._held.values())
+        for owner in owners:
             owner.launch()
-        await asyncio.gather(*(owner.launched() for owner in self._held.values()))
+        await asyncio.gather(*(owner.launched() for owner in owners))
 
     async def stop(self) -> None:
         """Stop every held owner, in order: the Daemon's lifespan again."""
-        for owner in self._held.values():
+        for owner in list(self._held.values()):
             await owner.stop()
 
 
@@ -888,8 +893,9 @@ def build_app(
     ``/<upstream>/mcp``; live state at ``/api/status``; ``/api/shutdown`` stops it. ``clock``
     is what every lifecycle timer runs on, so tests advance time instead of waiting for it. A
     Proxy whose file sets ``port`` is also mounted alone on that additional listener, in
-    ``.extra``. ``token``, when given, requires ``Authorization: Bearer <token>`` on every
-    request to any of them.
+    ``.extra``; the ports are read here, at build, so one set later waits for a restart.
+    ``token``, when given, requires ``Authorization: Bearer <token>`` on every request to any
+    of them.
     """
     running_clock = clock or SystemClock()
     loaded = load_upstreams(config_dir)  # raises on a broken file, so the build still fails
@@ -925,10 +931,10 @@ def build_app(
 
     @contextlib.asynccontextmanager
     async def lifespan(_app: Starlette) -> AsyncGenerator[None]:
-        await upstreams.start()
         async with contextlib.AsyncExitStack() as stack:
             stack.push_async_callback(management.close)
             stack.push_async_callback(upstreams.stop)
+            await upstreams.start()  # a launch that fails here unwinds what started already
             yield
 
     main = Starlette(routes=routes, lifespan=lifespan, middleware=_middleware(token))
