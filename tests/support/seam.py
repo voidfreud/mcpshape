@@ -18,7 +18,6 @@ from typing import TYPE_CHECKING, Any
 
 import httpx2
 import pytest
-import uvicorn
 from fastmcp import Client, FastMCP
 from fastmcp.client.transports import StreamableHttpTransport
 from typer.testing import CliRunner, Result  # annotated at runtime
@@ -27,8 +26,9 @@ from mcpshape.api import STATUS_PATH
 from mcpshape.cli import app
 from mcpshape.config import memory_upstreams_allowed
 from mcpshape.daemon import build_app, serve_all
-from tests.support import child_upstream, upstreams
+from tests.support import child_server, child_upstream, upstreams
 from tests.support.asgi import asgi_client_factory
+from tests.support.child_server import factory_path
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Callable, Generator, Mapping, Sequence
@@ -349,26 +349,30 @@ async def serving_daemon(
 
 
 @contextlib.asynccontextmanager
-async def serving_upstream(server: FastMCP, transport: str = "http") -> AsyncGenerator[str]:
-    """Serve ``server`` on a loopback port as a real Upstream, and yield the URL it answers on.
+async def serving_upstream(
+    server: Callable[[], FastMCP[Any]], transport: str = "http"
+) -> AsyncGenerator[str]:
+    """Serve the server ``server`` builds from a child process as a real Upstream, and yield
+    the URL it answers on.
 
-    In-process, like everything else, but over a socket: a Streamable HTTP or legacy SSE
-    Upstream is reached by URL, which is the point of the test that uses it. An Upstream that
-    has to die while the Daemon is connected to it needs ``restartable_upstream`` instead.
+    Over a socket, like a Streamable HTTP or legacy SSE Upstream is reached by URL, which is
+    the point of the tests that use it, and from a child process, since a legacy-era session
+    against an in-process FastMCP HTTP server can leave the test process unable to serve that
+    era for the rest of the run (``docs/clients.md``, #76). An Upstream that has to die while
+    the Daemon is connected to it needs ``restartable_upstream`` instead.
     """
     port = free_port()
     path = "/mcp" if transport == "http" else "/sse"
-    app = server.http_app(path=path, transport=transport)  # pyright: ignore[reportArgumentType]  # the literal FastMCP takes
-    running = uvicorn.Server(
-        uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning", lifespan="on")
+    child = await asyncio.create_subprocess_exec(
+        *child_server.command(factory_path(server), transport, port), env=child_server.env()
     )
-    serving = asyncio.create_task(running.serve())
     try:
         await _wait_for_port(port)
         yield f"http://127.0.0.1:{port}{path}"
     finally:
-        running.should_exit = True
-        await serving
+        if child.returncode is None:
+            child.kill()
+            await child.wait()
 
 
 @dataclass

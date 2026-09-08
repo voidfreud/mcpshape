@@ -341,8 +341,10 @@ mcpshape doctor
 - Tests drive the system through one seam: a temp config directory, the Daemon app in-process,
   in-memory Upstreams, a FastMCP Client over ASGI, and the CLI via Typer's runner. Tests never
   import internal modules to assert on their state. Exceptions: the stdio shim (real subprocess),
-  real Upstream transports (`tests/test_real_transports.py`: a child process and a loopback
-  server behind the Daemon, since only those show one child shared by every Proxy and session),
+  real Upstream transports (`tests/test_real_transports.py` and the OAuth provider of
+  `tests/test_oauth.py`: loopback servers behind the Daemon, each a child process, since only
+  those show one child shared by every Proxy and session, and an in-process one poisons the
+  run for the legacy era, see `docs/clients.md`),
   autostart unit writers (golden files), the Daemon under a signal (`tests/test_daemon_ports.py`:
   a real process, since a signal cannot be sent to the test process itself), the Adapter
   contract tests,

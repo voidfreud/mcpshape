@@ -348,7 +348,7 @@ async def test_a_streamable_http_upstream_sleeps_wakes_and_is_let_go(
     """The lifecycle of #8, on an Upstream reached by URL instead of in memory."""
     clock = FakeClock()
 
-    async with serving_upstream(calculator()) as url:
+    async with serving_upstream(calculator) as url:
         config_dir.add_url_upstream("calc", url, "http", {"idle_timeout": 600})
         async with (
             running_daemon(config_dir, clock) as daemon,
@@ -368,7 +368,7 @@ async def test_a_streamable_http_upstream_sleeps_wakes_and_is_let_go(
 
 
 async def test_an_sse_upstream_is_reached_by_url(config_dir: ConfigDir) -> None:
-    async with serving_upstream(calculator(), "sse") as url:
+    async with serving_upstream(calculator, "sse") as url:
         config_dir.add_url_upstream("calc", url, "sse")
         async with running_daemon(config_dir) as daemon, daemon.client("/calc/mcp") as client:
             assert [tool.name for tool in await client.list_tools()] == ["add"]
@@ -378,7 +378,7 @@ async def test_an_sse_upstream_is_reached_by_url(config_dir: ConfigDir) -> None:
 
 async def test_a_url_upstream_that_is_not_there_fails_only_calls(config_dir: ConfigDir) -> None:
     message = "The Upstream is not up; nothing was written."
-    async with serving_upstream(calculator()) as url:
+    async with serving_upstream(calculator) as url:
         config_dir.add_url_upstream("calc", url, "http", {"unavailable_message": message})
         await cli(config_dir, "upstream", "sync", "calc")
 

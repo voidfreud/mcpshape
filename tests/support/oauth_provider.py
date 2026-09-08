@@ -18,23 +18,29 @@ counts what the provider saw, so a test can say that a refresh happened.
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import base64
 import contextlib
 import hashlib
+import json
 import secrets
+import sys
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+import httpx2
 import uvicorn
 from starlette.applications import Starlette
 from starlette.responses import JSONResponse, PlainTextResponse, RedirectResponse
 from starlette.routing import Mount, Route
 
+from tests.support.child_server import build, factory_path
+from tests.support.child_server import env as child_env
 from tests.support.seam import free_port
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator
+    from collections.abc import AsyncGenerator, Callable
 
     from fastmcp import FastMCP
     from starlette.requests import Request
@@ -42,6 +48,18 @@ if TYPE_CHECKING:
     from starlette.types import ASGIApp, Receive, Scope, Send
 
 MCP_PATH = "/mcp"
+CONTROL_PATH = "/_control"
+"""Where the test reaches the issuer from the parent process: read its state, set a field,
+approve a device code. Not part of any protocol."""
+SETTABLE = (
+    "token_ttl",
+    "refresh_accepted",
+    "device_offered",
+    "scopes_supported",
+    "names_scope",
+    "device_interval",
+)
+"""The issuer's settings, given to the child at start and settable from the test after."""
 DEVICE_GRANT = "urn:ietf:params:oauth:grant-type:device_code"
 USER_CODE = "WDJB-MJHT"
 """The code the user types at the provider. Fixed, so a test can look for it in the output."""
@@ -176,6 +194,8 @@ class Provider:
                 Route("/authorize", self._authorize),
                 Route("/token", self._token, methods=["POST"]),
                 Route("/device", self._device, methods=["POST"]),
+                Route(CONTROL_PATH, self._control_read),
+                Route(CONTROL_PATH, self._control_write, methods=["POST"]),
                 Mount(MCP_PATH, app=_Guarded(self._mcp, issuer)),
             ],
         )
@@ -183,6 +203,29 @@ class Provider:
     def lifespan(self) -> Any:  # noqa: ANN401  # FastMCP's lifespan context is its own type
         """The mounted MCP app's own lifespan, which the parent app must run."""
         return self._mcp.router.lifespan_context(self._mcp)
+
+    # --- the test's hand on the provider, from another process ---------------------------
+
+    async def _control_read(self, _request: Request) -> Response:
+        return JSONResponse(
+            {
+                **{name: getattr(self.issuer, name) for name in SETTABLE},
+                "refreshes": self.issuer.refreshes,
+                "registrations": self.issuer.registrations,
+                "issued": self.issuer.issued,
+                "awaiting_device": self.issuer.awaiting_device(),
+            }
+        )
+
+    async def _control_write(self, request: Request) -> Response:
+        asked: dict[str, Any] = await request.json()
+        for name, value in asked.get("set", {}).items():
+            if name not in SETTABLE:
+                return JSONResponse({"error": f"not settable: {name}"}, status_code=400)
+            setattr(self.issuer, name, value)
+        if asked.get("approve_device"):
+            self.issuer.approve_device()
+        return JSONResponse({"ok": True})
 
     async def _resource(self, _request: Request) -> Response:
         return JSONResponse({"resource": self.mcp_url, "authorization_servers": [self.base]})
@@ -287,26 +330,144 @@ def _challenge(verifier: str) -> str:
     return base64.urlsafe_b64encode(digest).decode().rstrip("=")
 
 
+class RemoteIssuer:
+    """The child's issuer as the test reaches it: the same names, over the control route.
+
+    A read asks the child; a write tells it. Each is one short request to a process of its
+    own, so it is done synchronously, as a test sets an attribute.
+    """
+
+    def __init__(self, base: str) -> None:
+        self._url = f"{base}{CONTROL_PATH}"
+        self._last: dict[str, Any] = {}
+        self._closed = False
+
+    def _read(self) -> dict[str, Any]:
+        if self._closed:
+            return self._last
+        with httpx2.Client() as http:
+            self._last = http.get(self._url).json()
+        return self._last
+
+    def close(self) -> None:
+        """Keep the issuer's last state, since a test reads it after the provider is gone,
+        as it read the in-process issuer's memory before (#76)."""
+        with contextlib.suppress(httpx2.HTTPError):
+            self._read()
+        self._closed = True
+
+    def _write(self, body: dict[str, Any]) -> None:
+        with httpx2.Client() as http:
+            http.post(self._url, json=body).raise_for_status()
+
+    @property
+    def refresh_accepted(self) -> bool:
+        return bool(self._read()["refresh_accepted"])
+
+    @refresh_accepted.setter
+    def refresh_accepted(self, value: bool) -> None:
+        self._write({"set": {"refresh_accepted": value}})
+
+    @property
+    def token_ttl(self) -> int:
+        return int(self._read()["token_ttl"])
+
+    @token_ttl.setter
+    def token_ttl(self, value: int) -> None:
+        self._write({"set": {"token_ttl": value}})
+
+    @property
+    def refreshes(self) -> int:
+        return int(self._read()["refreshes"])
+
+    @property
+    def registrations(self) -> int:
+        return int(self._read()["registrations"])
+
+    @property
+    def issued(self) -> list[str]:
+        return list(self._read()["issued"])
+
+    def awaiting_device(self) -> bool:
+        return bool(self._read()["awaiting_device"])
+
+    def approve_device(self) -> None:
+        self._write({"approve_device": True})
+
+
+@dataclass(frozen=True)
+class RemoteProvider:
+    """The provider running in its child process, as the test sees it."""
+
+    base: str
+    issuer: RemoteIssuer
+
+    @property
+    def mcp_url(self) -> str:
+        return f"{self.base}{MCP_PATH}"
+
+
+def _issuer_settings(issuer: Issuer) -> dict[str, Any]:
+    return {name: getattr(issuer, name) for name in SETTABLE}
+
+
 @contextlib.asynccontextmanager
 async def serving_provider(
-    server: FastMCP[Any], issuer: Issuer | None = None
-) -> AsyncGenerator[Provider]:
-    """Serve the provider and the Upstream it protects, and yield what it all runs on."""
+    server: Callable[[], FastMCP[Any]], issuer: Issuer | None = None
+) -> AsyncGenerator[RemoteProvider]:
+    """Serve the provider and the Upstream it protects from a child process, and yield what
+    the test reaches it by (#76).
+
+    ``server`` is the factory the child imports and calls; ``issuer`` is the state the child
+    starts with, reachable after through ``RemoteProvider.issuer``. A child, not this process:
+    a legacy-era session against an in-process FastMCP HTTP server can leave the test process
+    unable to serve that era for the rest of the run (``docs/clients.md``).
+    """
     port = free_port()
-    provider = Provider(port, server, issuer or Issuer())
+    child = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-m",
+        "tests.support.oauth_provider",
+        "--port",
+        str(port),
+        "--server",
+        factory_path(server),
+        "--issuer",
+        json.dumps(_issuer_settings(issuer or Issuer())),
+        env=child_env(),
+    )
+    remote = RemoteProvider(
+        base=f"http://127.0.0.1:{port}", issuer=RemoteIssuer(f"http://127.0.0.1:{port}")
+    )
+    try:
+        await _wait_for(port)
+        yield remote
+    finally:
+        await asyncio.to_thread(remote.issuer.close)
+        if child.returncode is None:
+            child.kill()
+            await child.wait()
+
+
+def main() -> None:
+    """The child: build the provider from the command line and serve it until killed."""
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--port", type=int, required=True)
+    parser.add_argument("--server", required=True)
+    parser.add_argument("--issuer", default="{}")
+    given = parser.parse_args()
+    provider = Provider(given.port, build(given.server), Issuer(**json.loads(given.issuer)))
     running = uvicorn.Server(
         uvicorn.Config(
-            provider.app, host="127.0.0.1", port=port, log_level="warning", lifespan="off"
+            provider.app, host="127.0.0.1", port=given.port, log_level="warning", lifespan="off"
         )
     )
-    async with provider.lifespan():
-        serving = asyncio.create_task(running.serve())
-        try:
-            await _wait_for(port)
-            yield provider
-        finally:
-            running.should_exit = True
-            await serving
+
+    async def serve() -> None:
+        async with provider.lifespan():
+            await running.serve()
+
+    asyncio.run(serve())
 
 
 async def _wait_for(port: int, attempts: int = 100) -> None:
@@ -321,3 +482,7 @@ async def _wait_for(port: int, attempts: int = 100) -> None:
         return
     msg = f"the fake provider never listened on port {port}"
     raise TimeoutError(msg)
+
+
+if __name__ == "__main__":
+    main()

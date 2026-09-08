@@ -255,8 +255,13 @@ and the Profile writes the common `mcpServers` + `{"type": "http", "url": ...}` 
   leaves every later FastMCP HTTP server in that process unable to serve the legacy era: each
   new connect ends with `SSE stream ended without a response`, from another process too, while
   a modern-era `Client` and an in-memory `ProxyClient` still work (checked 2026-09-08, 4.0.3).
-  mcpshape's Upstream client is a `ProxyClient`, which is legacy-era, so a test that kills an
-  HTTP Upstream serves it from a child process instead of in-process uvicorn.
+  mcpshape's Upstream client is a `ProxyClient`, which is legacy-era. The same failure was
+  seen on CI under load with no server killed at all, on both runners, always in the tests
+  whose loopback server ran in the test process and never in those served from a child (#76,
+  2026-09-08), so every FastMCP HTTP server a legacy-era client reaches in the tests, the
+  OAuth provider included, is served from a child process (`tests/support/child_server.py`,
+  `tests/support/oauth_provider.py`), and the provider's issuer is reached over a control
+  route.
 - The MCP SDK's OAuth client writes the dynamic client registration to its `TokenStorage`
   before any token set, at the start of a login (checked 2026-09-08, `mcp` 2.x behind
   FastMCP 4.0.3). So a token file's existence says a login started, not that it finished; the
