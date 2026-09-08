@@ -109,6 +109,10 @@ class UpstreamState(BaseModel):
     error: str | None = None
     supervised: bool = True
     """False once the keeper gave up on this Upstream, until a reload starts one (#50)."""
+    warm: bool = False
+    retry_in: float | None = None
+    """Seconds until a warm Upstream's keeper tries to connect again, while it is
+    ``unavailable``; nothing for a lazy one, whose next call is what tries again (#64)."""
     missing_command: str | None = None
     """The stdio command nothing on the Daemon's PATH is, when there is one (#48)."""
     proxies: list[ProxyState] = Field(default_factory=list[ProxyState])
@@ -387,6 +391,8 @@ class Management:
             seconds=round(status.seconds, 3),
             error=status.error,
             supervised=status.supervised,
+            warm=status.warm,
+            retry_in=None if status.retry_in is None else round(status.retry_in, 3),
             missing_command=self._missing_command(served.upstream),
             proxies=[await proxy.state() for proxy in list(served.proxies.values())],
         )

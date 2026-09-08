@@ -23,7 +23,7 @@ from mcpshape.cli.common import (
     state,
 )
 from mcpshape.cli.listing import print_upstreams, proxy_url, toml_file
-from mcpshape.cli.live import connect_upstream, read_live, reload_daemon
+from mcpshape.cli.live import connect_now, connect_upstream, read_live, reload_daemon
 from mcpshape.model import HttpTransport, SseTransport, StdioTransport, Transport, Upstream
 from mcpshape.names import check_name
 from mcpshape.profiles import clients_needing_reconnect
@@ -438,6 +438,22 @@ def rm(ctx: typer.Context, name: NameArg, *, yes: YesOpt = False) -> None:
     # a running Daemon holds the Upstream until it re-reads the file, so tell it now (#62)
     reload_daemon(config_dir)
     console.print(f"Removed Upstream [bold]{name}[/bold]")
+
+
+@app.command("connect", epilog=example("upstream connect github"))
+def connect(ctx: typer.Context, name: NameArg) -> None:
+    """Have a running Daemon try to connect an Upstream now, instead of waiting out its backoff."""
+    config_dir = state(ctx).config_dir
+    with reporting_errors():
+        config.load_upstream(config_dir, name)
+    connecting = connect_now(config_dir, name)
+    if connecting is None:
+        console.print(
+            f"Daemon not running, so nothing to connect now: [bold]{name}[/bold] connects "
+            "when it is first called. Start it with: mcpshape daemon up"
+        )
+        return
+    console.print(f"Upstream [bold]{name}[/bold] is {connecting}")
 
 
 app.command("scan", epilog=scanning.EPILOG)(scanning.scan)

@@ -128,6 +128,13 @@
           "title": "Ping Interval",
           "type": "number"
         },
+        "backoff_cap": {
+          "default": 1800.0,
+          "description": "The longest a warm Upstream waits between two connect attempts, in seconds; the wait doubles from one second up to this. A lazy Upstream never retries on its own.",
+          "exclusiveMinimum": 0,
+          "title": "Backoff Cap",
+          "type": "number"
+        },
         "unavailable_message": {
           "default": "The Upstream is not reachable right now, so this call did not run. Nothing changed; try again in a moment.",
           "description": "The tool error a call is answered with while the Upstream is not connected.",

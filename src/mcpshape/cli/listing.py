@@ -14,6 +14,7 @@ from mcpshape.model import DEFAULT_PROXY_NAME
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from mcpshape.api import UpstreamState
     from mcpshape.cli.live import Live
     from mcpshape.model import Transport, Upstream
 
@@ -32,6 +33,30 @@ HEALTH_COLOR = {"ok": "green", "unhealthy": "red"}
 
 def state_text(state: str) -> str:
     return _colored(state, STATE_COLOR.get(state))
+
+
+def state_cell(live: Live, upstream: str) -> str:
+    """The state, and for an ``unavailable`` Upstream when the next attempt is (#64)."""
+    found = live.upstream(upstream)
+    text = state_text(live.state_of(upstream))
+    if found is None or found.state != "unavailable":
+        return text
+    when = "next call" if found.retry_in is None else f"retry in {duration(found.retry_in)}"
+    return f"{text} [dim]({when})[/dim]"
+
+
+def next_attempt(upstream: UpstreamState) -> str:
+    """When an ``unavailable`` Upstream is tried again, for ``daemon status`` (#64)."""
+    if upstream.retry_in is None:
+        return "the next call tries again"
+    return f"retrying in {duration(upstream.retry_in)}"
+
+
+def duration(seconds: float) -> str:
+    """Seconds up to a minute and a half, minutes past it."""
+    if seconds < 90:  # noqa: PLR2004  # a minute and a half reads as seconds still
+        return f"{seconds:.0f}s"
+    return f"{seconds / 60:.0f} min"
 
 
 def health_text(health: str) -> str:
@@ -68,7 +93,7 @@ def upstreams_table(config_dir: Path, upstreams: list[Upstream], live: Live) -> 
             table.add_row(
                 upstream.name if index == 0 else "",
                 describe_transport(upstream.transport) if index == 0 else "",
-                state_text(live.state_of(upstream.name)) if index == 0 else "",
+                state_cell(live, upstream.name) if index == 0 else "",
                 proxy,
                 health_text(live.health_of(upstream.name, proxy)),
                 proxy_url(config_dir, upstream.name, proxy),

@@ -105,6 +105,10 @@ LIFECYCLE_HELP = {
     "ping_interval": (
         "Seconds between pings of a warm Upstream, so it is never falsely reported up."
     ),
+    "backoff_cap": (
+        "The longest a warm Upstream waits between two connect attempts, in seconds; the wait "
+        "doubles from one second up to this. A lazy Upstream never retries on its own."
+    ),
     "unavailable_message": (
         "The tool error a call is answered with while the Upstream is not connected."
     ),
@@ -128,6 +132,7 @@ class LifecycleSettings(BaseModel):
         default=10.0, gt=0, description=LIFECYCLE_HELP["connect_timeout"]
     )
     ping_interval: float = Field(default=30.0, gt=0, description=LIFECYCLE_HELP["ping_interval"])
+    backoff_cap: float = Field(default=1800.0, gt=0, description=LIFECYCLE_HELP["backoff_cap"])
     unavailable_message: str = Field(
         default=DEFAULT_UNAVAILABLE_MESSAGE,
         min_length=1,
@@ -150,6 +155,7 @@ class LifecycleOverrides(BaseModel):
     ping_interval: float | None = Field(
         default=None, gt=0, description=LIFECYCLE_HELP["ping_interval"]
     )
+    backoff_cap: float | None = Field(default=None, gt=0, description=LIFECYCLE_HELP["backoff_cap"])
     unavailable_message: str | None = Field(
         default=None, min_length=1, description=LIFECYCLE_HELP["unavailable_message"]
     )

@@ -16,9 +16,12 @@ States:
 ``idle-pending``
     Connected, with the idle timer running towards ``idle_timeout``.
 ``unavailable``
-    The last connect or ping failed, or a call found the open connection dead. A backoff timer
-    is running; calls fail at once with the Upstream's ``unavailable_message`` rather than
-    waiting for it.
+    The last connect or ping failed, or a call found the open connection dead. A backoff is
+    in force, doubling from a second to the Upstream's ``backoff_cap``; a call within it fails
+    at once with the Upstream's ``unavailable_message`` rather than waiting, and one after it
+    tries again. A warm Upstream is also retried by the keeper when the backoff runs out; a
+    lazy one never on its own, since lazy means connect when asked, at failure as at start
+    (#64). Nothing is spent on an Upstream nobody is calling.
 ``stopping``
     The Daemon is shutting the connection down.
 
@@ -51,10 +54,8 @@ State = Literal["cold", "connecting", "ready", "idle-pending", "unavailable", "s
 CONNECTED: tuple[State, ...] = ("ready", "idle-pending")
 
 BACKOFF_BASE = 1.0
-"""Seconds before the first retry of a failed connect."""
-
-BACKOFF_CAP = 60.0
-"""The longest the exponential backoff between retries ever grows to."""
+"""Seconds before the first retry of a failed connect; the Upstream's ``backoff_cap`` is the
+longest the doubling ever grows to."""
 
 KEEPER_RESTART_CAP = 5
 """How many failures within ``KEEPER_RESTART_WINDOW`` the keeper restarts itself through.
@@ -114,6 +115,10 @@ class Status:
     """Why the last connect or ping failed, while that is what put it here."""
     supervised: bool = True
     """Whether a keeper is running. False once one gave up, until ``reload()`` (#50)."""
+    warm: bool = False
+    retry_in: float | None = None
+    """Seconds until the keeper tries again, while ``unavailable`` and warm; nothing for a
+    lazy Upstream, whose next call is what tries again (#64)."""
 
 
 class Connection:
@@ -143,6 +148,7 @@ class Connection:
         self._failures = 0
         self._supervised = True
         self._attempted = False
+        self._announced: tuple[str, float] | None = None
         self._wake = asyncio.Event()
         self._keeper: asyncio.Task[None] | None = None
         self._connecting: asyncio.Task[None] | None = None
@@ -151,11 +157,17 @@ class Connection:
     # --- what the Daemon drives ------------------------------------------------------------
 
     def status(self) -> Status:
+        now = self._clock.now()
+        retry_in = None
+        if self._state == "unavailable" and self._settings.warm:
+            retry_in = _left(self._backoff(), now - self._since)
         return Status(
             state=self._state,
-            seconds=self._clock.now() - self._since,
+            seconds=now - self._since,
             error=self._error,
             supervised=self._supervised,
+            warm=self._settings.warm,
+            retry_in=retry_in,
         )
 
     async def start(self) -> None:
@@ -204,6 +216,7 @@ class Connection:
         self._settings = settings
         self._failures = 0
         self._error = None
+        self._announced = None
         self._supervised = True
         self._attempted = True
         await self.start()
@@ -215,12 +228,15 @@ class Connection:
 
         Raises ``UpstreamUnavailableError`` with the configured message when it is not
         reachable: while a connect attempt is failing, and at once during the backoff after
-        one did, so that no call waits longer than the connect timeout.
+        one did, so that no call waits longer than the connect timeout. A call after the
+        backoff is what tries again, the only thing that does for a lazy Upstream (#64).
         """
         if self._state in CONNECTED:
             self._touch()
             return
-        if self._state in ("unavailable", "stopping"):
+        if self._state == "stopping" or (
+            self._state == "unavailable" and self._clock.now() - self._since < self._backoff()
+        ):
             raise UpstreamUnavailableError(self._settings.unavailable_message)
         connecting = self._begin_connect()
         self._nudge()
@@ -319,7 +335,7 @@ class Connection:
                 return "sleep", _left(self._settings.idle_timeout, now - self._used_at)
             self._enter("ready")
             return "nothing", None
-        if self._state == "unavailable":
+        if self._state == "unavailable" and self._settings.warm:
             return "retry", _left(self._backoff(), now - self._since)
         return "nothing", None
 
@@ -392,6 +408,7 @@ class Connection:
         self._used_at = self._checked_at = self._clock.now()
         self._enter("ready")
         self._nudge()
+        self._announced = None
         log.info("Upstream %s is connected", self._name)
         if reconnect and self._on_reconnect is not None:
             self._rescanning = asyncio.create_task(self._rescan())
@@ -409,17 +426,27 @@ class Connection:
         """Record why, enter the backoff, and only then let the dead link go.
 
         Nothing is awaited before the state moves, so a second call failing on the same dead
-        connection cannot count a second failure and restart the backoff under the first.
+        connection cannot count a second failure and restart the backoff under the first. The
+        log says it once per reason and once per doubling of the backoff, not once per
+        attempt (#64): a dead Upstream is one line, then one each time the wait grows.
         """
         self._error = reason
         self._failures += 1
         self._enter("unavailable")
-        log.warning(
-            "Upstream %s is unavailable (%s); retrying in %.0fs",
-            self._name,
-            reason,
-            self._backoff(),
-        )
+        delay = self._backoff()
+        if self._announced != (reason, delay):
+            self._announced = (reason, delay)
+            if self._settings.warm:
+                log.warning(
+                    "Upstream %s is unavailable (%s); retrying in %.0fs", self._name, reason, delay
+                )
+            else:
+                log.warning(
+                    "Upstream %s is unavailable (%s); the next call after %.0fs tries again",
+                    self._name,
+                    reason,
+                    delay,
+                )
         await self._shut(dead=True)
         self._nudge()
 
@@ -436,7 +463,7 @@ class Connection:
             log.warning("Upstream %s did not close cleanly", self._name, exc_info=True)
 
     def _backoff(self) -> float:
-        return min(BACKOFF_CAP, BACKOFF_BASE * 2 ** max(0, self._failures - 1))
+        return min(self._settings.backoff_cap, BACKOFF_BASE * 2 ** max(0, self._failures - 1))
 
     # --- state -----------------------------------------------------------------------------
 
