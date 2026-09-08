@@ -32,7 +32,7 @@ if TYPE_CHECKING:
     import pytest
     from fastmcp.client.client import CallToolResult
 
-    from tests.support.oauth_provider import RemoteProvider
+    from tests.support.oauth_provider import ChildProvider
     from tests.support.seam import ConfigDir, RunningDaemon
 
 CONNECTED = ("ready", "idle-pending")
@@ -47,7 +47,7 @@ def key_file(cfg: ConfigDir) -> Path:
     return cfg.state / "oauth.key"
 
 
-def access_token(provider: RemoteProvider) -> str:
+def access_token(provider: ChildProvider) -> str:
     """The last token the provider handed out, which is the one in use."""
     return provider.issuer.issued[-1]
 
@@ -91,7 +91,7 @@ async def upstream_error(daemon_status: dict[str, object], name: str) -> str:
     return str(found["error"])  # pyright: ignore[reportUnknownArgumentType]
 
 
-def add_oauth_upstream(cfg: ConfigDir, provider: RemoteProvider, name: str = "x") -> None:
+def add_oauth_upstream(cfg: ConfigDir, provider: ChildProvider, name: str = "x") -> None:
     """Write the Upstream by hand, for the tests whose login is not what they are about."""
     cfg.add_upstream(
         name, f'transport = "http"\nurl = {json.dumps(provider.mcp_url)}\nauth = "oauth"\n'
@@ -193,7 +193,7 @@ async def test_device_code_pairing_says_when_the_provider_offers_none(
     assert "no device-code pairing" in result.output
 
 
-async def _approve_when_asked(provider: RemoteProvider) -> None:
+async def _approve_when_asked(provider: ChildProvider) -> None:
     """Stand in for the user typing the code at the provider on another machine."""
     await until(provider.issuer.awaiting_device, "a device code to approve")
     provider.issuer.approve_device()

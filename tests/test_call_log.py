@@ -182,8 +182,9 @@ async def test_rotation_under_the_global_cap(config_dir: ConfigDir) -> None:
 
     log_dir = config_dir.state / "log"
     calls_file = log_dir / "calls.jsonl"
-    rotated = sorted(log_dir.glob("calls.jsonl.*"))
-    assert rotated, "150 records are more than one file's share of the cap"
+    assert list(log_dir.glob("calls.jsonl.*")), (
+        "150 records are more than one file's share of the cap"
+    )
     total = sum(path.stat().st_size for path in log_dir.iterdir() if path.is_file())
     assert total <= 16384
     # A file is rotated aside the moment it fills, and the next write starts the next one, so

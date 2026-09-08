@@ -361,18 +361,8 @@ async def serving_upstream(
     era for the rest of the run (``docs/clients.md``, #76). An Upstream that has to die while
     the Daemon is connected to it needs ``restartable_upstream`` instead.
     """
-    port = free_port()
-    path = "/mcp" if transport == "http" else "/sse"
-    child = await asyncio.create_subprocess_exec(
-        *child_server.command(factory_path(server), transport, port), env=child_server.env()
-    )
-    try:
-        await _wait_for_port(port)
-        yield f"http://127.0.0.1:{port}{path}"
-    finally:
-        if child.returncode is None:
-            child.kill()
-            await child.wait()
+    async with child_server.spawned(child_server.command(factory_path(server), transport)) as port:
+        yield f"http://127.0.0.1:{port}{child_server.mcp_path(transport)}"
 
 
 @dataclass
