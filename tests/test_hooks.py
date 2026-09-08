@@ -285,6 +285,95 @@ async def test_several_hooks_on_one_tool_run_in_file_order(config_dir: ConfigDir
     assert result.data == "created Bug one two None three four"
 
 
+async def test_an_after_hook_rewrites_an_upstream_error_into_a_readable_message(
+    config_dir: ConfigDir,
+) -> None:
+    server, _ = tracker()
+    await synced(config_dir, server)
+    user_code(
+        config_dir,
+        """
+        @hook.after("explode")
+        def readable(call, result):
+            assert result.is_error
+            result.text = "issues could not create that: try again later"
+            return result
+        """,
+    )
+
+    async with running_daemon(config_dir) as daemon, daemon.client("/issues/mcp") as client:
+        result = await client.call_tool("explode", {}, raise_on_error=False)
+
+    assert error_text(result) == "issues could not create that: try again later"
+
+
+async def test_an_after_hook_turns_an_upstream_error_into_a_success(config_dir: ConfigDir) -> None:
+    server, _ = tracker()
+    await synced(config_dir, server)
+    user_code(
+        config_dir,
+        """
+        @hook.after("explode")
+        def recovered(call, result):
+            result.is_error = False
+            result.text = "recovered"
+            return result
+        """,
+    )
+
+    async with running_daemon(config_dir) as daemon, daemon.client("/issues/mcp") as client:
+        result = await client.call_tool("explode", {})
+
+    assert not result.is_error
+    assert result.data == "recovered"
+
+
+async def test_an_after_hook_returning_none_leaves_an_upstream_error_as_is(
+    config_dir: ConfigDir,
+) -> None:
+    server, _ = tracker()
+    await synced(config_dir, server)
+    user_code(
+        config_dir,
+        """
+        @hook.after("explode")
+        def look_only(call, result):
+            assert result.is_error
+            return None
+        """,
+    )
+
+    async with running_daemon(config_dir) as daemon, daemon.client("/issues/mcp") as client:
+        result = await client.call_tool("explode", {}, raise_on_error=False)
+
+    assert "boom" in error_text(result)
+
+
+async def test_a_short_circuited_result_reaches_the_after_hook_as_a_success(
+    config_dir: ConfigDir,
+) -> None:
+    server, _ = tracker()
+    await synced(config_dir, server)
+    user_code(
+        config_dir,
+        """
+        @hook.before("explode")
+        def refuse(call):
+            return "refused before reaching the upstream"
+
+        @hook.after("explode")
+        def note(call, result):
+            result.text = f"is_error={result.is_error}: {result.text}"
+            return result
+        """,
+    )
+
+    async with running_daemon(config_dir) as daemon, daemon.client("/issues/mcp") as client:
+        result = await client.call_tool("explode", {})
+
+    assert result.data == "is_error=False: refused before reaching the upstream"
+
+
 # --- resource and prompt Hooks -----------------------------------------------------------------
 
 

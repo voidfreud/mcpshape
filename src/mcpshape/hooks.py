@@ -23,10 +23,13 @@ A user drops ``<proxy>.py`` next to ``<proxy>.toml`` and writes::
         return "done"
 
 A ``before`` Hook may change ``call.args`` or return a result, which short-circuits the
-Upstream. An ``after`` Hook receives the result, short-circuited or not, and returns the one
-to send; an error the Upstream reports skips the ``after`` Hooks and reaches the Client as it
-is. Raising anywhere becomes an error to the Client carrying the exception's message. A
-Virtual Tool's exposed name is its identity, so Hooks keyed by it run around it too.
+Upstream. An ``after`` Hook runs on a tool's result whether it is a success or an error the
+Upstream reported (``result.is_error``), short-circuited or not, and returns the one to send:
+a rewritten error, a success (set ``result.is_error = False``), or ``None`` to leave it as is.
+Raising anywhere becomes an error to the Client carrying the exception's message. A resource
+read or prompt get has no error result on the wire, only an exception, which still skips its
+``after`` Hooks. A Virtual Tool's exposed name is its identity, so Hooks keyed by it run around
+it too.
 ``upstream`` reaches the Proxy's own Upstream under Catalog names, and nothing else; what it
 calls does not run the Hooks. Hooks run in the Daemon process with no sandbox: a function
 that blocks forever or calls ``sys.exit`` is not guarded against.
@@ -102,10 +105,15 @@ class ToolResult:
     derives it from the text where the schema allows: a schema wrapping one value takes the
     text (or the JSON it parses as), and an object schema takes the text when it is a JSON
     object. Anything else is the user's to match.
+
+    ``is_error`` says whether the Upstream reported this as an error; an ``after`` Hook sees it
+    on the result it is handed and may flip it in either direction (setting ``.text`` leaves it
+    as it is: a Hook that wants a success sets ``is_error = False`` itself).
     """
 
     content: list[dict[str, Any]] = field(default_factory=list[dict[str, Any]])
     structured: dict[str, Any] | None = None
+    is_error: bool = False
 
     @property
     def text(self) -> str:
@@ -119,7 +127,8 @@ class ToolResult:
 
     @classmethod
     def of(cls, value: object) -> ToolResult:
-        """``value`` as a tool result: a string is text, a dict is structured, blocks stay."""
+        """``value`` as a successful tool result: a string is text, a dict is structured, blocks
+        stay, and a ``ToolResult`` passes through unchanged, ``is_error`` included."""
         match value:
             case ToolResult():
                 return value

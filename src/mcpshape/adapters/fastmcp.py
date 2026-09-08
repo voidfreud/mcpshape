@@ -433,14 +433,15 @@ class _CuratedTool(ProxyTool):
         async def forward(call: Call) -> hooks.ToolResult:
             raw = await run_upstream(call.args, context)
             result = _tool_result_of(raw.content, raw.structured_content)
-            if raw.is_error:
-                raise ToolError(result.text or "the Upstream reported an error")
+            result.is_error = raw.is_error
             return result
 
         call = Call("tool", self._origin, self._arguments.to_catalog(arguments))
         result = await self._runtime.run(
             call, forward, hooks.ToolResult.of, ToolError, _capped_output(self._output_cap)
         )
+        if result.is_error:
+            raise ToolError(result.text or "the Upstream reported an error")
         return _to_tool_result(result, self.output_schema)
 
 
@@ -551,6 +552,9 @@ class _VirtualTool(FunctionTool):
         run_body = super().run
 
         async def forward(call: Call) -> hooks.ToolResult:
+            # A Virtual Tool's body raising is an exception here, never an is_error result: it
+            # has no Upstream result to carry one, so it propagates and skips the after Hooks
+            # like any other raise, unlike a Catalog tool's Upstream error.
             try:
                 raw = await run_body(call.args)
             except FastMCPError:
