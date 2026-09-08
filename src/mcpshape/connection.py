@@ -37,12 +37,11 @@ import asyncio
 import contextlib
 import logging
 import time
-from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, Awaitable, Callable
+    from collections.abc import Awaitable, Callable
 
     from mcpshape.model import LifecycleSettings
 
@@ -159,15 +158,6 @@ class Connection:
             supervised=self._supervised,
         )
 
-    @asynccontextmanager
-    async def running(self) -> AsyncGenerator[None]:
-        """Keep the connection for the life of the Daemon: warm it, time it, and let it go."""
-        await self.start()
-        try:
-            yield
-        finally:
-            await self.stop()
-
     async def start(self) -> None:
         """Start the keeper, and connect right away when the Upstream is ``warm``."""
         self._keeper = asyncio.create_task(self._keep())
@@ -190,12 +180,33 @@ class Connection:
         self.retry()
 
     async def stop(self) -> None:
+        """Let the connection go and stop supervising it. Safe before ``start`` and twice."""
         self._enter("stopping")
         self._nudge()
         await _finish(self._keeper, self._connecting, self._rescanning)
         self._keeper = self._connecting = self._rescanning = None
         await self._shut()
         self._enter("cold")
+
+    async def reconfigure(self, settings: LifecycleSettings) -> None:
+        """Connect again under ``settings``: the Upstream file changed (#46).
+
+        The keeper, any connect in flight, and any rescan are stopped and the link is let go,
+        exactly as ``stop()`` does; then the record of failures is emptied, the Upstream is
+        supervised again, and the connection starts as at Daemon start: connecting at once when
+        ``warm``, else on the next call. The next connect counts as a reconnect, so it rescans:
+        what a changed transport reaches may advertise something else. A call waiting in
+        ``acquire`` on the cancelled connect finds the state not connected and is answered with
+        the Upstream's message, and one in flight over the old link fails as a dead connection
+        that ``lost()`` ignores, since the state is no longer connected.
+        """
+        await self.stop()
+        self._settings = settings
+        self._failures = 0
+        self._error = None
+        self._supervised = True
+        self._attempted = True
+        await self.start()
 
     # --- what a call drives ----------------------------------------------------------------
 

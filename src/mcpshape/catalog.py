@@ -322,7 +322,8 @@ def forget(state_dir: Path, upstream: str) -> None:
     The lock file goes with the rest: the ``flock`` lives on the open descriptor, so unlinking
     a held lock file is safe, and it is what tells a writer waiting behind this one that there
     is nothing left to write to. A second ``forget`` racing the first finds the state already
-    gone and says nothing.
+    gone and says nothing, whether it finds it gone before the lock, under the lock, or while
+    it is still taking one on a directory the other is removing (#62).
     """
     directory = upstream_state_dir(state_dir, upstream)
     if not directory.is_dir():
@@ -332,5 +333,5 @@ def forget(state_dir: Path, upstream: str) -> None:
             for path in directory.iterdir():
                 path.unlink(missing_ok=True)
             directory.rmdir()
-    except ForgottenError:
+    except (ForgottenError, OSError):
         return

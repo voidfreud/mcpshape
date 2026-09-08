@@ -10,7 +10,8 @@ reads the answers back through the same models.
 Routes, all behind the bearer token when one is configured:
 
 - ``GET /api/status``: every Upstream and Proxy, with lifecycle state and health.
-- ``POST /api/reload``: every Proxy re-reads its files; answers the live state after.
+- ``POST /api/reload``: every Upstream file is re-read, changed or not, and so is every
+  file of every Proxy left; answers the live state after.
 - ``POST /api/shutdown``: what ``daemon down`` posts to.
 - ``GET /api/upstreams/<name>/catalog``: the accepted Catalog, or ``null`` before a scan.
 - ``GET /api/upstreams/<name>/drift``: the unreviewed Drift, or ``null``.
@@ -49,7 +50,7 @@ from mcpshape.secrets import SecretError
 from mcpshape.tokens import Tokens
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable, Callable, Mapping
     from pathlib import Path
 
     from starlette.requests import Request
@@ -206,6 +207,26 @@ class ProxyLike(Protocol):
     async def reload(self) -> None: ...
 
 
+class ServedLike(Protocol):
+    """One Upstream as the API needs it: what the Daemon holds for it, read at call time.
+
+    An Upstream file the Daemon re-reads can change the Upstream under the API between one
+    request and the next, and a removed one retires it, so nothing here is copied at build
+    (#46, #62).
+    """
+
+    @property
+    def upstream(self) -> Upstream: ...
+    @property
+    def connection(self) -> UpstreamConnection: ...
+    @property
+    def proxies(self) -> Mapping[str, ProxyLike]: ...
+    @property
+    def retired(self) -> bool: ...
+    async def refresh(self) -> None: ...
+    async def reload(self) -> None: ...
+
+
 class _Login:
     """One Upstream's OAuth flow as the dashboard drives it (#16).
 
@@ -294,9 +315,7 @@ class _Login:
 class Management:
     """Everything the API answers from: built by the Daemon, one per Daemon."""
 
-    upstreams: list[Upstream]
-    connections: dict[str, UpstreamConnection]
-    proxies: dict[tuple[str, str], ProxyLike]
+    served: Mapping[str, ServedLike]
     calls: CallLog
     state_dir: Path
     secrets: Secrets
@@ -325,23 +344,33 @@ class Management:
             await pending.close()
 
     async def live(self) -> LiveState:
-        """What every Upstream and Proxy is doing right now, each Proxy refreshed on the way."""
+        """What every Upstream and Proxy is doing right now, each refreshed on the way.
 
+        Every Upstream file is looked at first, so one that was edited is in force and one
+        that is gone is retired before anything is reported; a retired Upstream is not listed
+        at all (#46, #62).
+        """
+        for served in self.served.values():
+            await served.refresh()
         return LiveState(
-            upstreams=[await self._state_of(upstream) for upstream in self.upstreams],
+            upstreams=[
+                await self._state_of(served)
+                for served in self.served.values()
+                if not served.retired
+            ],
             path=os.environ.get("PATH"),
         )
 
-    async def _state_of(self, upstream: Upstream) -> UpstreamState:
-        status = self.connections[upstream.name].status()
+    async def _state_of(self, served: ServedLike) -> UpstreamState:
+        status = served.connection.status()
         return UpstreamState(
-            name=upstream.name,
+            name=served.upstream.name,
             state=status.state,
             seconds=round(status.seconds, 3),
             error=status.error,
             supervised=status.supervised,
-            missing_command=self._missing_command(upstream),
-            proxies=[await self.proxies[upstream.name, name].state() for name in upstream.proxies],
+            missing_command=self._missing_command(served.upstream),
+            proxies=[await proxy.state() for proxy in served.proxies.values()],
         )
 
     def _missing_command(self, upstream: Upstream) -> str | None:
@@ -366,15 +395,15 @@ class Management:
         return _answer(await self.live())
 
     async def _reload(self, _request: Request) -> JSONResponse:
-        """Every Proxy re-reads its files now, changed or not (#10), and says how it went.
+        """Every file is re-read now, changed or not (#10, #46), and it says how it went.
 
-        Every connection is supervised again on the way, which is what brings back a keeper
-        that gave up (#50) and nothing at all for an Upstream whose keeper is still running.
+        Every Upstream file first, so an edit to it is in force and a removed Upstream is
+        retired, then every Proxy of what is left, and every connection is supervised again,
+        which is what brings back a keeper that gave up (#50) and nothing at all for an
+        Upstream whose keeper is still running.
         """
-        for proxy in self.proxies.values():
-            await proxy.reload()
-        for connection in self.connections.values():
-            await connection.reload()
+        for served in self.served.values():
+            await served.reload()
         return _answer(await self.live())
 
     async def _shutdown(self, _request: Request) -> JSONResponse:
@@ -384,27 +413,29 @@ class Management:
     async def _catalog(self, request: Request) -> JSONResponse:
         return await self._for_upstream(request, self._catalog_of)
 
-    async def _catalog_of(self, upstream: Upstream) -> JSONResponse:
-        stored = await asyncio.to_thread(catalogs.load_catalog, self.state_dir, upstream.name)
+    async def _catalog_of(self, served: ServedLike) -> JSONResponse:
+        name = served.upstream.name
+        stored = await asyncio.to_thread(catalogs.load_catalog, self.state_dir, name)
         return _answer(CatalogAnswer(catalog=stored))
 
     async def _drift(self, request: Request) -> JSONResponse:
         return await self._for_upstream(request, self._drift_of)
 
-    async def _drift_of(self, upstream: Upstream) -> JSONResponse:
-        drift = await asyncio.to_thread(catalogs.load_drift, self.state_dir, upstream.name)
+    async def _drift_of(self, served: ServedLike) -> JSONResponse:
+        name = served.upstream.name
+        drift = await asyncio.to_thread(catalogs.load_drift, self.state_dir, name)
         return _answer(DriftAnswer(drift=DriftState.of(drift) if drift else None))
 
     async def _sync(self, request: Request) -> JSONResponse:
         return await self._for_upstream(request, self._sync_of)
 
-    async def _sync_of(self, upstream: Upstream) -> JSONResponse:
+    async def _sync_of(self, served: ServedLike) -> JSONResponse:
         try:
-            return _answer(await self._scanned(upstream))
+            return _answer(await self._scanned(served))
         except _ScanFailedError as exc:
             return _refusal(str(exc), UPSTREAM_FAILED)
 
-    async def _scanned(self, upstream: Upstream) -> SyncState:
+    async def _scanned(self, served: ServedLike) -> SyncState:
         """Scan the Upstream now, over its open connection when it has one, and record it.
 
         Bounded by the Upstream's own ``connect_timeout``, as the start-up scan is (#20).
@@ -412,10 +443,10 @@ class Management:
         ``_ScanFailedError`` with the reason when the Upstream could not be scanned, or when
         its state was removed while the scan waited for the lock (#49).
         """
-        connection = self.connections[upstream.name]
+        upstream = served.upstream
         try:
             observed = await bounded(
-                connection.observe(), upstream.lifecycle.connect_timeout, self.clock
+                served.connection.observe(), upstream.lifecycle.connect_timeout, self.clock
             )
         except TimedOutError:
             seconds = upstream.lifecycle.connect_timeout
@@ -437,22 +468,23 @@ class Management:
     async def _login_state(self, request: Request) -> JSONResponse:
         return await self._for_upstream(request, self._login_state_of)
 
-    async def _login_state_of(self, upstream: Upstream) -> JSONResponse:
-        found = self._login_of(upstream)
+    async def _login_state_of(self, served: ServedLike) -> JSONResponse:
+        found = self._login_of(served)
         if found is None:
-            return _refusal(_not_oauth(upstream), BAD_REQUEST)
+            return _refusal(_not_oauth(served.upstream), BAD_REQUEST)
         return _answer(found.state())
 
     async def _login_start(self, request: Request) -> JSONResponse:
         return await self._for_upstream(request, self._login_start_of)
 
-    async def _login_start_of(self, upstream: Upstream) -> JSONResponse:
-        found = self._login_of(upstream)
+    async def _login_start_of(self, served: ServedLike) -> JSONResponse:
+        found = self._login_of(served)
         if found is None:
-            return _refusal(_not_oauth(upstream), BAD_REQUEST)
+            return _refusal(_not_oauth(served.upstream), BAD_REQUEST)
         return _answer(await found.start())
 
-    def _login_of(self, upstream: Upstream) -> _Login | None:
+    def _login_of(self, served: ServedLike) -> _Login | None:
+        upstream = served.upstream
         transport = upstream.transport
         if not isinstance(transport, HttpTransport | SseTransport) or transport.auth != "oauth":
             return None
@@ -461,26 +493,25 @@ class Management:
                 upstream,
                 self.secrets,
                 Tokens(self.state_dir, upstream.name),
-                partial(self._logged_in, upstream),
+                partial(self._logged_in, served),
             )
         return self._logins[upstream.name]
 
-    async def _logged_in(self, upstream: Upstream) -> None:
+    async def _logged_in(self, served: ServedLike) -> None:
         """Scan the Upstream a login just made reachable, and have it connect now."""
         try:
-            await self._scanned(upstream)
+            await self._scanned(served)
         except _ScanFailedError as exc:
             log.warning("after logging in, %s", exc)
-        self.connections[upstream.name].retry()
+        served.connection.retry()
 
     async def _connect(self, request: Request) -> JSONResponse:
         return await self._for_upstream(request, self._connect_of)
 
-    async def _connect_of(self, upstream: Upstream) -> JSONResponse:
+    async def _connect_of(self, served: ServedLike) -> JSONResponse:
         """Have an ``unavailable`` Upstream try again now, and say where it stands."""
-        connection = self.connections[upstream.name]
-        connection.retry()
-        return _answer(ConnectAnswer(state=connection.status().state))
+        served.connection.retry()
+        return _answer(ConnectAnswer(state=served.connection.status().state))
 
     async def _calls(self, request: Request) -> JSONResponse:
         """The latest calls of every Proxy, or of the Upstream or Proxy named, oldest first."""
@@ -500,11 +531,18 @@ class Management:
         return _answer(LogsAnswer(lines=found))
 
     async def _for_upstream(
-        self, request: Request, answer: Callable[[Upstream], Awaitable[JSONResponse]]
+        self, request: Request, answer: Callable[[ServedLike], Awaitable[JSONResponse]]
     ) -> JSONResponse:
+        """Answer for the Upstream the path names, its file looked at first (#46).
+
+        One whose file is gone is retired, and is then as unknown here as a name nothing was
+        ever registered under (#62).
+        """
         name: str = request.path_params["upstream"]
-        found = next((upstream for upstream in self.upstreams if upstream.name == name), None)
-        if found is None:
+        found = self.served.get(name)
+        if found is not None:
+            await found.refresh()
+        if found is None or found.retired:
             return _refusal(f"no Upstream named {name!r}", NOT_FOUND)
         return await answer(found)
 

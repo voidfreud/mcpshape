@@ -252,8 +252,10 @@ Import errors, syntax errors, and exceptions while the file loads are contained:
 
 Every file a Proxy serves from is watched: its Catalog, its Proxy file, its Python file, and
 the helpers next to them. A change is served on the next request, for that Proxy alone, with
-no Daemon restart. `mcpshape daemon reload` makes every Proxy re-read its files at once and
-reports each one's health.
+no Daemon restart. The Upstream's own `upstream.toml` is watched the same way: an edited Cap
+is in force on the next request, and an edited transport or lifecycle setting reconnects the
+Upstream under the new settings. `mcpshape daemon reload` makes every Upstream file and every
+Proxy's files be re-read at once and reports each Proxy's health.
 
 When a Python file cannot be loaded, or an Override or Cap cannot be applied, that Proxy is
 marked unhealthy: it keeps advertising its last exposed tool set, so a Client with a cached
@@ -284,7 +286,7 @@ unavailable_message = "The Upstream is not reachable right now, so this call did
 ```
 mcpshape daemon up        # run in the foreground; offers autostart the first time
 mcpshape daemon status    # every Upstream's connection state and every Proxy's health
-mcpshape daemon reload    # every Proxy re-reads its files now
+mcpshape daemon reload    # every Upstream file and every Proxy's files are re-read now
 mcpshape daemon logs      # the tail of the app log
 mcpshape daemon down
 mcpshape daemon install   # a launchd user agent (macOS) or a systemd user unit (Linux)
