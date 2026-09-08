@@ -201,7 +201,7 @@ def _lock_path(state_dir: Path, upstream: str) -> Path:
     return upstream_state_dir(state_dir, upstream) / LOCK_FILE
 
 
-def _still_the_lock(fd: int, lock_path: Path, upstream: str) -> None:
+def _check_not_forgotten(fd: int, lock_path: Path, upstream: str) -> None:
     """Say the state was forgotten when ``fd`` is no longer the file at ``lock_path``.
 
     ``forget`` unlinks the lock file while holding it, so a writer that waited behind it wakes
@@ -235,7 +235,7 @@ def _locked(state_dir: Path, upstream: str) -> Generator[None]:
     with lock_path.open("a+") as lock_file:
         fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
         try:
-            _still_the_lock(lock_file.fileno(), lock_path, upstream)
+            _check_not_forgotten(lock_file.fileno(), lock_path, upstream)
             yield
         finally:
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)

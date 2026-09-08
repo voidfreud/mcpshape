@@ -182,12 +182,16 @@ class RunningDaemon:
             answer = await http.request(method, f"{BASE_URL}{path}", params=params, headers=headers)
         return answer.status_code, json.loads(answer.text)
 
-    async def upstream_state(self, name: str) -> str:
+    async def upstream(self, name: str) -> dict[str, Any]:
+        """What the Daemon says about the one Upstream called ``name`` at ``/api/status``."""
         for upstream in (await self.status())["upstreams"]:
             if upstream["name"] == name:
-                return str(upstream["state"])
+                return upstream
         msg = f"the Daemon reports no Upstream named {name!r}"
         raise AssertionError(msg)
+
+    async def upstream_state(self, name: str) -> str:
+        return str((await self.upstream(name))["state"])
 
     async def awaiting_state(self, name: str, *states: str, patience: float = 5.0) -> str:
         """Wait until ``name`` reaches one of ``states``, and say which."""

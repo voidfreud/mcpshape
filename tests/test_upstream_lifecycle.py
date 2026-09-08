@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from fastmcp import Client
 from mcp_types import TextContent
@@ -314,11 +314,6 @@ def failing_plan(budget: list[int], monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(Connection, "_plan", flaky_plan)
 
 
-async def upstream_status(daemon: RunningDaemon, name: str) -> dict[str, Any]:
-    """What the Daemon says about one Upstream at ``/api/status``."""
-    return next(u for u in (await daemon.status())["upstreams"] if u["name"] == name)
-
-
 async def test_keeper_failures_spread_over_time_never_reach_the_cap(
     config_dir: ConfigDir, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -349,7 +344,7 @@ async def test_keeper_failures_spread_over_time_never_reach_the_cap(
 
         await clock.advance(101)
         assert await daemon.awaiting_state("calc", "cold") == "cold"
-        calc = await upstream_status(daemon, "calc")
+        calc = await daemon.upstream("calc")
         assert calc["supervised"] is True
         assert calc["error"] is None
 
@@ -365,7 +360,7 @@ async def test_daemon_reload_brings_back_a_keeper_that_gave_up(
 
     async with running_daemon(config_dir, clock) as daemon:
         assert await daemon.awaiting_state("calc", "unavailable") == "unavailable"
-        gave_up = await upstream_status(daemon, "calc")
+        gave_up = await daemon.upstream("calc")
         assert gave_up["supervised"] is False
         assert "keeper" in str(gave_up["error"])
 
@@ -374,7 +369,7 @@ async def test_daemon_reload_brings_back_a_keeper_that_gave_up(
         assert code == 200
 
         assert await daemon.awaiting_state("calc", *CONNECTED) in CONNECTED
-        back = await upstream_status(daemon, "calc")
+        back = await daemon.upstream("calc")
         assert back["supervised"] is True
         assert back["error"] is None
 
@@ -398,8 +393,7 @@ async def test_daemon_status_says_the_keeper_stopped_supervising(
 
 async def seconds_in_state(daemon: RunningDaemon, name: str) -> float:
     """How long the Daemon says ``name`` has been in its state, on the Daemon's clock."""
-    upstream = next(u for u in (await daemon.status())["upstreams"] if u["name"] == name)
-    return float(upstream["seconds"])
+    return float((await daemon.upstream(name))["seconds"])
 
 
 async def test_retries_back_off_exponentially_until_the_upstream_returns(

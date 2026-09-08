@@ -381,7 +381,8 @@ class Management:
 
         Bounded by the Upstream's own ``connect_timeout``, as the start-up scan is (#20).
         Recording holds the Upstream's lock (#21), off the event loop. Raises
-        ``_ScanFailedError`` with the reason when the Upstream could not be scanned.
+        ``_ScanFailedError`` with the reason when the Upstream could not be scanned, or when
+        its state was removed while the scan waited for the lock (#49).
         """
         connection = self.connections[upstream.name]
         try:
@@ -397,9 +398,12 @@ class Management:
         except Exception as exc:  # however the Upstream failed, the caller gets the why
             msg = f"{upstream.name} could not be scanned: {exc}"
             raise _ScanFailedError(msg) from exc
-        scan = await asyncio.to_thread(
-            catalogs.record_scan, self.state_dir, upstream.name, observed
-        )
+        try:
+            scan = await asyncio.to_thread(
+                catalogs.record_scan, self.state_dir, upstream.name, observed
+            )
+        except catalogs.ForgottenError as exc:  # an upstream rm won the lock first (#49)
+            raise _ScanFailedError(str(exc)) from None
         return SyncState(first=scan.first, drift=DriftState.of(scan.drift) if scan.drift else None)
 
     async def _login_state(self, request: Request) -> JSONResponse:
