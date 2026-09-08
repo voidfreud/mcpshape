@@ -1,0 +1,42 @@
+name: Issue
+
+on:
+  issues:
+    types: [opened, edited, reopened, labeled, unlabeled]
+
+permissions:
+  issues: write
+
+jobs:
+  shape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Body sections and labels follow CONTRIBUTING.md
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const issue = context.payload.issue;
+            const lines = (issue.body || '').replace(/\r/g, '').split('\n');
+            const labels = issue.labels.map((l) => l.name);
+            const problems = [];
+            const headings = ['### What', '### Acceptance criteria'];
+            const seen = lines.filter((l) => headings.includes(l));
+            if (seen.join(',') !== headings.join(',')) {
+              problems.push(`the body needs the sections ${headings.map((h) => '`' + h + '`').join(', ')}, in that order`);
+            }
+            const category = labels.filter((l) => ['bug', 'enhancement'].includes(l));
+            if (category.length !== 1) problems.push('exactly one of the labels `bug`, `enhancement`');
+            const state = labels.filter((l) => ['ready', 'decision', 'wish'].includes(l));
+            if (issue.state === 'open' && state.length !== 1) problems.push('exactly one of the labels `ready`, `decision`, `wish`');
+            const marker = '<!-- issue-shape -->';
+            const { data: comments } = await github.rest.issues.listComments({ ...context.repo, issue_number: issue.number, per_page: 100 });
+            const mine = comments.find((c) => c.body && c.body.includes(marker));
+            if (problems.length === 0) {
+              if (mine) await github.rest.issues.deleteComment({ ...context.repo, comment_id: mine.id });
+              return;
+            }
+            const body = `${marker}\nThis issue is not yet a ticket in the shape CONTRIBUTING.md asks for:\n\n${problems.map((p) => `- ${p}`).join('\n')}\n\nThis comment goes away once the body and labels pass.`;
+            if (mine) await github.rest.issues.updateComment({ ...context.repo, comment_id: mine.id, body });
+            else await github.rest.issues.createComment({ ...context.repo, issue_number: issue.number, body });
+            core.setFailed(problems.join('; '));

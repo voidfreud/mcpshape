@@ -1,17 +1,14 @@
 ## Summary
 <!-- What the wave delivers, in the glossary's words. -->
 
-## What changed
-<!-- By module, with file names. -->
+## Changes
+<!-- By module, with file names. Facts recorded in docs/clients.md, when any. -->
 
 ## Tests
-<!-- Which files, what they assert, how they drive the seam. -->
+<!-- Which files, what they assert, how they drive the seam. "None" for a change without code. -->
 
 ## Review
-<!-- The findings the review commits applied. -->
-
-## Facts recorded
-<!-- What went into docs/clients.md, when anything did; otherwise "None". -->
+<!-- The findings applied on the branch, one line each, or "None". -->
 
 Closes #
-<!-- One line per ticket the wave completes. Delete for a wave that changes only rules or docs. -->
+<!-- One line per ticket. Delete when the wave closes no ticket. -->

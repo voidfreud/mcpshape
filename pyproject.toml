@@ -29,6 +29,7 @@ dev = [
     "pytest>=9",
     "pytest-asyncio>=1",
     "ruff>=0.16",
+    "vulture>=2.16",
 ]
 
 [build-system]
