@@ -170,7 +170,8 @@ Claude Code is the first and best-integrated Profile, never a special case in th
   `GET` says whether a token set is stored, whether a login is pending and at which page, and
   why the last one failed. A login that succeeds scans the Upstream, since the start-up scan
   had nothing to log in with, and makes it connect at once instead of waiting out its backoff.
-  A connect still never waits on a login.
+  A login nobody finishes is given up after the browser flow's own five minutes, so a fresh
+  one can start. A connect still never waits on a login.
 
 ### Client Profiles
 - One Profile per supported Client: config file path and format, transports accepted, whether
@@ -198,9 +199,11 @@ Claude Code is the first and best-integrated Profile, never a special case in th
   files go, whichever log they belong to, until the directory fits. A call record carries the
   tool's Catalog name and exposed name, the arguments under Catalog names as the Client sent
   them, the time the Client waited with the Hooks included, `ok` or `error`, and the first
-  500 characters of the result or the error, with the full length beside it. Every tool call
-  a Proxy serves is recorded, one it refused as unhealthy included; resource reads and prompt
-  gets are not. The ring buffer keeps the latest 200 calls per Proxy. `daemon logs` reads the
+  500 characters of the result or the error, with the full length beside it, and every
+  string among the arguments cut the same way. Every tool call a Proxy runs is recorded, one
+  it refused as unhealthy or one its Upstream was away for included; a call FastMCP refuses
+  before it reaches the Proxy's chain, to a name it does not expose or with arguments that
+  fail the tool's schema, is not, and neither are resource reads and prompt gets. The ring buffer keeps the latest 200 calls per Proxy. `daemon logs` reads the
   app log tail, `--calls` the call log, from the running Daemon when there is one and from
   the files otherwise.
 - Settled in #16: the management API under `/api` is the live state and what only a running

@@ -16,7 +16,7 @@ import json
 import logging
 from collections import defaultdict, deque
 from datetime import datetime  # noqa: TC003  # pydantic resolves annotations at runtime
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -34,7 +34,12 @@ RING_SIZE = 200
 """How many of a Proxy's latest calls the ring buffer keeps."""
 
 RESULT_CHARS = 500
-"""How much of a result the record keeps; ``result_chars`` says how long it was."""
+"""How much of a result the record keeps; ``result_chars`` says how long it was. Every string
+in the arguments is cut to the same, so one call with a document in it cannot make a line
+that outgrows the log's rotation."""
+
+CUT = "..."
+"""What ends a string the record cut."""
 
 Outcome = Literal["ok", "error"]
 
@@ -53,7 +58,7 @@ class CallRecord(BaseModel):
     exposed: str
     """The name the Client called it by."""
     arguments: dict[str, Any] = Field(default_factory=dict)
-    """Under Catalog names, as the Client sent them, before any Hook."""
+    """Under Catalog names, as the Client sent them, before any Hook; long strings cut."""
     duration_ms: float
     outcome: Outcome
     result: str
@@ -80,12 +85,29 @@ class CallRecord(BaseModel):
             proxy=proxy,
             name=name,
             exposed=exposed,
-            arguments=arguments,
+            arguments=_cut(arguments),
             duration_ms=round(duration_ms, 3),
             outcome=outcome,
             result=result[:RESULT_CHARS],
             result_chars=len(result),
         )
+
+
+def _cut[T](value: T) -> T:
+    """``value`` with every string in it cut to ``RESULT_CHARS``, however deep it sits."""
+    cut: Any
+    match value:
+        case str() if len(value) > RESULT_CHARS:
+            cut = value[:RESULT_CHARS] + CUT
+        case dict():
+            items: dict[Any, Any] = value  # pyright: ignore[reportUnknownVariableType]  # wire data
+            cut = {key: _cut(item) for key, item in items.items()}
+        case list():
+            entries: list[Any] = value  # pyright: ignore[reportUnknownVariableType]  # wire data
+            cut = [_cut(item) for item in entries]
+        case _:
+            cut = value
+    return cast("T", cut)
 
 
 class CallLog:

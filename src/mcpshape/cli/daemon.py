@@ -194,28 +194,35 @@ def show_logs(
     """
     config_dir, state_dir = state(ctx).config_dir, state(ctx).state_dir
     with reporting_errors():
-        shown = (
+        shown, from_daemon = (
             _call_lines(config_dir, state_dir, lines)
             if show_calls
             else _log_lines(config_dir, state_dir, lines)
         )
     if not shown:
         what = "calls" if show_calls else "log"
-        console.print(f"No {what} yet. Start the Daemon with: [bold]mcpshape daemon up[/bold]")
+        if from_daemon:
+            console.print(f"No {what} yet: the Daemon is up and has nothing to show.")
+        else:
+            console.print(f"No {what} yet. Start the Daemon with: [bold]mcpshape daemon up[/bold]")
         return
     for line in shown:
         console.print(line, markup=False, highlight=False)
 
 
-def _log_lines(config_dir: Path, state_dir: Path, lines: int) -> list[str]:
+def _log_lines(config_dir: Path, state_dir: Path, lines: int) -> tuple[list[str], bool]:
+    """The app log's tail, and whether a running Daemon answered it or the files did."""
     found = read_log_tail(config_dir, lines)
-    return logs.tail(daemon_log_file(state_dir), lines) if found is None else found
+    if found is None:
+        return logs.tail(daemon_log_file(state_dir), lines), False
+    return found, True
 
 
-def _call_lines(config_dir: Path, state_dir: Path, lines: int) -> list[str]:
+def _call_lines(config_dir: Path, state_dir: Path, lines: int) -> tuple[list[str], bool]:
+    """The call log's tail, and whether a running Daemon answered it or the file did."""
     found = read_calls(config_dir, lines)
     records = calls.read_recent(state_dir, lines) if found is None else found
-    return [calls.render(record) for record in records]
+    return [calls.render(record) for record in records], found is not None
 
 
 @app.command("install", epilog=example("daemon install"))

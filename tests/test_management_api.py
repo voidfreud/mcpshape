@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 from fastmcp import FastMCP
 
-from mcpshape.api import CALLS_PATH, LOGS_PATH, RELOAD_PATH, UPSTREAMS_PATH
+from mcpshape.api import CALLS_PATH, LOGS_PATH, RELOAD_PATH, STATUS_PATH, UPSTREAMS_PATH
 from tests.support.seam import run_cli, running_daemon
 from tests.test_proxy_seam import calculator
 
@@ -192,20 +192,27 @@ async def test_bearer_token_gates_every_api_route(config_dir: ConfigDir) -> None
     config_dir.add_memory_upstream("calc", calculator())
 
     async with running_daemon(config_dir, token=TOKEN) as daemon:
+        # Every route the API has, shutdown aside: the answer it gives with the token is the
+        # answer it gives at all, so a 400 for the OAuth flow of a plain Upstream counts.
         routes = (
+            ("GET", STATUS_PATH),
+            ("POST", RELOAD_PATH),
             ("GET", CALLS_PATH),
+            ("GET", LOGS_PATH),
             ("GET", f"{UPSTREAMS_PATH}/calc/catalog"),
+            ("GET", f"{UPSTREAMS_PATH}/calc/drift"),
             ("POST", f"{UPSTREAMS_PATH}/calc/sync"),
+            ("GET", f"{UPSTREAMS_PATH}/calc/oauth"),
+            ("POST", f"{UPSTREAMS_PATH}/calc/oauth"),
         )
         for method, path in routes:
             status, answer = await daemon.api(method, path)
-            assert status == 401
-            assert answer == {"error": "a bearer token is required"}
+            assert (status, answer) == (401, {"error": "a bearer token is required"}), path
 
             status, _answer = await daemon.api(
                 method, path, headers={"Authorization": f"Bearer {TOKEN}"}
             )
-            assert status == 200
+            assert status in (200, 400), path
 
 
 # --- reload --------------------------------------------------------------------------------

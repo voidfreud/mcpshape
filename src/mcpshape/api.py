@@ -35,7 +35,7 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from mcpshape import catalog as catalogs
-from mcpshape.adapters.fastmcp import logged_in, login
+from mcpshape.adapters.fastmcp import CALLBACK_TIMEOUT, logged_in, login
 from mcpshape.calls import CallRecord
 from mcpshape.connection import TimedOutError, bounded
 from mcpshape.logs import tail
@@ -66,8 +66,13 @@ LOGS_PATH = "/api/logs"
 UPSTREAMS_PATH = "/api/upstreams"
 
 DEFAULT_LIMIT = 100
-MOST_LINES = 10_000
-"""The most one ``/api/logs`` or ``/api/calls`` answer carries, whatever was asked."""
+MOST_ENTRIES = 10_000
+"""The most lines or calls one ``/api/logs`` or ``/api/calls`` answer carries, whatever was
+asked."""
+
+PAGE_WAIT = 10.0
+"""Seconds a ``POST`` to the OAuth flow waits for the provider's page before answering
+``pending`` with no page yet; ``GET`` picks it up later."""
 
 NOT_FOUND, BAD_REQUEST, UPSTREAM_FAILED = 404, 400, 502
 
@@ -190,7 +195,9 @@ class _Login:
     page back to whoever asked, and receives the callback on loopback as the CLI would. What
     it stores is what the CLI stores. A login that succeeds is followed by ``on_success``: the
     Upstream is scanned, since the Daemon's start-up scan had nothing to log in with, and
-    then made to connect at once instead of waiting out its backoff.
+    then made to connect at once instead of waiting out its backoff. A login nobody finishes
+    is given up after ``CALLBACK_TIMEOUT``, the browser flow's own patience, so a fresh one
+    can start; a start while one is pending joins it.
     """
 
     def __init__(
@@ -219,13 +226,16 @@ class _Login:
         )
 
     async def start(self) -> LoginState:
-        """Start a login unless one is pending, and answer once its page is known or it failed."""
+        """Start a login unless one is pending, and answer once its page is known, it failed,
+        or ``PAGE_WAIT`` has passed."""
         if self._task is None or self._task.done():
             self.url, self.error = None, None
             self._opened = asyncio.Event()
             self._task = asyncio.create_task(self._run())
         opened = asyncio.create_task(self._opened.wait())
-        await asyncio.wait({opened, self._task}, return_when=asyncio.FIRST_COMPLETED)
+        await asyncio.wait(
+            {opened, self._task}, return_when=asyncio.FIRST_COMPLETED, timeout=PAGE_WAIT
+        )
         opened.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await opened
@@ -233,13 +243,18 @@ class _Login:
 
     async def _run(self) -> None:
         try:
-            await login(
-                self._upstream.transport,
-                self._secrets,
-                self._tokens,
-                lambda text: log.info("Upstream %s login: %s", self._upstream.name, text),
-                opener=self._open,
-            )
+            async with asyncio.timeout(CALLBACK_TIMEOUT):
+                await login(
+                    self._upstream.transport,
+                    self._secrets,
+                    self._tokens,
+                    lambda text: log.info("Upstream %s login: %s", self._upstream.name, text),
+                    opener=self._open,
+                )
+        except TimeoutError:
+            self.error = f"nobody finished the login within {CALLBACK_TIMEOUT:.0f} seconds"
+            log.warning("Upstream %s: %s", self._upstream.name, self.error)
+            return
         except Exception as exc:  # noqa: BLE001  # however the provider refused, the state says why
             self.error = str(exc) or type(exc).__name__
             log.warning("Upstream %s could not log in: %s", self._upstream.name, self.error)
@@ -450,7 +465,7 @@ def _not_oauth(upstream: Upstream) -> str:
 
 
 def _count(request: Request, key: str) -> int | None:
-    """``?key=<n>`` as a count between one and ``MOST_LINES``, the default when absent."""
+    """``?key=<n>`` as a count between one and ``MOST_ENTRIES``, the default when absent."""
     given: Any = request.query_params.get(key)
     if given is None:
         return DEFAULT_LIMIT
@@ -458,4 +473,4 @@ def _count(request: Request, key: str) -> int | None:
         count = int(given)
     except ValueError:
         return None
-    return min(count, MOST_LINES) if count > 0 else None
+    return min(count, MOST_ENTRIES) if count > 0 else None

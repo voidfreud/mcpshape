@@ -94,7 +94,8 @@ class LogSettings(BaseModel):
         ge=MIN_ROTATE_BYTES * 2,
         description=(
             "The most the app log and the call log together may take on disk, rotated "
-            "files included; the oldest rotated files go first."
+            "files included; the oldest rotated files go first. At the smallest value no "
+            "rotated file is kept at all."
         ),
     )
 

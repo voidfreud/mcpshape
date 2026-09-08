@@ -157,7 +157,7 @@
         },
         "max_bytes": {
           "default": 52428800,
-          "description": "The most the app log and the call log together may take on disk, rotated files included; the oldest rotated files go first.",
+          "description": "The most the app log and the call log together may take on disk, rotated files included; the oldest rotated files go first. At the smallest value no rotated file is kept at all.",
           "minimum": 8192,
           "title": "Max Bytes",
           "type": "integer"

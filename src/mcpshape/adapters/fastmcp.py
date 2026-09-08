@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import copy
 import importlib
 import json
 import logging
@@ -231,10 +232,13 @@ class UpstreamConnection:
         """
         if self._on_catalog is None:
             return
+        await self._on_catalog(await self._over_open_client())
+
+    async def _over_open_client(self) -> Catalog:
+        """What the Upstream advertises, looked at over the connection already open."""
         client = self._link.client
         async with _concealing(self._link.transport, self._link.secrets, self._link.tokens), client:
-            observed = await _catalog_of(client)
-        await self._on_catalog(observed)
+            return await _catalog_of(client)
 
     def status(self) -> Status:
         return self._connection.status()
@@ -242,17 +246,14 @@ class UpstreamConnection:
     async def observe(self) -> Catalog:
         """What the Upstream advertises now: ``/api`` sync (#16).
 
-        Over the connection already open when there is one, so an stdio Upstream is not
-        spawned a second time; otherwise over a connection of its own, as the Daemon's own
-        start-up scan does, which leaves the lifecycle where it was.
+        Over the connection already open when there is one, acquired as a call acquires it so
+        the idle timer starts over and an stdio Upstream is not spawned a second time;
+        otherwise over a connection of its own, as the Daemon's own start-up scan does, which
+        leaves the lifecycle where it was.
         """
         if self._connection.status().state in CONNECTED:
-            client = self._link.client
-            async with (
-                _concealing(self._link.transport, self._link.secrets, self._link.tokens),
-                client,
-            ):
-                return await _catalog_of(client)
+            await self._connection.acquire()
+            return await self._over_open_client()
         return await scan(self._link.transport, self._link.secrets, self._link.tokens)
 
     def retry(self) -> None:
@@ -505,7 +506,7 @@ class _Runtime:
         result or the error it was answered with.
         """
         at = datetime.now(UTC)
-        arguments = dict(call.args)
+        arguments = copy.deepcopy(call.args)  # a Hook may change them in place, however deep
         started = time.perf_counter()
         try:
             result = await self.run(call, forward, hooks.ToolResult.of, ToolError, cap, check)
@@ -582,7 +583,7 @@ class _Runtime:
             except FastMCPError:
                 raise
             except Exception as exc:
-                raise error(str(exc) or type(exc).__name__, log_level=logging.WARNING) from exc
+                raise error(_message(exc), log_level=logging.WARNING) from exc
 
 
 def _message(exc: BaseException) -> str:

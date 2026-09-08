@@ -30,6 +30,31 @@ async def test_upstream_connect_is_logged_at_info_by_default(config_dir: ConfigD
     assert "Upstream calc is connected" in daemon_log_text(config_dir)
 
 
+async def test_the_default_level_is_verbose_enough_for_state_transitions(
+    config_dir: ConfigDir,
+) -> None:
+    config_dir.add_memory_upstream("calc", calculator())
+
+    async with running_daemon(config_dir) as daemon, daemon.client("/calc/mcp") as client:
+        await client.call_tool("add", {"a": 1, "b": 1})
+
+    assert "DEBUG mcpshape.connection: Upstream calc: cold -> connecting" in daemon_log_text(
+        config_dir
+    )
+
+
+async def test_daemon_logs_says_the_daemon_is_up_when_it_has_nothing_yet(
+    config_dir: ConfigDir,
+) -> None:
+    (config_dir.path / "config.toml").write_text('version = 1\n[log]\nlevel = "error"\n')
+    config_dir.add_memory_upstream("calc", calculator())
+
+    async with serving_daemon(config_dir):
+        result = await asyncio.to_thread(run_cli, config_dir, "daemon", "logs")
+
+    assert "the Daemon is up and has nothing to show" in result.stdout
+
+
 async def test_a_warning_level_hides_the_connect_line(config_dir: ConfigDir) -> None:
     (config_dir.path / "config.toml").write_text('version = 1\n[log]\nlevel = "warning"\n')
     config_dir.add_memory_upstream("calc", calculator())

@@ -45,6 +45,18 @@ def long_result() -> FastMCP[Any]:
     return server
 
 
+def echoing() -> FastMCP[Any]:
+    """An Upstream whose one tool answers with what it was given."""
+    server = FastMCP("echo")
+
+    def echo(text: str) -> str:
+        """Say it back."""
+        return text
+
+    server.tool(echo)
+    return server
+
+
 def calls_log_file(config_dir: ConfigDir) -> list[str]:
     return (config_dir.state / "log" / "calls.jsonl").read_text().splitlines()
 
@@ -181,8 +193,83 @@ async def test_rotation_under_the_global_cap(config_dir: ConfigDir) -> None:
     assert last_record["arguments"] == {"a": 149, "b": 1}
 
     ring_calls = answer["calls"]
-    assert len(ring_calls) <= 200
+    assert len(ring_calls) == 150
     assert ring_calls[-1] == last_record
+
+
+async def test_the_ring_keeps_the_latest_200_calls_of_a_proxy(config_dir: ConfigDir) -> None:
+    config_dir.add_memory_upstream("calc", calculator())
+
+    async with running_daemon(config_dir) as daemon, daemon.client("/calc/mcp") as client:
+        for i in range(210):
+            await client.call_tool("add", {"a": i, "b": 0})
+        _, answer = await daemon.api("GET", "/api/calls", params={"limit": "1000"})
+
+    kept = [call["arguments"]["a"] for call in answer["calls"]]
+    assert kept == list(range(10, 210))
+
+
+async def test_one_log_rotating_trims_the_other_log_history_too(config_dir: ConfigDir) -> None:
+    """One cap across every log file: at the default verbose level the app log grows with
+    every call as the call log does, both rotate, and the oldest rotated file goes whichever
+    log it belongs to."""
+    (config_dir.path / "config.toml").write_text("version = 1\n[log]\nmax_bytes = 16384\n")
+    config_dir.add_memory_upstream("calc", calculator())
+
+    async with running_daemon(config_dir) as daemon, daemon.client("/calc/mcp") as client:
+        for i in range(150):
+            await client.call_tool("add", {"a": i, "b": 1})
+
+    log_dir = config_dir.state / "log"
+    rotated = sorted(path.name for path in log_dir.glob("*.[0-9]*"))
+    assert rotated, "neither log rotated"
+    assert len(rotated) == 1, "the budget for history under this cap holds one rotated file"
+    total = sum(path.stat().st_size for path in log_dir.iterdir() if path.is_file())
+    assert total <= 16384
+
+
+async def test_a_virtual_tool_call_is_recorded_under_its_own_name(config_dir: ConfigDir) -> None:
+    config_dir.add_memory_upstream("calc", calculator())
+    (config_dir.path / "upstreams" / "calc" / "default.py").write_text(
+        "from mcpshape import tool\n\n\n@tool\ndef twice(n: int) -> int:\n"
+        '    """Double a number."""\n    return n * 2\n'
+    )
+
+    async with running_daemon(config_dir) as daemon, daemon.client("/calc/mcp") as client:
+        assert (await client.call_tool("twice", {"n": 4})).data == 8
+        _, answer = await daemon.api("GET", "/api/calls")
+
+    record = answer["calls"][0]
+    assert (record["name"], record["exposed"]) == ("twice", "twice")
+    assert (record["outcome"], record["result"]) == ("ok", "8")
+
+
+async def test_a_call_while_the_upstream_is_away_is_recorded_as_an_error(
+    config_dir: ConfigDir,
+) -> None:
+    config_dir.add_memory_upstream("calc", calculator())
+
+    async with running_daemon(config_dir) as daemon, daemon.client("/calc/mcp") as client:
+        config_dir.break_upstream("calc")
+        failed = await client.call_tool("add", {"a": 1, "b": 2}, raise_on_error=False)
+        assert failed.is_error
+        _, answer = await daemon.api("GET", "/api/calls")
+
+    record = answer["calls"][0]
+    assert record["outcome"] == "error"
+    assert "not reachable" in record["result"]
+
+
+async def test_long_argument_strings_are_cut_in_the_record(config_dir: ConfigDir) -> None:
+    config_dir.add_memory_upstream("echo", echoing())
+
+    async with running_daemon(config_dir) as daemon, daemon.client("/echo/mcp") as client:
+        await client.call_tool("echo", {"text": "y" * 2000})
+        _, answer = await daemon.api("GET", "/api/calls")
+
+    record = answer["calls"][0]
+    assert record["arguments"]["text"] == "y" * 500 + "..."
+    assert record["result_chars"] == 2000
 
 
 async def test_daemon_logs_calls_reads_from_the_api_then_from_the_file(

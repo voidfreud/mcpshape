@@ -16,12 +16,10 @@ from __future__ import annotations
 
 import logging
 import threading
-from typing import TYPE_CHECKING, Literal
+from pathlib import Path
+from typing import Literal
 
-from mcpshape.paths import daemon_log_file
-
-if TYPE_CHECKING:
-    from pathlib import Path
+from mcpshape.paths import call_log_file, daemon_log_file
 
 ROTATE_AT = 4
 """A file is rotated aside once it reaches the cap divided by this: two active files together
@@ -43,6 +41,13 @@ LEVELS: dict[Level, int] = {
     "error": logging.ERROR,
 }
 
+LOG_NAMES = frozenset({daemon_log_file(Path()).name, call_log_file(Path()).name})
+"""The files under the log directory that rotate: only their rotations are ever removed."""
+
+_DIRECTORY_LOCK = threading.Lock()
+"""One lock for the directory, not one per file: both logs rotate over and trim the same
+directory, so a rename in one and a removal in the other must not interleave."""
+
 APP_LOGGER = "mcpshape"
 """The logger every module of mcpshape logs under, so one handler catches them all."""
 
@@ -53,14 +58,15 @@ class RotatingFile:
     """One log file, appended line by line and rotated under the directory's global cap.
 
     ``write`` appends one line, opening the file for it, so nothing holds the file open
-    between writes and a rotated-away file is never written into. A lock makes it safe from
-    any thread: a sync Hook logs from a worker thread while the event loop writes the call log.
+    between writes and a rotated-away file is never written into. The directory's lock makes
+    it safe from any thread: a sync Hook logs from a worker thread while the event loop
+    writes the call log. The write is synchronous where it is called, as ``logging``'s own
+    handlers are: one append, and once per rotation a look at a directory of a few files.
     """
 
     def __init__(self, path: Path, cap_bytes: int) -> None:
         self.path = path
         self.cap_bytes = cap_bytes
-        self._lock = threading.Lock()
 
     @property
     def rotate_bytes(self) -> int:
@@ -69,7 +75,7 @@ class RotatingFile:
     def write(self, line: str) -> None:
         """Append ``line`` (a newline is added), rotating the file aside once it is full."""
         data = (line + "\n").encode("utf-8", errors="replace")
-        with self._lock:
+        with _DIRECTORY_LOCK:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             with self.path.open("ab") as handle:
                 handle.write(data)
@@ -109,9 +115,10 @@ def _index(path: Path) -> int:
 def enforce_cap(directory: Path, budget: int) -> None:
     """Remove the oldest rotated files under ``directory`` until the rest fit in ``budget``.
 
-    Only rotated files (``<name>.<n>``) are counted and only they are ever removed, oldest
-    first by modification time, whichever log they belong to. The active files are never
-    touched: the ``HEADROOM`` the budget leaves under the cap is theirs to grow into.
+    Only rotations of the known logs (``LOG_NAMES``, as ``<name>.<n>``) are counted and only
+    they are ever removed, oldest first by modification time, whichever log they belong to.
+    The active files are never touched: the ``HEADROOM`` the budget leaves under the cap is
+    theirs to grow into.
     """
     try:
         rotated = [path for path in directory.iterdir() if path.is_file() and _is_rotated(path)]
@@ -131,7 +138,7 @@ def enforce_cap(directory: Path, budget: int) -> None:
 
 def _is_rotated(path: Path) -> bool:
     stem, _, suffix = path.name.rpartition(".")
-    return bool(stem) and suffix.isdigit()
+    return stem in LOG_NAMES and suffix.isdigit()
 
 
 def _size_of(path: Path) -> int:
@@ -153,14 +160,15 @@ def tail(path: Path, lines: int) -> list[str]:
     file is shorter than that. Empty when there is no such file."""
     collected: list[str] = []
     for candidate in [path, *sorted(rotated_files(path), key=_index)]:
+        wanted = lines - len(collected)
+        if wanted <= 0:
+            break
         try:
             text = candidate.read_text(errors="replace")
         except OSError:
             continue
-        collected = text.splitlines()[-max(lines - len(collected), 0) :] + collected
-        if len(collected) >= lines:
-            break
-    return collected[-lines:] if lines > 0 else []
+        collected = text.splitlines()[-wanted:] + collected
+    return collected
 
 
 class AppLogHandler(logging.Handler):
