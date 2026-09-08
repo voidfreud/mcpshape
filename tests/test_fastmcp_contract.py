@@ -500,6 +500,28 @@ async def test_a_borrowed_client_reports_a_failed_or_unknown_call_as_an_error_re
 # --- what real Upstream transports rely on ---------------------------------------------------
 
 
+async def test_a_stdio_transport_hands_its_child_the_log_file_as_stderr() -> None:
+    """Why an stdio Upstream's stderr can reach the app log (#42).
+
+    ``log_file`` goes to the SDK as the child's ``stderr``, which needs a real file
+    descriptor: the writing end of a pipe is one, and what the child writes comes out of the
+    other end once the Daemon's own copy of the writing end is closed.
+    """
+    reading, writing = os.pipe()
+    with os.fdopen(writing, "w") as errlog:
+        transport = StdioTransport(
+            command=child_upstream.command(),
+            args=child_upstream.args(),
+            env=child_upstream.env(),
+            keep_alive=False,
+            log_file=errlog,
+        )
+        async with Client(transport) as client:
+            assert (await client.call_tool("add", {"a": 1, "b": 1})).data == 2
+    with os.fdopen(reading) as lines:
+        assert child_upstream.STDERR_LINE in lines.read()
+
+
 async def test_a_stdio_transport_ends_its_child_process_only_when_keep_alive_is_off() -> None:
     """Why mcpshape spawns every stdio Upstream with ``keep_alive=False``.
 

@@ -198,10 +198,11 @@ and the Profile writes the common `mcpServers` + `{"type": "http", "url": ...}` 
   one that never connected is harmless, which is what lets a connect cancelled by the connect
   timeout be cleaned up by a callback registered before the connect starts (checked
   2026-09-08, 4.0.3).
-- The SDK hands the child process `sys.stderr` as its error log, so spawning one under Click's
-  `CliRunner`, whose stdout and stderr have no `fileno`, fails with `Client failed to connect:
-  fileno` (checked 2026-09-08). A stdio Upstream is therefore scanned through the Daemon in
-  tests, not through Typer's runner.
+- The SDK hands the child process the stream `StdioTransport.log_file` names, `sys.stderr` by
+  default, as its stderr, and that stream needs a real `fileno`: under Click's `CliRunner`,
+  whose streams have none, the default fails with `Client failed to connect: fileno` (checked
+  2026-09-08). Since #42 mcpshape hands every child the writing end of a pipe instead and
+  reads the other end into the app log, so a stdio Upstream scans under Typer's runner too.
 - What an OAuth Upstream rests on (checked 2026-09-08, 4.0.3 with `mcp` 2.1.1). Sources:
   `fastmcp/client/auth/oauth.py`, `mcp/client/auth/oauth2.py`, `mcp/client/auth/utils.py`,
   `mcp/shared/auth.py`; pinned in `tests/test_fastmcp_contract.py`.
