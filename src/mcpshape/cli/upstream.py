@@ -11,7 +11,7 @@ import typer
 
 from mcpshape import catalog, config
 from mcpshape import tokens as token_store
-from mcpshape.adapters.fastmcp import LoginNeededError, logged_in, login, scan
+from mcpshape.adapters.fastmcp import LoginNeededError, granted_scopes, logged_in, login, scan
 from mcpshape.cli import scan as scanning
 from mcpshape.cli.common import (
     HELP_OPTIONS,
@@ -175,14 +175,40 @@ def show(ctx: typer.Context, name: NameArg) -> None:
 
 
 def login_line(state_dir: Path, upstream: Upstream) -> str:
-    """How the Upstream is authorized, and whether a login is stored. Never a value."""
+    """How the Upstream is authorized, whether a login is stored, and with which scopes.
+    Never a value."""
     if not oauth_upstream(upstream.transport):
         return "Auth: none"
-    if logged_in(token_store.Tokens(state_dir, upstream.name)):
-        return "Auth: OAuth, logged in (the token is encrypted in the state directory)"
+    tokens = token_store.Tokens(state_dir, upstream.name)
+    if not logged_in(tokens):
+        return (
+            f"Auth: OAuth, not logged in. Log in with: "
+            f"[bold]mcpshape upstream sync {upstream.name}[/bold]"
+        )
+    granted = granted_scopes(tokens) or []
+    line = "Auth: OAuth, logged in (the token is encrypted in the state directory)"
+    if granted:
+        line += f"\nScopes granted: {' '.join(granted)}"
+    if note := scope_note(upstream, granted):
+        line += f"\n{note}"
+    return line
+
+
+def scope_note(upstream: Upstream, granted: list[str]) -> str | None:
+    """One line when the login was granted other scopes than the file asks for (#51).
+
+    The browser flow asks for what the provider advertises, not what ``scopes`` says, so a
+    user who set them is told what they got instead; nothing when they match or none is set.
+    """
+    transport = upstream.transport
+    if not isinstance(transport, HttpTransport | SseTransport) or not transport.scopes:
+        return None
+    if set(transport.scopes) == set(granted):
+        return None
     return (
-        f"Auth: OAuth, not logged in. Log in with: "
-        f"[bold]mcpshape upstream sync {upstream.name}[/bold]"
+        f"[yellow]![/] {upstream.name}: the login was granted the scopes "
+        f"'{' '.join(granted) or '(none)'}', not the '{' '.join(transport.scopes)}' its file "
+        "asks for; the provider decides what the browser flow asks for"
     )
 
 
@@ -238,13 +264,19 @@ def scanned(
 
 
 def _scan(config_dir: Path, upstream: Upstream, tokens: token_store.Tokens) -> catalog.Catalog:
-    return asyncio.run(scan(upstream.transport, config.secrets_for(config_dir), tokens))
+    return asyncio.run(
+        scan(upstream.name, upstream.transport, config.secrets_for(config_dir), tokens)
+    )
 
 
 def sync_one(
     config_dir: Path, state_dir: Path, upstream: Upstream, *, accept: bool, device: bool = False
 ) -> None:
     observed = scanned(config_dir, state_dir, upstream, device=device)
+    if oauth_upstream(upstream.transport):
+        granted = granted_scopes(token_store.Tokens(state_dir, upstream.name)) or []
+        if note := scope_note(upstream, granted):
+            console.print(note)
     result = (
         catalog.accept_scan(state_dir, upstream.name, observed)
         if accept

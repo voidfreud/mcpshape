@@ -72,6 +72,8 @@ class Issuer:
     token_ttl: int = 3600
     refresh_accepted: bool = True
     device_offered: bool = True
+    scopes_supported: list[str] = field(default_factory=list[str])
+    """What the authorization server advertises; the SDK asks for these over the client's."""
     device_interval: int = 0
     """Seconds between polls the provider asks for; zero keeps the test quick."""
 
@@ -194,6 +196,8 @@ class Provider:
         }
         if self.issuer.device_offered:
             document["device_authorization_endpoint"] = f"{self.base}/device"
+        if self.issuer.scopes_supported:
+            document["scopes_supported"] = self.issuer.scopes_supported
         return JSONResponse(document)
 
     async def _register(self, request: Request) -> Response:

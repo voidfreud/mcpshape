@@ -236,6 +236,45 @@ async def test_a_login_from_the_cli_makes_a_running_daemon_connect_now(
             assert (await client.call_tool("add", {"a": 2, "b": 3})).data == 5
 
 
+async def test_show_and_sync_say_when_the_browser_flow_was_granted_other_scopes(
+    config_dir: ConfigDir, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#51: the SDK asks for what the provider advertises, not what the file says."""
+    visiting_browser(monkeypatch)
+    async with serving_provider(calculator(), Issuer(scopes_supported=["everything"])) as provider:
+        config_dir.add_upstream(
+            "x",
+            f'transport = "http"\nurl = {json.dumps(provider.mcp_url)}\nauth = "oauth"\n'
+            'scopes = ["read"]\n',
+        )
+        synced = await cli(config_dir, "upstream", "sync", "x")
+        shown = run_cli(config_dir, "upstream", "show", "x")
+
+    assert "Scopes granted: everything" in shown.output
+    for output in (synced.output, shown.output):
+        assert "granted the scopes 'everything', not the 'read'" in output
+        assert access_token(provider) not in output
+
+
+async def test_device_code_pairing_is_granted_the_configured_scopes_with_no_note(
+    config_dir: ConfigDir,
+) -> None:
+    async with serving_provider(calculator(), Issuer(scopes_supported=["everything"])) as provider:
+        config_dir.add_upstream(
+            "x",
+            f'transport = "http"\nurl = {json.dumps(provider.mcp_url)}\nauth = "oauth"\n'
+            'scopes = ["read"]\n',
+        )
+        approving = asyncio.create_task(_approve_when_asked(provider))
+        synced = await cli(config_dir, "upstream", "sync", "x", "--device")
+        await approving
+        shown = run_cli(config_dir, "upstream", "show", "x")
+
+    assert "Scopes granted: read" in shown.output
+    assert "granted the scopes" not in synced.output
+    assert "granted the scopes" not in shown.output
+
+
 # --- reaching the Upstream afterwards ----------------------------------------------------------
 
 
