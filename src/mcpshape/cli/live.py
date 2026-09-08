@@ -2,9 +2,9 @@
 
 Every CLI command works with the Daemon down (story 80), so nothing answering is a state to
 report, not an error. This is the only place the CLI speaks HTTP: a loopback GET of
-``/api/status``, ``/api/logs``, or ``/api/calls``, or a POST to ``/api/reload`` or
-``/api/shutdown``, at the address ``config.toml`` names, read back through the Daemon's own
-models (``mcpshape.api``).
+``/api/status``, ``/api/logs``, or ``/api/calls``, or a POST to ``/api/reload``,
+``/api/shutdown``, or ``/api/upstreams/<name>/connect``, at the address ``config.toml`` names,
+read back through the Daemon's own models (``mcpshape.api``).
 """
 
 from __future__ import annotations
@@ -24,16 +24,16 @@ from mcpshape.api import (
     STATUS_PATH,
     UPSTREAMS_PATH,
     CallsAnswer,
+    ConnectAnswer,
     LiveState,
     LogsAnswer,
-    UpstreamState,
 )
 from mcpshape.config import DaemonSettings, load_settings
 
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from mcpshape.api import ProxyState
+    from mcpshape.api import ProxyState, UpstreamState
     from mcpshape.calls import CallRecord
 
 TIMEOUT = 2.0
@@ -111,14 +111,14 @@ def read_calls(config_dir: Path, limit: int) -> list[CallRecord] | None:
     return None if answer is None else answer.calls
 
 
-def connect_upstream(config_dir: Path, name: str) -> UpstreamState | None:
+def connect_upstream(config_dir: Path, name: str) -> bool:
     """Tell a running Daemon to connect ``name`` now instead of waiting out its backoff (#58).
 
-    What a login from the CLI is followed by. A Daemon that is down is not an error: it
-    reads the stored login when it starts.
+    What a login from the CLI is followed by; ``False`` when no Daemon answered, which is
+    not an error: a Daemon reads the stored login when it starts.
     """
     daemon = load_settings(config_dir).daemon
-    return _read(daemon, f"{UPSTREAMS_PATH}/{name}/connect", "POST", UpstreamState)
+    return _read(daemon, f"{UPSTREAMS_PATH}/{name}/connect", "POST", ConnectAnswer) is not None
 
 
 def _query(path: str, **params: int) -> str:

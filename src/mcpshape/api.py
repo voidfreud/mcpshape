@@ -18,7 +18,7 @@ Routes, all behind the bearer token when one is configured:
   Proxy files, so it stays the CLI's: ``upstream sync --accept``.
 - ``GET`` and ``POST /api/upstreams/<name>/oauth``: the login's state, and starting one.
 - ``POST /api/upstreams/<name>/connect``: connect now instead of waiting out the backoff;
-  answers the Upstream's state. What a login from the CLI is followed by (#58).
+  answers the connection's state. What a login from the CLI is followed by (#58).
 - ``GET /api/calls?upstream=&proxy=&limit=``: the latest calls, oldest first.
 - ``GET /api/logs?lines=``: the app log's tail.
 """
@@ -170,6 +170,12 @@ class LoginState(BaseModel):
     """The provider's page the user must open, while a login is pending."""
     error: str | None = None
     """Why the last login started here failed, until the next one starts."""
+
+
+class ConnectAnswer(BaseModel):
+    """``POST /api/upstreams/<name>/connect``: where the connection stands right after."""
+
+    state: str
 
 
 class CallsAnswer(BaseModel):
@@ -431,8 +437,9 @@ class Management:
 
     async def _connect_of(self, upstream: Upstream) -> JSONResponse:
         """Have an ``unavailable`` Upstream try again now, and say where it stands."""
-        self.connections[upstream.name].retry()
-        return _answer(await self._state_of(upstream))
+        connection = self.connections[upstream.name]
+        connection.retry()
+        return _answer(ConnectAnswer(state=connection.status().state))
 
     async def _calls(self, request: Request) -> JSONResponse:
         """The latest calls of every Proxy, or of the Upstream or Proxy named, oldest first."""

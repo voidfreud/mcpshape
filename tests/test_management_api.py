@@ -168,6 +168,20 @@ async def test_oauth_routes_refuse_a_non_oauth_upstream_and_an_unknown_one(
         assert "nope" in answer["error"]
 
 
+async def test_connect_answers_the_connection_state_and_404s_an_unknown_name(
+    config_dir: ConfigDir,
+) -> None:
+    config_dir.add_memory_upstream("calc", calculator())
+
+    async with running_daemon(config_dir) as daemon:
+        status, answer = await daemon.api("POST", f"{UPSTREAMS_PATH}/calc/connect")
+        assert (status, answer) == (200, {"state": "cold"}), "a cold Upstream is left alone"
+
+        status, answer = await daemon.api("POST", f"{UPSTREAMS_PATH}/nope/connect")
+        assert status == 404
+        assert "nope" in answer["error"]
+
+
 # --- calls and logs ----------------------------------------------------------------------------
 
 
@@ -204,6 +218,7 @@ async def test_bearer_token_gates_every_api_route(config_dir: ConfigDir) -> None
             ("POST", f"{UPSTREAMS_PATH}/calc/sync"),
             ("GET", f"{UPSTREAMS_PATH}/calc/oauth"),
             ("POST", f"{UPSTREAMS_PATH}/calc/oauth"),
+            ("POST", f"{UPSTREAMS_PATH}/calc/connect"),
         )
         for method, path in routes:
             status, answer = await daemon.api(method, path)

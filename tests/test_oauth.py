@@ -22,7 +22,7 @@ from mcp_types import TextContent
 from tests.support import oauth_provider
 from tests.support.clock import FakeClock
 from tests.support.oauth_provider import Issuer, serving_provider
-from tests.support.seam import run_cli, running_daemon, serving_daemon, until
+from tests.support.seam import awaiting_state_at, run_cli, running_daemon, serving_daemon, until
 from tests.test_catalog_drift import cli
 from tests.test_proxy_seam import calculator
 
@@ -204,7 +204,7 @@ async def test_a_refused_login_is_not_a_stored_login_to_show_or_sync(
         assert "OAuth, not logged in" in shown.output
 
         visiting_browser(monkeypatch)
-        synced = await cli(config_dir, "upstream", "sync", "x")
+        synced = await cli(config_dir, "upstream", "sync", "x")  # with no Daemon up: exit 0
 
     assert LOGGED_IN in synced.output
     assert "1 tool" in synced.output
@@ -228,30 +228,12 @@ async def test_a_login_from_the_cli_makes_a_running_daemon_connect_now(
         async with serving_daemon(config_dir, clock) as url, Client(f"{url}/x/mcp") as client:
             failed = await client.call_tool("add", {"a": 1, "b": 1}, raise_on_error=False)
             assert failed.is_error
-            await _awaiting_state(url, "x", "unavailable")
+            await awaiting_state_at(url, "x", "unavailable")
 
             await cli(config_dir, "upstream", "sync", "x")
 
-            await _awaiting_state(url, "x", *CONNECTED)
+            await awaiting_state_at(url, "x", *CONNECTED)
             assert (await client.call_tool("add", {"a": 2, "b": 3})).data == 5
-
-
-async def _awaiting_state(url: str, upstream: str, *states: str, patience: float = 5.0) -> None:
-    """Wait until ``/api/status`` at ``url``, read over the socket from a thread so the Daemon
-    serving it keeps running, says ``upstream`` is in one of ``states``."""
-
-    def state() -> str:
-        answer = httpx2.get(f"{url}/api/status").json()
-        return str(next(u["state"] for u in answer["upstreams"] if u["name"] == upstream))
-
-    deadline = time.monotonic() + patience
-    seen = await asyncio.to_thread(state)
-    while seen not in states:
-        if time.monotonic() > deadline:
-            msg = f"Upstream {upstream} stayed {seen!r}, never reached {states}"
-            raise AssertionError(msg)
-        await asyncio.sleep(0.02)
-        seen = await asyncio.to_thread(state)
 
 
 # --- reaching the Upstream afterwards ----------------------------------------------------------

@@ -1171,12 +1171,11 @@ def logged_in(tokens: Tokens) -> bool:
     """Whether a token set is stored, as opposed to only the client registration.
 
     The SDK writes the registration first, so the file is there from the moment a login
-    starts; the token set is what says the login finished (#56).
+    starts; the token set is what says the login finished (#56). A file that cannot be read
+    raises as ``Tokens.read`` does, naming files and never a value: a key that no longer
+    matches is for the user to hear about, not to log in over.
     """
-    try:
-        document = tokens.read() or {}
-    except Exception:  # noqa: BLE001  # an unreadable file is no login
-        return False
+    document = tokens.read() or {}
     return document.get(_TokenStorage.TOKENS) is not None
 
 
