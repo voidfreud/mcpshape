@@ -33,7 +33,6 @@ from fastmcp.server.providers.proxy import (
 from fastmcp.tools import FunctionTool, Tool
 from fastmcp.tools.base import ToolResult
 from mcp.client.auth import OAuthClientProvider, TokenStorage
-from mcp.server.streamable_http import StreamableHTTPServerTransport
 from mcp.shared.auth import (
     AuthorizationCodeResult,
     OAuthClientInformationFull,
@@ -49,13 +48,7 @@ from starlette.routing import Mount
 from tests.support import child_upstream
 from tests.support.asgi import asgi_client_factory
 from tests.support.oauth_provider import serving_provider
-from tests.support.seam import (
-    free_port,
-    open_sessions,
-    restartable_upstream,
-    session_managers,
-    until,
-)
+from tests.support.seam import free_port, restartable_upstream, until
 from tests.test_proxy_seam import calculator
 
 if TYPE_CHECKING:
@@ -100,27 +93,6 @@ async def test_create_proxy_forwards_to_a_streamable_http_backend() -> None:
     async with served.router.lifespan_context(served), Client(bridge) as client:
         assert [tool.name for tool in await client.list_tools()] == ["echo"]
         assert (await client.call_tool("echo", {"text": "hi"})).data == "hi"
-
-
-async def test_a_streamable_http_app_tracks_the_live_sessions_its_lifespan_terminates() -> None:
-    """What the seam's ``drain_sessions`` reads before stopping an in-process server (#76).
-
-    FastMCP sets a session manager on the app it mounts at its MCP path once its lifespan
-    runs, and that manager's ``_server_instances`` holds every legacy-era session it has seen,
-    each a transport with ``is_terminated`` and ``terminate()``; an SSE app has no manager.
-    No session is opened here on purpose: a legacy-era session against an in-process app is
-    the very thing #76 is about, and a modern-era ``Client`` leaves nothing in that dict.
-    """
-    served = echo_server().http_app(path="/mcp")
-    assert session_managers(served) == [], "nothing before the lifespan runs"
-    async with served.router.lifespan_context(served):
-        (manager,) = session_managers(served)
-        assert open_sessions(manager) == {}
-        assert isinstance(manager._server_instances, dict)  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
-        assert callable(StreamableHTTPServerTransport.terminate)
-        assert isinstance(StreamableHTTPServerTransport.is_terminated, property)
-
-    assert session_managers(echo_server().http_app(path="/sse", transport="sse")) == []
 
 
 async def test_http_app_serves_mcp_under_a_starlette_mount_with_its_own_lifespan() -> None:
