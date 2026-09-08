@@ -20,19 +20,27 @@ is this module's ``_Handle`` over the Upstream's shared client.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import contextlib
 import importlib
 import json
 import logging
+import time
+import webbrowser
 from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal, cast
 
+import httpx2
 import jsonschema
 import mcp_types
 from fastmcp import Client, FastMCP
+from fastmcp.client.oauth_callback import (
+    OAuthCallbackResult,
+    create_oauth_callback_server,
+)
 from fastmcp.client.transports import (
     SSETransport,
     StreamableHttpTransport,
@@ -52,6 +60,14 @@ from fastmcp.server.providers.proxy import (
 )
 from fastmcp.tools import FunctionTool
 from fastmcp.tools.base import ToolResult
+from fastmcp.utilities.http import find_available_port
+from mcp.client.auth import OAuthClientProvider, TokenStorage
+from mcp.shared.auth import (
+    AuthorizationCodeResult,
+    OAuthClientInformationFull,
+    OAuthClientMetadata,
+    OAuthToken,
+)
 from mcp.shared.exceptions import MCPError
 from pydantic import AnyUrl, PrivateAttr, TypeAdapter
 
@@ -78,6 +94,7 @@ if TYPE_CHECKING:
     from mcpshape.hooks import VirtualTool
     from mcpshape.model import Transport, Upstream
     from mcpshape.secrets import Secrets
+    from mcpshape.tokens import Tokens
 
 log = logging.getLogger("mcpshape.adapter")
 
@@ -116,9 +133,10 @@ class _Link:
     a Daemon restart.
     """
 
-    def __init__(self, transport: Transport, secrets: Secrets) -> None:
+    def __init__(self, transport: Transport, secrets: Secrets, tokens: Tokens | None) -> None:
         self.transport = transport
         self.secrets = secrets
+        self.tokens = tokens
         self._open: AsyncExitStack | None = None
         self._client: Client[Any] | None = None
 
@@ -139,8 +157,9 @@ class _Link:
         stack = AsyncExitStack()
         self._open = stack
         try:
-            async with _concealing(self.transport, self.secrets):
-                client: ProxyClient[Any] = ProxyClient(_target(self.transport, self.secrets))
+            async with _concealing(self.transport, self.secrets, self.tokens):
+                target = _target(self.transport, self.secrets, self.tokens)
+                client: ProxyClient[Any] = ProxyClient(target)
                 stack.push_async_callback(client.close)
                 self._client = await stack.enter_async_context(client)
         except BaseException:
@@ -173,8 +192,9 @@ class UpstreamConnection:
         secrets: Secrets,
         clock: Clock | None = None,
         on_catalog: Callable[[Catalog], Awaitable[None]] | None = None,
+        tokens: Tokens | None = None,
     ) -> None:
-        self._link = _Link(upstream.transport, secrets)
+        self._link = _Link(upstream.transport, secrets, tokens)
         self._on_catalog = on_catalog
         self._connection = Connection(
             upstream.name,
@@ -193,7 +213,7 @@ class UpstreamConnection:
         if self._on_catalog is None:
             return
         client = self._link.client
-        async with _concealing(self._link.transport, self._link.secrets), client:
+        async with _concealing(self._link.transport, self._link.secrets, self._link.tokens), client:
             observed = await _catalog_of(client)
         await self._on_catalog(observed)
 
@@ -243,29 +263,35 @@ def proxy_app(
     return ProxyApp(name=name, asgi=app, lifespan=lifespan, serve=serve, fail=runtime.fail)
 
 
-async def scan(transport: Transport, secrets: Secrets) -> Catalog:
+async def scan(transport: Transport, secrets: Secrets, tokens: Tokens | None = None) -> Catalog:
     """Everything the Upstream behind ``transport`` advertises right now.
 
     This opens a connection of its own. An Upstream the Daemon is already connected to is
     looked at over that connection instead, by ``UpstreamConnection``.
     """
-    async with _concealing(transport, secrets), Client(_target(transport, secrets)) as client:
+    async with (
+        _concealing(transport, secrets, tokens),
+        Client(_target(transport, secrets, tokens)) as client,
+    ):
         return await _catalog_of(client)
 
 
 @asynccontextmanager
-async def _concealing(transport: Transport, secrets: Secrets) -> AsyncGenerator[None]:
-    """Let nothing fail with a resolved value in its message.
+async def _concealing(
+    transport: Transport, secrets: Secrets, tokens: Tokens | None = None
+) -> AsyncGenerator[None]:
+    """Let nothing fail with a resolved value or a stored token in its message.
 
     Whatever reaching the Upstream raises is re-raised as ``UpstreamTargetError`` with every
-    resolved ``${VAR}`` written back as the reference, since the message goes on to the log,
-    the status, and the terminal. The original is dropped, as its text is what leaks.
+    resolved ``${VAR}`` written back as the reference and every stored OAuth token written as
+    what it is, since the message goes on to the log, the status, and the terminal. The
+    original is dropped, as its text is what leaks.
     """
     try:
         yield
     except Exception as exc:  # noqa: BLE001  # whatever it was, its text must not leak
         message = secrets.concealed(str(exc) or type(exc).__name__, transport)
-        raise UpstreamTargetError(message) from None
+        raise UpstreamTargetError(tokens.concealed(message) if tokens else message) from None
 
 
 async def _catalog_of(client: Client[Any]) -> Catalog:
@@ -817,12 +843,18 @@ def _renamed[C: BaseModel](component: C, origin: str, exposed: str, key: str, va
     return component.model_copy(update={key: value})
 
 
-def _target(transport: Transport, secrets: Secrets) -> ClientTransport | FastMCP[Any]:
+def _target(
+    transport: Transport, secrets: Secrets, tokens: Tokens | None = None
+) -> ClientTransport | FastMCP[Any]:
     """How FastMCP reaches this Upstream, with every ``${VAR}`` in it resolved.
 
     An stdio Upstream is a child process of the Daemon: ``keep_alive`` is off, because when
     the connection is let go the process goes with it (the Upstream's lifecycle decides that,
     not FastMCP).
+
+    An Upstream reached by URL that says ``auth = "oauth"`` carries the stored login, and
+    nothing here ever opens a browser: the Daemon refuses instead, naming the command that
+    logs in (``login``, which the CLI calls).
     """
     match secrets.expanded(transport):
         case StdioTransport() as stdio:
@@ -832,10 +864,8 @@ def _target(transport: Transport, secrets: Secrets) -> ClientTransport | FastMCP
                 env=dict(stdio.env) or None,
                 keep_alive=False,
             )
-        case HttpTransport() as http:
-            return StreamableHttpTransport(http.url)
-        case SseTransport() as sse:
-            return SSETransport(sse.url)
+        case HttpTransport() | SseTransport() as remote:
+            return _remote_target(remote, _stored_auth(remote, tokens))
         case MemoryTransport() as memory:
             return _import_server(memory.module, memory.attribute)
 
@@ -850,3 +880,405 @@ def _import_server(module: str, attribute: str) -> FastMCP[Any]:
         msg = f"{module}:{attribute} is not an in-memory MCP server"
         raise UpstreamTargetError(msg)
     return cast("FastMCP[Any]", server)
+
+
+# --- OAuth: how an Upstream reached by URL is authorized ---------------------------------------
+
+CLIENT_NAME = "mcpshape"
+"""What mcpshape registers itself as with a provider, and what the user sees on the consent
+screen."""
+
+CALLBACK_HOST = "127.0.0.1"
+CALLBACK_PATH = "/callback"
+CALLBACK_TIMEOUT = 300.0
+"""Seconds the loopback callback waits for the browser before the login is given up on."""
+
+DEVICE_GRANT = "urn:ietf:params:oauth:grant-type:device_code"
+"""RFC 8628's grant type, for the machines where no browser can open."""
+
+DEVICE_PATIENCE = 300.0
+"""Seconds device-code pairing waits for the user to approve at the provider."""
+
+OK, CREATED = 200, 201
+"""The two answers a provider gives to a request that worked."""
+
+NO_REDIRECT = "http://localhost/callback"
+"""The redirect the Daemon registers as, and never uses: nothing redirects to a Daemon."""
+
+
+class OAuthError(Exception):
+    """A login with the provider could not be completed. Names endpoints, never a token."""
+
+
+def login_message(upstream: str) -> str:
+    """Why an OAuth Upstream could not be reached, and the one command that fixes it."""
+    return (
+        f"the Upstream {upstream} has no usable OAuth token, so nothing was sent; "
+        f"log in with: mcpshape upstream sync {upstream}"
+    )
+
+
+class _TokenStorage(TokenStorage):
+    """The MCP SDK's token storage over ``mcpshape.tokens``: one encrypted file per Upstream.
+
+    Everything the login produced lives in one document, so the token set and the dynamic
+    client registration are written and read together and neither can outlive the other.
+
+    ``expires_in`` is a duration the provider measured from the moment it answered, which says
+    nothing after a Daemon restart, so the moment it runs out is what is stored and the
+    duration is recomputed from it on every read.
+    """
+
+    TOKENS = "tokens"
+    EXPIRES_AT = "expires_at"
+    CLIENT = "client"
+
+    def __init__(self, tokens: Tokens) -> None:
+        self._tokens = tokens
+
+    async def get_tokens(self) -> OAuthToken | None:
+        document = self._tokens.read() or {}
+        stored: Any = document.get(self.TOKENS)
+        if stored is None:
+            return None
+        token = OAuthToken.model_validate(stored)
+        expires_at: Any = document.get(self.EXPIRES_AT)
+        if expires_at is not None:
+            token.expires_in = max(int(float(expires_at) - time.time()), 0)
+        return token
+
+    async def set_tokens(self, tokens: OAuthToken) -> None:
+        document = self._tokens.read() or {}
+        document[self.TOKENS] = tokens.model_dump(mode="json", exclude_none=True)
+        document[self.EXPIRES_AT] = (
+            time.time() + tokens.expires_in if tokens.expires_in is not None else None
+        )
+        self._tokens.write(document)
+
+    async def get_client_info(self) -> OAuthClientInformationFull | None:
+        document = self._tokens.read() or {}
+        stored: Any = document.get(self.CLIENT)
+        return None if stored is None else OAuthClientInformationFull.model_validate(stored)
+
+    async def set_client_info(self, client_info: OAuthClientInformationFull) -> None:
+        document = self._tokens.read() or {}
+        document[self.CLIENT] = client_info.model_dump(mode="json", exclude_none=True)
+        self._tokens.write(document)
+
+
+class _Provider(OAuthClientProvider):
+    """The MCP SDK's OAuth client, told when the stored token runs out.
+
+    The SDK loads a token without its expiry, so a token stored long enough ago to be dead
+    would be sent once and rejected. The storage hands back the duration that is left, and
+    this turns it into the moment the token stops being sent.
+    """
+
+    async def _initialize(self) -> None:
+        await super()._initialize()
+        if self.context.current_tokens is not None:
+            self.context.update_token_expiry(self.context.current_tokens)
+
+
+type _Redirect = Callable[[str], Awaitable[None]]
+type _Callback = Callable[[], Awaitable[AuthorizationCodeResult]]
+
+
+def _remote_target(
+    remote: HttpTransport | SseTransport, auth: httpx2.Auth | None
+) -> ClientTransport:
+    if isinstance(remote, HttpTransport):
+        return StreamableHttpTransport(remote.url, auth=auth)
+    return SSETransport(remote.url, auth=auth)
+
+
+def _stored_auth(remote: HttpTransport | SseTransport, tokens: Tokens | None) -> httpx2.Auth | None:
+    """The Upstream's stored login, or nothing when it needs none.
+
+    In the Daemon there is no browser and no loopback callback: an Upstream with no usable
+    token fails to connect, naming the command that logs it in, which the state machine turns
+    into ``unavailable`` with that reason.
+    """
+    if remote.auth is None:
+        return None
+    if tokens is None:
+        msg = "an OAuth Upstream is reached from where no stored login can be read"
+        raise UpstreamTargetError(msg)
+    if not tokens.stored():
+        raise UpstreamTargetError(login_message(tokens.upstream))
+    redirect, callback = _refusing(tokens.upstream)
+    return _provider(remote, tokens, NO_REDIRECT, redirect, callback)
+
+
+def _refusing(upstream: str) -> tuple[_Redirect, _Callback]:
+    """Handlers that say what to run instead of opening a browser nobody is sitting at."""
+
+    async def redirect(_url: str) -> None:
+        raise UpstreamTargetError(login_message(upstream))
+
+    async def callback() -> AuthorizationCodeResult:
+        raise UpstreamTargetError(login_message(upstream))
+
+    return redirect, callback
+
+
+def _provider(
+    remote: HttpTransport | SseTransport,
+    tokens: Tokens,
+    redirect_uri: str,
+    redirect: _Redirect,
+    callback: _Callback,
+) -> OAuthClientProvider:
+    return _Provider(
+        server_url=remote.url,
+        client_metadata=OAuthClientMetadata(
+            client_name=CLIENT_NAME,
+            redirect_uris=[AnyUrl(redirect_uri)],
+            grant_types=["authorization_code", "refresh_token"],
+            response_types=["code"],
+            scope=" ".join(remote.scopes) or None,
+        ),
+        storage=_TokenStorage(tokens),
+        redirect_handler=redirect,
+        callback_handler=callback,
+    )
+
+
+async def login(
+    transport: Transport,
+    secrets: Secrets,
+    tokens: Tokens,
+    announce: Callable[[str], None],
+    *,
+    device: bool = False,
+) -> None:
+    """Log this Upstream in with its provider and keep what came back (stories 3 and 4).
+
+    The browser flow opens the provider's page and receives the answer on a loopback port the
+    provider redirects to. Device-code pairing instead prints a URI and a code to type there,
+    for the machines where no browser can open, and needs a provider that offers it.
+
+    Whatever comes back is written through the same token store the Daemon reads, so a Daemon
+    started afterwards, or restarted later, uses it without asking again. ``announce`` is how
+    the CLI is told what to do; nothing it is given is ever a token.
+    """
+    remote = _logging_in(secrets.expanded(transport))
+    async with _concealing(transport, secrets, tokens):
+        if device:
+            await _device_login(remote, tokens, announce)
+        else:
+            await _browser_login(remote, tokens, announce)
+
+
+def _logging_in(transport: Transport) -> HttpTransport | SseTransport:
+    if not isinstance(transport, HttpTransport | SseTransport) or transport.auth != "oauth":
+        msg = 'only an Upstream reached by URL with auth = "oauth" has a login to perform'
+        raise UpstreamTargetError(msg)
+    return transport
+
+
+async def _browser_login(
+    remote: HttpTransport | SseTransport, tokens: Tokens, announce: Callable[[str], None]
+) -> None:
+    """Open the provider's page and take the answer on a loopback port (story 3).
+
+    The connect is what drives the flow: the Upstream answers the first request with a 401,
+    and the SDK discovers the provider, registers, and exchanges the code from there.
+    """
+    port = find_available_port(host=CALLBACK_HOST)
+    redirect_uri = f"http://{CALLBACK_HOST}:{port}{CALLBACK_PATH}"
+
+    async def redirect(authorization_url: str) -> None:
+        announce("Opening your browser to finish the login.")
+        webbrowser.open(authorization_url)
+
+    async def callback() -> AuthorizationCodeResult:
+        return await _await_callback(port, remote.url)
+
+    auth = _provider(remote, tokens, redirect_uri, redirect, callback)
+    async with Client(_remote_target(remote, auth)):
+        announce("Logged in.")
+
+
+async def _await_callback(port: int, mcp_url: str) -> AuthorizationCodeResult:
+    """Serve the loopback callback until the browser reaches it, and say what it carried."""
+    result = OAuthCallbackResult()
+    ready = asyncio.Event()
+    server = create_oauth_callback_server(
+        port=port,
+        host=CALLBACK_HOST,
+        callback_path=CALLBACK_PATH,
+        server_url=mcp_url,
+        result_container=result,
+        result_ready=cast("Any", ready),
+    )
+    serving = asyncio.create_task(server.serve())
+    try:
+        await asyncio.wait_for(ready.wait(), CALLBACK_TIMEOUT)
+    except TimeoutError as exc:
+        msg = f"the browser did not reach the callback within {CALLBACK_TIMEOUT:.0f} seconds"
+        raise OAuthError(msg) from exc
+    finally:
+        server.should_exit = True
+        with contextlib.suppress(asyncio.CancelledError):
+            await serving
+    if result.error is not None:
+        raise OAuthError(str(result.error))
+    return AuthorizationCodeResult(code=result.code or "", state=result.state, iss=result.iss)
+
+
+async def _device_login(
+    remote: HttpTransport | SseTransport, tokens: Tokens, announce: Callable[[str], None]
+) -> None:
+    """Pair by device code where the provider offers it (RFC 8628, story 4).
+
+    The MCP SDK drives only the browser flow, so this speaks to the provider directly: it
+    reads the endpoints out of the authorization server's metadata, registers the way the SDK
+    would, asks for a device code, and polls the token endpoint until the user has approved.
+    What it stores is what the browser flow stores, so nothing downstream can tell the two
+    apart.
+    """
+    storage = _TokenStorage(tokens)
+    async with httpx2.AsyncClient(follow_redirects=True) as http:
+        metadata = await _authorization_server(http, remote.url)
+        endpoint = metadata.get("device_authorization_endpoint")
+        if not isinstance(endpoint, str):
+            msg = (
+                f"the provider behind {remote.url} offers no device-code pairing; "
+                "log in from a machine with a browser instead"
+            )
+            raise OAuthError(msg)
+        client = await _device_client(http, metadata, storage, remote.scopes)
+        pairing = await _device_code(http, endpoint, client, remote.scopes)
+        announce(f"Open {pairing['verification_uri']} and enter the code {pairing['user_code']}")
+        answer = await _await_approval(http, str(metadata["token_endpoint"]), client, pairing)
+        await storage.set_tokens(OAuthToken.model_validate(answer))
+    announce("Logged in.")
+
+
+async def _authorization_server(http: httpx2.AsyncClient, mcp_url: str) -> dict[str, Any]:
+    """The provider's metadata for the Upstream at ``mcp_url``, found the way the SDK finds it.
+
+    The protected resource's metadata names the authorization server; where there is none, the
+    Upstream's own origin is the authorization server, as the 2025-03-26 spec had it.
+    """
+    origin = _origin(mcp_url)
+    path = httpx2.URL(mcp_url).path.rstrip("/")
+    resource = await _first_json(
+        http,
+        [
+            f"{origin}/.well-known/oauth-protected-resource{path}",
+            f"{origin}/.well-known/oauth-protected-resource",
+        ],
+    )
+    servers: Any = (resource or {}).get("authorization_servers") or [origin]
+    server = _origin(str(servers[0]))
+    metadata = await _first_json(
+        http,
+        [
+            f"{server}/.well-known/oauth-authorization-server",
+            f"{server}/.well-known/openid-configuration",
+        ],
+    )
+    if metadata is None or "token_endpoint" not in metadata:
+        msg = f"{server} publishes no authorization server metadata"
+        raise OAuthError(msg)
+    return metadata
+
+
+def _origin(url: str) -> str:
+    parsed = httpx2.URL(url)
+    return f"{parsed.scheme}://{parsed.netloc.decode()}"
+
+
+async def _first_json(http: httpx2.AsyncClient, urls: Sequence[str]) -> dict[str, Any] | None:
+    for url in urls:
+        answer = await http.get(url)
+        if answer.status_code == OK:
+            document: dict[str, Any] = answer.json()
+            return document
+    return None
+
+
+async def _device_client(
+    http: httpx2.AsyncClient,
+    metadata: dict[str, Any],
+    storage: _TokenStorage,
+    scopes: Sequence[str],
+) -> OAuthClientInformationFull:
+    """The registration to pair with: the stored one, or a fresh one asking for the grant."""
+    stored = await storage.get_client_info()
+    if stored is not None and DEVICE_GRANT in stored.grant_types:
+        return stored
+    endpoint = metadata.get("registration_endpoint")
+    if not isinstance(endpoint, str):
+        msg = "the provider registers no clients, so device-code pairing has nothing to pair"
+        raise OAuthError(msg)
+    answer = await http.post(
+        endpoint,
+        json={
+            "client_name": CLIENT_NAME,
+            "grant_types": [DEVICE_GRANT, "refresh_token"],
+            "response_types": [],
+            "token_endpoint_auth_method": "none",
+            "scope": " ".join(scopes),
+        },
+    )
+    if answer.status_code not in {OK, CREATED}:
+        msg = f"{endpoint} refused to register mcpshape ({answer.status_code})"
+        raise OAuthError(msg)
+    client = OAuthClientInformationFull.model_validate(answer.json())
+    await storage.set_client_info(client)
+    return client
+
+
+async def _device_code(
+    http: httpx2.AsyncClient,
+    endpoint: str,
+    client: OAuthClientInformationFull,
+    scopes: Sequence[str],
+) -> dict[str, Any]:
+    answer = await http.post(
+        endpoint, data={"client_id": client.client_id, "scope": " ".join(scopes)}
+    )
+    if answer.status_code != OK:
+        msg = f"{endpoint} refused to start device-code pairing ({answer.status_code})"
+        raise OAuthError(msg)
+    pairing: dict[str, Any] = answer.json()
+    return pairing
+
+
+async def _await_approval(
+    http: httpx2.AsyncClient,
+    token_endpoint: str,
+    client: OAuthClientInformationFull,
+    pairing: dict[str, Any],
+) -> dict[str, Any]:
+    """Ask the token endpoint for the pairing's token until the user has approved it.
+
+    ``authorization_pending`` and ``slow_down`` are the provider saying "not yet" and "not so
+    often"; anything else is the end of it.
+    """
+    interval = float(pairing.get("interval") or 5)
+    deadline = time.monotonic() + DEVICE_PATIENCE
+    while time.monotonic() < deadline:
+        answer = await http.post(
+            token_endpoint,
+            data={
+                "grant_type": DEVICE_GRANT,
+                "device_code": pairing["device_code"],
+                "client_id": client.client_id,
+            },
+        )
+        body: dict[str, Any] = answer.json()
+        if answer.status_code == OK:
+            return body
+        error = str(body.get("error"))
+        if error == "slow_down":
+            interval += 5
+        elif error != "authorization_pending":
+            msg = f"the provider refused the pairing: {error}"
+            raise OAuthError(msg)
+        await asyncio.sleep(interval)
+    msg = f"nobody approved the pairing within {DEVICE_PATIENCE:.0f} seconds"
+    raise OAuthError(msg)

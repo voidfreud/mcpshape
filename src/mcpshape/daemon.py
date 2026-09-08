@@ -44,6 +44,7 @@ from mcpshape.hooks import UserCodeError, load_user_code
 from mcpshape.model import DEFAULT_PROXY_NAME, CapError, CapSettings
 from mcpshape.paths import daemon_log_file
 from mcpshape.proxy import Exposed, OverrideError, cap, expose
+from mcpshape.tokens import Tokens
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Awaitable, Callable
@@ -320,7 +321,7 @@ async def rescan(state_dir: Path, secrets: Secrets, upstream: Upstream) -> None:
     concurrent ``upstream sync``; a thread keeps that wait off the Daemon's own event loop.
     """
     try:
-        observed = await scan(upstream.transport, secrets)
+        observed = await scan(upstream.transport, secrets, Tokens(state_dir, upstream.name))
         await asyncio.to_thread(catalogs.record_scan, state_dir, upstream.name, observed)
     except Exception:  # an Upstream that cannot be reached must not keep the Daemon from starting
         log.warning("Upstream %s could not be scanned", upstream.name, exc_info=True)
@@ -389,6 +390,7 @@ def build_app(
             secrets,
             clock,
             on_catalog=partial(record_observation, state_dir, upstream.name),
+            tokens=Tokens(state_dir, upstream.name),
         )
         for upstream in upstreams
     }

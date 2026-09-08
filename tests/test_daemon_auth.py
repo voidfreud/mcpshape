@@ -14,7 +14,7 @@ if TYPE_CHECKING:
 
     from tests.support.seam import ConfigDir
 
-TOKEN = "s3cret"  # noqa: S105  # a test fixture, not a real credential
+TOKEN = "s3cret"  # a test fixture, not a real credential
 
 
 async def test_a_request_with_no_token_is_refused_when_one_is_configured(

@@ -55,16 +55,19 @@ def main(
 @app.command(
     "add", epilog=example("add github --stdio 'npx -y @modelcontextprotocol/server-github'")
 )
-def add(
+def add(  # noqa: PLR0913  # one option per way of naming and authorizing an Upstream
     ctx: typer.Context,
     name: upstream.NameArg,
     stdio: upstream.StdioOpt = None,
     url: upstream.UrlOpt = None,
     *,
     sse: upstream.SseOpt = False,
+    oauth: upstream.OAuthOpt = False,
+    device: upstream.DeviceOpt = False,
 ) -> None:
     """Add an Upstream and its default Proxy. Same as `upstream add`."""
-    upstream.add_upstream(ctx, name, upstream.transport_from_options(stdio, url, sse=sse))
+    transport = upstream.transport_from_options(stdio, url, sse=sse, oauth=oauth, device=device)
+    upstream.add_upstream(ctx, name, transport, device=device)
 
 
 @app.command("ls", epilog=example("ls"))

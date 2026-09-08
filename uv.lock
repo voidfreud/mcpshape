@@ -718,6 +718,7 @@ name = "mcpshape"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "cryptography" },
     { name = "fastmcp" },
     { name = "jsonschema" },
     { name = "pydantic" },
@@ -737,6 +738,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "cryptography", specifier = ">=50" },
     { name = "fastmcp", specifier = ">=4,<5" },
     { name = "jsonschema", specifier = ">=4" },
     { name = "pydantic", specifier = ">=2.13.5" },

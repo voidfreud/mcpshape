@@ -190,3 +190,40 @@ and the Profile writes the common `mcpServers` + `{"type": "http", "url": ...}` 
   `CliRunner`, whose stdout and stderr have no `fileno`, fails with `Client failed to connect:
   fileno` (checked 2026-09-08). A stdio Upstream is therefore scanned through the Daemon in
   tests, not through Typer's runner.
+- What an OAuth Upstream rests on (checked 2026-09-08, 4.0.3 with `mcp` 2.1.1). Sources:
+  `fastmcp/client/auth/oauth.py`, `mcp/client/auth/oauth2.py`, `mcp/client/auth/utils.py`,
+  `mcp/shared/auth.py`; pinned in `tests/test_fastmcp_contract.py`.
+  - `fastmcp.client.auth.OAuth` always opens a browser (`webbrowser.open` in its own
+    `redirect_handler`) and always runs a loopback uvicorn callback server; neither handler is
+    a constructor parameter, and its `token_storage` is an `AsyncKeyValue`, not the SDK's
+    `TokenStorage`. mcpshape therefore builds `mcp.client.auth.OAuthClientProvider` itself,
+    which does take `redirect_handler`, `callback_handler`, and a `TokenStorage`.
+  - `TokenStorage` is a four-method async protocol: `get_tokens`, `set_tokens`,
+    `get_client_info`, `set_client_info`, over `OAuthToken` and `OAuthClientInformationFull`.
+    Both are pydantic models that round-trip through `model_dump(mode="json")`; a plain
+    `model_dump()` leaves `AnyUrl` objects `json.dumps` refuses.
+  - A `ClientTransport` given an `auth=` that is not FastMCP's own `OAuth` passes it to httpx
+    as it stands: it is neither bound to the URL nor handed the transport's client factory.
+  - `OAuthClientProvider._initialize` loads the stored token set but leaves
+    `token_expiry_time` unset, so a token stored long ago would be sent once and rejected.
+    mcpshape stores the moment a token dies and sets the expiry on load, as FastMCP's own
+    `OAuth` does.
+  - A refresh that fails raises nothing: the provider logs it, clears the token set, and falls
+    through to the full authorization flow, which reaches the redirect handler. That is why an
+    expired, non-refreshable token surfaces through a handler that refuses, not an exception.
+  - Discovery starts from a 401 only, and in this order: the `WWW-Authenticate`
+    `resource_metadata` URL, `/.well-known/oauth-protected-resource<path>`, then the root one;
+    then the authorization server's `/.well-known/oauth-authorization-server`, with
+    `openid-configuration` as the fallback. The metadata `issuer` must equal the discovered
+    authorization server URL as a plain string.
+  - Scope selection overwrites what the client asked for: the `WWW-Authenticate` scope, else
+    the protected resource's `scopes_supported`, else the authorization server's. An
+    Upstream's own `scopes` therefore only decide what the browser flow asks for where the
+    provider advertises nothing, and device-code pairing, which mcpshape drives itself, uses
+    them as written.
+  - There is no device-code grant in FastMCP 4.0.3 or `mcp` 2.1.1, and no `FileTokenStorage`:
+    the default store is in memory and warns. mcpshape speaks RFC 8628 to the provider itself,
+    with the `httpx2` FastMCP already ships.
+  - `fastmcp.client.oauth_callback.create_oauth_callback_server` serves `/callback` on a given
+    port and fills an `OAuthCallbackResult` with the code, state, and `iss`, then sets the
+    event it was handed; the event is only ever `.set()`, so an `asyncio.Event` does.

@@ -9,6 +9,7 @@ authors = [
 ]
 requires-python = ">=3.12"
 dependencies = [
+    "cryptography>=50",
     "fastmcp>=4,<5",
     "jsonschema>=4",
     "pydantic>=2.13.5",
@@ -52,6 +53,8 @@ ignore = [
 "tests/**" = [
     "S101",    # asserts are the point of tests
     "PLR2004", # literal expected values are the point of tests
+    "S105",    # a made-up token in a fixture is not a leaked credential
+    "S106",
 ]
 
 [tool.pyright]

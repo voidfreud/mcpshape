@@ -84,13 +84,35 @@
     "HttpUpstreamFile": {
       "additionalProperties": false,
       "properties": {
+        "url": {
+          "title": "Url",
+          "type": "string"
+        },
+        "auth": {
+          "anyOf": [
+            {
+              "const": "oauth",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "How the Upstream is authorized. \"oauth\" logs in through the provider once, from the CLI, and keeps the token encrypted in the state directory; unset sends no credentials.",
+          "title": "Auth"
+        },
+        "scopes": {
+          "description": "OAuth scopes to ask the provider for. Empty leaves the choice to the provider and what the Upstream's metadata advertises.",
+          "items": {
+            "type": "string"
+          },
+          "title": "Scopes",
+          "type": "array"
+        },
         "transport": {
           "const": "http",
           "title": "Transport",
-          "type": "string"
-        },
-        "url": {
-          "title": "Url",
           "type": "string"
         },
         "version": {
@@ -109,8 +131,8 @@
         }
       },
       "required": [
-        "transport",
         "url",
+        "transport",
         "version"
       ],
       "title": "HttpUpstreamFile",
@@ -196,13 +218,35 @@
     "SseUpstreamFile": {
       "additionalProperties": false,
       "properties": {
+        "url": {
+          "title": "Url",
+          "type": "string"
+        },
+        "auth": {
+          "anyOf": [
+            {
+              "const": "oauth",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "How the Upstream is authorized. \"oauth\" logs in through the provider once, from the CLI, and keeps the token encrypted in the state directory; unset sends no credentials.",
+          "title": "Auth"
+        },
+        "scopes": {
+          "description": "OAuth scopes to ask the provider for. Empty leaves the choice to the provider and what the Upstream's metadata advertises.",
+          "items": {
+            "type": "string"
+          },
+          "title": "Scopes",
+          "type": "array"
+        },
         "transport": {
           "const": "sse",
           "title": "Transport",
-          "type": "string"
-        },
-        "url": {
-          "title": "Url",
           "type": "string"
         },
         "version": {
@@ -221,8 +265,8 @@
         }
       },
       "required": [
-        "transport",
         "url",
+        "transport",
         "version"
       ],
       "title": "SseUpstreamFile",
