@@ -89,17 +89,10 @@ def command_problems(config_dir: Path) -> list[config.Problem]:
     return problems
 
 
-@dataclass(frozen=True)
-class Level:
-    """Where a Cap kind's value in force was set: the level name plus the file to edit."""
+CAPS_KEY = "[caps]"
+"""The key a Cap finding is filed under, in the file it names."""
 
-    label: str
-
-    def __str__(self) -> str:
-        return self.label
-
-
-DEFAULT_LEVEL = Level("the default (config.toml [caps])")
+DEFAULT_LEVEL = "the default (config.toml [caps])"
 """Named when no level set a kind: the value in force is the built-in default, and the place
 to set it is config.toml."""
 
@@ -110,10 +103,11 @@ class ResolvedCaps:
     each kind still on hand so ``doctor --for`` can name it."""
 
     values: CapSettings
-    set_by: dict[str, Level]
-    """Only the kinds a level actually set; a kind missing here took the default."""
+    set_by: dict[str, str]
+    """By kind, the level that set it and the file to edit; a kind missing here took the
+    default."""
 
-    def level(self, kind: str) -> Level:
+    def level(self, kind: str) -> str:
         return self.set_by.get(kind, DEFAULT_LEVEL)
 
 
@@ -147,7 +141,7 @@ def curations(config_dir: Path, state_dir: Path) -> list[Curation | config.Probl
     """Every Proxy file with its Upstream's stored Catalog; unscanned Upstreams are skipped."""
     found: list[Curation | config.Problem] = []
     global_caps = config.load_settings(config_dir).caps
-    global_set_by = {kind: Level("config.toml [caps]") for kind in given_kinds(global_caps)}
+    global_set_by = dict.fromkeys(given_kinds(global_caps), "config.toml [caps]")
     for upstream in config.load_upstreams(config_dir):
         stored = catalog.load_catalog(state_dir, upstream.name)
         if stored is None:
@@ -159,7 +153,7 @@ def curations(config_dir: Path, state_dir: Path) -> list[Curation | config.Probl
             found.append(config.Problem(where, "", str(exc)))
             continue
         upstream_file = f"{config.UPSTREAMS_DIR}/{upstream.name}/{config.UPSTREAM_FILE} [caps]"
-        upstream_level = Level(f"Upstream {upstream.name} ({upstream_file})")
+        upstream_level = f"Upstream {upstream.name} ({upstream_file})"
         upstream_set_by = {
             **global_set_by,
             **dict.fromkeys(given_kinds(upstream.caps), upstream_level),
@@ -177,7 +171,7 @@ def curations(config_dir: Path, state_dir: Path) -> list[Curation | config.Probl
                 found.append(config.Problem(path, "", str(exc)))
                 continue
             proxy_file_label = f"{config.UPSTREAMS_DIR}/{upstream.name}/{proxy}.toml [caps]"
-            proxy_level = Level(f"Proxy {upstream.name}/{proxy} ({proxy_file_label})")
+            proxy_level = f"Proxy {upstream.name}/{proxy} ({proxy_file_label})"
             proxy_set_by = {
                 **upstream_set_by,
                 **dict.fromkeys(given_kinds(proxy_file.caps), proxy_level),
@@ -255,9 +249,10 @@ class Review:
     problems: list[config.Problem] = field(default_factory=list[config.Problem])
     warnings: list[config.Problem] = field(default_factory=list[config.Problem])
     notes: list[str] = field(default_factory=list[str])
-    cap_findings: list[config.Problem] = field(default_factory=list[config.Problem])
-    """Cap warnings ``check_caps`` added, tracked apart from ``warnings`` so ``review`` knows
-    whether the generic Caps note still applies."""
+
+    def caps_over(self) -> bool:
+        """Whether ``check_caps`` found a Proxy's Cap above what the Client cuts at."""
+        return any(warning.key == CAPS_KEY for warning in self.warnings)
 
     def check_proxy(self, path: Path, server: str, exposed: Exposed) -> None:
         """Judge one Proxy's exposed tools by the Client's naming scheme and property rule."""
@@ -294,15 +289,15 @@ class Review:
             if value <= ceiling:
                 continue
             label = kind.replace("_", " ")
-            problem = config.Problem(
-                path,
-                "[caps]",
-                f"the {label} Cap in force is {value}, set by {resolved.level(kind)}; "
-                f"{self.client.name} cuts at {ceiling} ({caps.source}). "
-                f"Set {kind} = {ceiling} or lower there.",
+            self.warnings.append(
+                config.Problem(
+                    path,
+                    CAPS_KEY,
+                    f"the {label} Cap in force is {value}, set by {resolved.level(kind)}; "
+                    f"{self.client.name} cuts at {ceiling} ({caps.source}). "
+                    f"Set {kind} = {ceiling} or lower there.",
+                )
             )
-            self.warnings.append(problem)
-            self.cap_findings.append(problem)
 
 
 def review(config_dir: Path, state_dir: Path, client: Profile) -> Review:
@@ -323,7 +318,7 @@ def review(config_dir: Path, state_dir: Path, client: Profile) -> Review:
         except (OverrideError, CapError):
             continue  # reported as a problem already
         found.check_proxy(curation.path, curation.server, exposed)
-    if (caps := client.caps).source is not None and not found.cap_findings:
+    if (caps := client.caps).source is not None and not found.caps_over():
         found.notes.append(
             f"{client.name}: the Caps in force are within the {caps.tool_description} "
             f"characters for a tool description and {caps.instructions} for instructions "
@@ -343,7 +338,7 @@ ForOpt = Annotated[
 ]
 
 
-def _print_problems(problems: list[config.Problem] | list[str]) -> None:
+def _print_problems(problems: list[config.Problem]) -> None:
     for problem in problems:
         console.print(f"[red]✗[/] {escape(str(problem))}")
 
@@ -357,11 +352,13 @@ def doctor(ctx: typer.Context, for_client: ForOpt = None) -> None:
         problems.extend(config.check_file(path, kind))
     problems.extend(config.secret_problems(config_dir))
     problems.extend(command_problems(config_dir))
+    problems.extend(
+        config.Problem(unit, "", f"the installed unit runs {executable}, which no longer exists")
+        for unit, executable in autostart.stale_units()
+    )
     console.print(f"Checked {len(files)} file(s) in {config_dir}")
-    stale_units = autostart.stale_unit_problems()
     _print_problems(problems)
-    _print_problems(stale_units)
-    if problems or stale_units:
+    if problems:
         raise typer.Exit(1)
     try:
         problems = override_problems(config_dir, state_dir)

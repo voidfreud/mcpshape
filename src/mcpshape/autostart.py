@@ -178,23 +178,19 @@ def unit_executable(path: Path) -> Path | None:
     return None
 
 
-def stale_unit_problems() -> list[str]:
-    """Whichever autostart unit is installed on this platform, one message per unit whose
-    executable has since moved or been removed: a Daemon that cannot start is not a warning."""
-    if platform.system() == "Darwin":
-        candidates = [launchd_plist_path()]
-    elif platform.system() == "Linux":
-        candidates = [systemd_unit_path()]
-    else:
-        candidates = []
-    problems: list[str] = []
+def stale_units() -> list[tuple[Path, Path]]:
+    """Whichever autostart unit is installed on this platform, each unit whose executable has
+    since moved or been removed, as ``(unit, executable)``: a Daemon that cannot start."""
+    system = platform.system()
+    candidates = {"Darwin": [launchd_plist_path()], "Linux": [systemd_unit_path()]}.get(system, [])
+    stale: list[tuple[Path, Path]] = []
     for path in candidates:
         if not path.is_file():
             continue
         executable = unit_executable(path)
         if executable is not None and not executable.exists():
-            problems.append(f"{path}: the installed unit runs {executable}, which no longer exists")
-    return problems
+            stale.append((path, executable))
+    return stale
 
 
 # --- registering: the thin edge, never called in tests -------------------------------------------

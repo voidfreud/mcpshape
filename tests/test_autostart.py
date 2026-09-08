@@ -18,7 +18,7 @@ from mcpshape.autostart import (
     remove_systemd,
     render_launchd_plist,
     render_systemd_unit,
-    stale_unit_problems,
+    stale_units,
     systemd_unit_path,
     unit_executable,
     write_launchd,
@@ -187,7 +187,7 @@ def test_unit_executable_is_none_for_a_file_that_names_none(tmp_path: Path) -> N
     assert unit_executable(target) is None
 
 
-def test_stale_unit_problems_names_the_unit_and_the_missing_executable(
+def test_stale_units_names_the_unit_and_the_missing_executable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     plist = tmp_path / "org.voidfreud.mcpshape.plist"
@@ -199,18 +199,14 @@ def test_stale_unit_problems_names_the_unit_and_the_missing_executable(
     monkeypatch.setattr("mcpshape.autostart.platform.system", lambda: "Darwin")
     plist.write_bytes(render_launchd_plist(paths))
 
-    problems = stale_unit_problems()
-
-    assert len(problems) == 1
-    assert str(plist) in problems[0]
-    assert str(missing) in problems[0]
+    assert stale_units() == [(plist, missing)]
 
 
-def test_stale_unit_problems_is_empty_when_no_unit_is_installed(
+def test_stale_units_is_empty_when_no_unit_is_installed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr("mcpshape.autostart.launchd_plist_path", lambda: tmp_path / "none.plist")
     monkeypatch.setattr("mcpshape.autostart.systemd_unit_path", lambda: tmp_path / "none.service")
     monkeypatch.setattr("mcpshape.autostart.platform.system", lambda: "Darwin")
 
-    assert stale_unit_problems() == []
+    assert stale_units() == []
