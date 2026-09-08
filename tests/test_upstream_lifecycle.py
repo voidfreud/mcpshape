@@ -391,6 +391,25 @@ async def test_daemon_status_says_the_keeper_stopped_supervising(
     assert "mcpshape daemon reload" in status.stdout
 
 
+async def test_daemon_status_says_a_stdio_command_is_not_on_the_daemons_path(
+    config_dir: ConfigDir, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#48: the note names the Upstream, the command, and the PATH the Daemon looked in."""
+    monkeypatch.setenv("PATH", "/nowhere/mcpshape-bin")
+    config_dir.add_stdio_upstream(
+        "ghost", "mcpshape-no-such-command", [], lifecycle={"connect_timeout": 1}
+    )
+
+    async with serving_daemon(config_dir):
+        status = await asyncio.to_thread(run_cli, config_dir, "daemon", "status")
+
+    assert status.exit_code == 0, status.output
+    assert (
+        "ghost: command 'mcpshape-no-such-command' is not found on the Daemon's PATH "
+        "(/nowhere/mcpshape-bin)" in status.stdout
+    )
+
+
 async def seconds_in_state(daemon: RunningDaemon, name: str) -> float:
     """How long the Daemon says ``name`` has been in its state, on the Daemon's clock."""
     return float((await daemon.upstream(name))["seconds"])

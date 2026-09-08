@@ -208,6 +208,9 @@ Claude Code is the first and best-integrated Profile, never a special case in th
 - Claude Code Profile defaults, set now: Caps for tool descriptions and Proxy instructions
   comfortably under the 2KB at which Claude Code cuts them off, and `doctor` reminds that
   critical text goes first because the first sentence carries the routing hint.
+- Settled in #44: `doctor --for` compares each Proxy's resolved Cap (global, then Upstream,
+  then Proxy) with the Profile's documented number and names the level that set it, instead of
+  only printing the Profile's recommendation as a note.
 
 ### Observability
 - App log with standard levels. Verbose by default during development; configurable down to
@@ -237,7 +240,7 @@ Claude Code is the first and best-integrated Profile, never a special case in th
 ```
 mcpshape add <upstream> --stdio '...' | --url ...   convenience for upstream add + default Proxy
 mcpshape ls                                          convenience for upstream ls + proxy ls
-mcpshape upstream   add | ls | show | sync | rm | scan
+mcpshape upstream   add | env | ls | show | sync | rm | scan
 mcpshape proxy      new | ls | show | rm | install | export
 mcpshape tool       hide | show | rename | describe | trim | cap
 mcpshape daemon     up | down | status | logs | reload | install | uninstall
@@ -255,6 +258,12 @@ mcpshape doctor
 ### Autostart and distribution
 - `daemon install` writes a launchd user agent (macOS) or a `systemd --user` unit with linger
   (Linux). Offered on first `daemon up`.
+- The unit carries the PATH of the shell `daemon install` ran in, captured once (settled in
+  #48): the MCP SDK gives the Daemon's PATH to every stdio child, so an Upstream started by a
+  bare `npx` or `uvx` is found under autostart as it is in a terminal. Nothing is resolved at
+  spawn, and install is not expected to be run again. A command that cannot be found is a
+  different failure: `doctor` reports it against the shell it runs in and `daemon status`
+  against the Daemon's PATH, each naming the Upstream, the command, and the PATH looked in.
 - Home is GitHub. Releases go to PyPI; `uv tool install mcpshape` is the install path.
   Homebrew formula after the first stable release, built from PyPI. Python 3.12 minimum.
 - No telemetry, no update checks, no network calls except to configured Upstreams.

@@ -8,6 +8,7 @@ out to ``launchctl`` or ``systemctl``, the one thin edge no test executes.
 from __future__ import annotations
 
 import getpass
+import platform
 import plistlib
 import shlex
 import shutil
@@ -15,6 +16,7 @@ import subprocess  # the one thin edge: registering the unit with the OS
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from typing import cast
 
 from mcpshape.paths import CONFIG_DIR_ENV, STATE_DIR_ENV
 
@@ -28,14 +30,19 @@ class AutostartPaths:
 
     ``command`` is how the unit invokes mcpshape, by absolute path: launchd and systemd run
     units with a PATH of their own that never holds ``~/.local/bin``, where ``uv tool``
-    installs, so a bare name would not be found. ``config_dir``/``state_dir`` are set only
-    when the user overrode the defaults, so the common case writes no environment at all.
+    installs, so a bare name would not be found. ``path`` is that same PATH problem one level
+    down: the MCP SDK passes the Daemon's PATH to every stdio child, so an Upstream started by
+    a bare ``npx`` or ``uvx`` is found under autostart only if the unit carries a PATH that
+    holds it. ``daemon install`` captures the installing shell's, the one the user already saw
+    work in a terminal, once (#48). ``config_dir``/``state_dir`` are set only when the user
+    overrode the defaults, so the common case writes no environment beyond the PATH.
     """
 
     log_dir: Path
     command: tuple[str, ...]
     config_dir: Path | None = None
     state_dir: Path | None = None
+    path: str | None = None
 
 
 def installed_command() -> tuple[str, ...]:
@@ -60,6 +67,8 @@ def _env(paths: AutostartPaths) -> dict[str, str]:
         env[CONFIG_DIR_ENV] = str(paths.config_dir)
     if paths.state_dir is not None:
         env[STATE_DIR_ENV] = str(paths.state_dir)
+    if paths.path is not None:
+        env["PATH"] = paths.path
     return env
 
 
@@ -128,6 +137,60 @@ def remove_systemd() -> bool:
     existed = target.is_file()
     target.unlink(missing_ok=True)
     return existed
+
+
+# --- comparing: whether an installed unit still matches what this version writes (#47) ------------
+
+
+def installed_unit_differs(path: Path, rendered: bytes | str) -> bool:
+    """Whether the unit already at ``path`` differs from ``rendered``, what the writer would
+    produce now. A missing file counts as differing, so a first install and a stale rewrite
+    look the same to the caller."""
+    if not path.is_file():
+        return True
+    try:
+        current: bytes | str = (
+            path.read_bytes() if isinstance(rendered, bytes) else path.read_text()
+        )
+    except OSError:
+        return True
+    return current != rendered
+
+
+def unit_executable(path: Path) -> Path | None:
+    """The executable an installed unit invokes, read from the unit itself: a launchd plist's
+    ``ProgramArguments[0]``, or a systemd unit's ``ExecStart`` first token. ``None`` when the
+    unit cannot be read or does not name one."""
+    try:
+        if path.suffix == ".plist":
+            plist: dict[str, object] = plistlib.loads(path.read_bytes())
+            arguments = plist.get("ProgramArguments")
+            if not isinstance(arguments, list):
+                return None
+            command = [str(argument) for argument in cast("list[object]", arguments)]
+            return Path(command[0]) if command else None
+        for line in path.read_text().splitlines():
+            if line.startswith("ExecStart="):
+                tokens = shlex.split(line.removeprefix("ExecStart="))
+                return Path(tokens[0]) if tokens else None
+    except (OSError, plistlib.InvalidFileException, ValueError):
+        return None
+    return None
+
+
+def stale_units() -> list[tuple[Path, Path]]:
+    """Whichever autostart unit is installed on this platform, each unit whose executable has
+    since moved or been removed, as ``(unit, executable)``: a Daemon that cannot start."""
+    system = platform.system()
+    candidates = {"Darwin": [launchd_plist_path()], "Linux": [systemd_unit_path()]}.get(system, [])
+    stale: list[tuple[Path, Path]] = []
+    for path in candidates:
+        if not path.is_file():
+            continue
+        executable = unit_executable(path)
+        if executable is not None and not executable.exists():
+            stale.append((path, executable))
+    return stale
 
 
 # --- registering: the thin edge, never called in tests -------------------------------------------

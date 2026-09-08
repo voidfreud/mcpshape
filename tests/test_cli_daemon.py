@@ -89,6 +89,90 @@ def test_daemon_install_writes_and_registers_the_unit(
     assert registered, "the (monkeypatched) registration step should have been called"
 
 
+def test_daemon_install_writes_the_installing_shells_path_into_the_unit(
+    config_dir: ConfigDir, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#48: the unit carries the PATH of the shell that installed it, captured once.
+
+    The MCP SDK hands the Daemon's PATH to every stdio child, so an Upstream started by a
+    bare ``npx`` or ``uvx`` is found under autostart as it is in a terminal.
+    """
+    plist = tmp_path / "org.voidfreud.mcpshape.plist"
+    unit = tmp_path / "mcpshape.service"
+
+    def noop_path(_path: Path) -> None:
+        return None
+
+    def noop() -> None:
+        return None
+
+    monkeypatch.setattr("mcpshape.autostart.launchd_plist_path", lambda: plist)
+    monkeypatch.setattr("mcpshape.autostart.systemd_unit_path", lambda: unit)
+    monkeypatch.setattr(autostart, "register_launchd", noop_path)
+    monkeypatch.setattr(autostart, "register_systemd", noop)
+    installing_path = "/home/tester/.local/bin:/usr/bin:/bin"
+
+    result = run_cli(config_dir, "daemon", "install", env={"PATH": installing_path})
+
+    assert result.exit_code == 0, result.output
+    written = plist if plist.is_file() else unit
+    assert installing_path in written.read_text()
+
+
+def test_daemon_install_twice_is_up_to_date_and_does_not_reregister(
+    config_dir: ConfigDir, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registered: list[str] = []
+    plist = tmp_path / "org.voidfreud.mcpshape.plist"
+    unit = tmp_path / "mcpshape.service"
+    monkeypatch.setattr("mcpshape.autostart.launchd_plist_path", lambda: plist)
+    monkeypatch.setattr("mcpshape.autostart.systemd_unit_path", lambda: unit)
+
+    def fake_register_launchd(_path: Path) -> None:
+        registered.append("launchd")
+
+    monkeypatch.setattr(autostart, "register_launchd", fake_register_launchd)
+    monkeypatch.setattr(autostart, "register_systemd", lambda: registered.append("systemd"))
+
+    first = run_cli(config_dir, "daemon", "install")
+    assert first.exit_code == 0, first.output
+    assert "Installed" in first.stdout
+    assert len(registered) == 1
+
+    second = run_cli(config_dir, "daemon", "install")
+    assert second.exit_code == 0, second.output
+    assert "already installed and up to date" in second.stdout
+    assert len(registered) == 1, "a unit that still matches should not be re-registered"
+
+
+def test_daemon_install_rewrites_a_unit_edited_by_hand(
+    config_dir: ConfigDir, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registered: list[str] = []
+    plist = tmp_path / "org.voidfreud.mcpshape.plist"
+    unit = tmp_path / "mcpshape.service"
+    monkeypatch.setattr("mcpshape.autostart.launchd_plist_path", lambda: plist)
+    monkeypatch.setattr("mcpshape.autostart.systemd_unit_path", lambda: unit)
+
+    def fake_register_launchd(_path: Path) -> None:
+        registered.append("launchd")
+
+    monkeypatch.setattr(autostart, "register_launchd", fake_register_launchd)
+    monkeypatch.setattr(autostart, "register_systemd", lambda: registered.append("systemd"))
+
+    first = run_cli(config_dir, "daemon", "install")
+    assert first.exit_code == 0, first.output
+    assert len(registered) == 1
+    written = plist if plist.is_file() else unit
+    written.write_bytes(written.read_bytes() + b"\n# hand-edited\n")
+
+    second = run_cli(config_dir, "daemon", "install")
+
+    assert second.exit_code == 0, second.output
+    assert "Updated" in second.stdout
+    assert len(registered) == 2, "a unit that no longer matches should be re-registered"
+
+
 def test_daemon_uninstall_says_so_when_nothing_is_installed(
     tmp_path: Path, config_dir: ConfigDir, monkeypatch: pytest.MonkeyPatch
 ) -> None:

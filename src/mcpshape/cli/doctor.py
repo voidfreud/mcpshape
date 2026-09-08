@@ -2,16 +2,18 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Annotated
 
 import typer
 from rich.markup import escape
 
-from mcpshape import catalog, config
+from mcpshape import autostart, catalog, config
 from mcpshape.cli.common import client_profile, console, state, unscanned_note
+from mcpshape.commands import command_missing
 from mcpshape.hooks import UserCode, UserCodeError, load_user_code
-from mcpshape.model import CapError, CapSettings
+from mcpshape.model import CapError, CapSettings, StdioTransport, given_kinds
 from mcpshape.names import InvalidNameError, check_name
 from mcpshape.profiles import Profile, entry_name
 from mcpshape.proxy import (
@@ -23,6 +25,7 @@ from mcpshape.proxy import (
     orphaned_hooks,
     orphaned_overrides,
 )
+from mcpshape.secrets import SecretError
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -48,6 +51,66 @@ def name_problems(config_dir: Path) -> list[config.Problem]:
     return problems
 
 
+def command_problems(config_dir: Path) -> list[config.Problem]:
+    """Every stdio Upstream whose command nothing on this shell's PATH is (#48).
+
+    ``doctor`` runs in the user's terminal, so it judges against that terminal's PATH and says
+    so: under autostart the Daemon runs with the PATH ``daemon install`` captured, which is
+    what ``daemon status`` reports against. Either way the Upstream cannot start, so it is a
+    problem, not a warning. A command that is a reference nothing resolves is left to
+    ``secret_problems``, which names the unset variable.
+    """
+    secrets = config.secrets_for(config_dir)
+    path = os.environ.get("PATH")
+    problems: list[config.Problem] = []
+    for file, kind in config.all_files(config_dir):
+        if kind != "upstream":
+            continue
+        try:
+            upstream = config.load_upstream(config_dir, file.parent.name)
+        except config.ConfigError:
+            continue  # unreadable, which check_file reports on its own
+        transport = upstream.transport
+        if not isinstance(transport, StdioTransport):
+            continue
+        try:
+            resolved = secrets.expanded(transport)
+        except SecretError:
+            continue  # an unresolved reference, which secret_problems reports
+        if missing := command_missing(resolved, path):
+            problems.append(
+                config.Problem(
+                    file,
+                    "",
+                    f"command {missing!r} is not found on this shell's PATH ({path}); under "
+                    "autostart the Daemon uses the PATH written into its unit",
+                )
+            )
+    return problems
+
+
+CAPS_KEY = "[caps]"
+"""The key a Cap finding is filed under, in the file it names."""
+
+DEFAULT_LEVEL = "the default (config.toml [caps])"
+"""Named when no level set a kind: the value in force is the built-in default, and the place
+to set it is config.toml."""
+
+
+@dataclass(frozen=True)
+class ResolvedCaps:
+    """A Proxy's Caps, resolved through global, Upstream, and Proxy, with the level that set
+    each kind still on hand so ``doctor --for`` can name it."""
+
+    values: CapSettings
+    set_by: dict[str, str]
+    """By kind, the level that set it and the file to edit; a kind missing here took the
+    default."""
+
+    def level(self, kind: str) -> str:
+        return self.set_by.get(kind, DEFAULT_LEVEL)
+
+
 @dataclass(frozen=True)
 class Curation:
     """One Proxy file next to the stored Catalog it curates, and its Python file if any."""
@@ -58,11 +121,11 @@ class Curation:
     catalog: catalog.Catalog
     proxy: config.ProxyFile
     code: UserCode
-    caps: CapSettings
-    """This Proxy's Caps, already resolved through global and Upstream."""
+    resolved: ResolvedCaps
+    """This Proxy's Caps, already resolved through global and Upstream, with provenance."""
 
     def expose(self) -> Exposed:
-        return cap(expose(self.catalog, self.proxy, self.code), self.caps, self.proxy)
+        return cap(expose(self.catalog, self.proxy, self.code), self.resolved.values, self.proxy)
 
 
 def load_code(config_dir: Path, upstream: str, proxy: str) -> UserCode | config.Problem:
@@ -78,6 +141,7 @@ def curations(config_dir: Path, state_dir: Path) -> list[Curation | config.Probl
     """Every Proxy file with its Upstream's stored Catalog; unscanned Upstreams are skipped."""
     found: list[Curation | config.Problem] = []
     global_caps = config.load_settings(config_dir).caps
+    global_set_by = dict.fromkeys(given_kinds(global_caps), "config.toml [caps]")
     for upstream in config.load_upstreams(config_dir):
         stored = catalog.load_catalog(state_dir, upstream.name)
         if stored is None:
@@ -88,6 +152,12 @@ def curations(config_dir: Path, state_dir: Path) -> list[Curation | config.Probl
             where = config.upstream_dir(config_dir, upstream.name)
             found.append(config.Problem(where, "", str(exc)))
             continue
+        upstream_file = f"{config.UPSTREAMS_DIR}/{upstream.name}/{config.UPSTREAM_FILE} [caps]"
+        upstream_level = f"Upstream {upstream.name} ({upstream_file})"
+        upstream_set_by = {
+            **global_set_by,
+            **dict.fromkeys(given_kinds(upstream.caps), upstream_level),
+        }
         for proxy in upstream.proxies:
             code = load_code(config_dir, upstream.name, proxy)
             path = config.proxy_file(config_dir, upstream.name, proxy)
@@ -100,6 +170,12 @@ def curations(config_dir: Path, state_dir: Path) -> list[Curation | config.Probl
             except CapError as exc:
                 found.append(config.Problem(path, "", str(exc)))
                 continue
+            proxy_file_label = f"{config.UPSTREAMS_DIR}/{upstream.name}/{proxy}.toml [caps]"
+            proxy_level = f"Proxy {upstream.name}/{proxy} ({proxy_file_label})"
+            proxy_set_by = {
+                **upstream_set_by,
+                **dict.fromkeys(given_kinds(proxy_file.caps), proxy_level),
+            }
             found.append(
                 Curation(
                     path,
@@ -107,7 +183,7 @@ def curations(config_dir: Path, state_dir: Path) -> list[Curation | config.Probl
                     stored,
                     proxy_file,
                     code,
-                    proxy_caps,
+                    ResolvedCaps(proxy_caps, proxy_set_by),
                 )
             )
     return found
@@ -174,6 +250,10 @@ class Review:
     warnings: list[config.Problem] = field(default_factory=list[config.Problem])
     notes: list[str] = field(default_factory=list[str])
 
+    def caps_over(self) -> bool:
+        """Whether ``check_caps`` found a Proxy's Cap above what the Client cuts at."""
+        return any(warning.key == CAPS_KEY for warning in self.warnings)
+
     def check_proxy(self, path: Path, server: str, exposed: Exposed) -> None:
         """Judge one Proxy's exposed tools by the Client's naming scheme and property rule."""
         refused = self.problems if self.client.scheme.overflow == "reject" else self.warnings
@@ -190,16 +270,40 @@ class Review:
                 if (broken := properties.violation(name))
             )
 
+    def check_caps(self, path: Path, resolved: ResolvedCaps) -> None:
+        """Warn about every Cap kind this Proxy resolves above what the Client cuts at.
+
+        The Client does not refuse an over-long description or instructions, it silently
+        reshapes them, so this is a warning, tied to the level that set the Cap in force. A
+        tool's own Cap Override is not checked here: a Proxy resolved above the Profile's
+        number is reported once, since every tool without its own Cap inherits it.
+        """
+        caps = self.client.caps
+        if caps.source is None:
+            return
+        ceilings = {"tool_description": caps.tool_description, "instructions": caps.instructions}
+        for kind, ceiling in ceilings.items():
+            if ceiling is None:
+                continue
+            value = getattr(resolved.values, kind)
+            if value <= ceiling:
+                continue
+            label = kind.replace("_", " ")
+            self.warnings.append(
+                config.Problem(
+                    path,
+                    CAPS_KEY,
+                    f"the {label} Cap in force is {value}, set by {resolved.level(kind)}; "
+                    f"{self.client.name} cuts at {ceiling} ({caps.source}). "
+                    f"Set {kind} = {ceiling} or lower there.",
+                )
+            )
+
 
 def review(config_dir: Path, state_dir: Path, client: Profile) -> Review:
-    """Every exposed name and property name a Client would refuse, or quietly reshape."""
+    """Every exposed name and property name a Client would refuse, or quietly reshape, plus
+    every Cap resolved above what the Client cuts at."""
     found = Review(client, notes=[f"{client.name}: {note}" for note in client.notes])
-    if (caps := client.caps).source is not None:
-        found.notes.append(
-            f"{client.name}: the Caps this Profile recommends are {caps.tool_description} "
-            f"characters for a tool description and {caps.instructions} for instructions "
-            f"({caps.source}). Set config.toml's [caps] to these or lower to apply them."
-        )
     found.notes += [
         unscanned_note(upstream.name, client)
         for upstream in config.load_upstreams(config_dir)
@@ -208,11 +312,18 @@ def review(config_dir: Path, state_dir: Path, client: Profile) -> Review:
     for curation in curations(config_dir, state_dir):
         if isinstance(curation, config.Problem):
             continue  # reported as a problem already
+        found.check_caps(curation.path, curation.resolved)
         try:
             exposed = curation.expose()
         except (OverrideError, CapError):
             continue  # reported as a problem already
         found.check_proxy(curation.path, curation.server, exposed)
+    if (caps := client.caps).source is not None and not found.caps_over():
+        found.notes.append(
+            f"{client.name}: the Caps in force are within the {caps.tool_description} "
+            f"characters for a tool description and {caps.instructions} for instructions "
+            f"this Profile recommends ({caps.source})."
+        )
     return found
 
 
@@ -227,6 +338,11 @@ ForOpt = Annotated[
 ]
 
 
+def _print_problems(problems: list[config.Problem]) -> None:
+    for problem in problems:
+        console.print(f"[red]✗[/] {escape(str(problem))}")
+
+
 def doctor(ctx: typer.Context, for_client: ForOpt = None) -> None:
     """Validate every config file against its schema and report what is wrong."""
     config_dir, state_dir = state(ctx).config_dir, state(ctx).state_dir
@@ -235,9 +351,13 @@ def doctor(ctx: typer.Context, for_client: ForOpt = None) -> None:
     for path, kind in files:
         problems.extend(config.check_file(path, kind))
     problems.extend(config.secret_problems(config_dir))
+    problems.extend(command_problems(config_dir))
+    problems.extend(
+        config.Problem(unit, "", f"the installed unit runs {executable}, which no longer exists")
+        for unit, executable in autostart.stale_units()
+    )
     console.print(f"Checked {len(files)} file(s) in {config_dir}")
-    for problem in problems:
-        console.print(f"[red]✗[/] {escape(str(problem))}")
+    _print_problems(problems)
     if problems:
         raise typer.Exit(1)
     try:
@@ -250,8 +370,7 @@ def doctor(ctx: typer.Context, for_client: ForOpt = None) -> None:
         problems, warnings = problems + found.problems, warnings + found.warnings
         for note in found.notes:
             console.print(escape(note))
-    for problem in problems:
-        console.print(f"[red]✗[/] {escape(str(problem))}")
+    _print_problems(problems)
     for warning in warnings:
         console.print(f"[yellow]![/] {escape(str(warning))}")
     if problems:

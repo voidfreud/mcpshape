@@ -80,6 +80,96 @@ def test_add_refuses_an_existing_upstream(config_dir: ConfigDir) -> None:
     assert "already exists" in result.output
 
 
+def test_add_stdio_with_env_writes_env_block_and_notes_the_literal(
+    config_dir: ConfigDir,
+) -> None:
+    result = run_cli(
+        config_dir,
+        "add",
+        "github",
+        "--stdio",
+        "cmd",
+        "--env",
+        "A=1",
+        "--env",
+        "TOKEN=${GH}",
+    )
+
+    assert result.exit_code == 0, result.output
+    upstream = (config_dir.path / "upstreams" / "github" / "upstream.toml").read_text()
+    assert "[env]" in upstream
+    assert 'A = "1"' in upstream
+    assert 'TOKEN = "${GH}"' in upstream
+    assert "secrets.toml" in result.output
+    assert "1" in upstream  # sanity: the literal really was written
+
+
+def test_add_stdio_with_only_reference_env_prints_no_secret_note(
+    config_dir: ConfigDir,
+) -> None:
+    result = run_cli(config_dir, "add", "github", "--stdio", "cmd", "--env", "TOKEN=${GH}")
+
+    assert result.exit_code == 0, result.output
+    assert "secrets.toml" not in result.output
+
+
+def test_env_with_url_fails(config_dir: ConfigDir) -> None:
+    result = run_cli(config_dir, "add", "docs", "--url", "https://docs.example/mcp", "--env", "A=1")
+
+    assert result.exit_code == 1
+    assert "--env" in result.output
+    assert not (config_dir.path / "upstreams").exists()
+
+
+@pytest.mark.parametrize("item", ["NOEQUALS", "=value"])
+def test_env_malformed_item_fails_naming_it(config_dir: ConfigDir, item: str) -> None:
+    result = run_cli(config_dir, "add", "github", "--stdio", "cmd", "--env", item)
+
+    assert result.exit_code == 1
+    assert item in result.output
+
+
+def test_upstream_env_sets_a_key_on_an_existing_upstream_preserving_comments(
+    config_dir: ConfigDir,
+) -> None:
+    run_cli(config_dir, "add", "github", "--stdio", "cmd")
+    path = config_dir.path / "upstreams" / "github" / "upstream.toml"
+    path.write_text(path.read_text().replace("command = ", "# keep me\ncommand = "))
+
+    result = run_cli(config_dir, "upstream", "env", "github", "B=2")
+
+    assert result.exit_code == 0, result.output
+    written = path.read_text()
+    assert "# keep me" in written
+    assert "[env]" in written
+    assert 'B = "2"' in written
+
+    result = run_cli(config_dir, "upstream", "env", "github", "B=3")
+
+    assert result.exit_code == 0, result.output
+    written = path.read_text()
+    assert "# keep me" in written
+    assert 'B = "3"' in written
+    assert 'B = "2"' not in written
+
+
+def test_upstream_env_refuses_a_non_stdio_upstream(config_dir: ConfigDir) -> None:
+    run_cli(config_dir, "add", "docs", "--url", "https://docs.example/mcp")
+
+    result = run_cli(config_dir, "upstream", "env", "docs", "A=1")
+
+    assert result.exit_code == 1
+    assert "docs" in result.output
+
+
+def test_upstream_add_env_behaves_like_root_add(config_dir: ConfigDir) -> None:
+    result = run_cli(config_dir, "upstream", "add", "github", "--stdio", "cmd", "--env", "A=1")
+
+    assert result.exit_code == 0, result.output
+    upstream = (config_dir.path / "upstreams" / "github" / "upstream.toml").read_text()
+    assert 'A = "1"' in upstream
+
+
 def test_ls_lists_upstreams_with_proxies_and_urls(config_dir: ConfigDir) -> None:
     run_cli(config_dir, "add", "github", "--stdio", "npx -y server-github")
     run_cli(config_dir, "proxy", "new", "github/review")

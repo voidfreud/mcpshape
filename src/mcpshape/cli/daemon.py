@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
+import os
 import platform
 import sys
 import time
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Annotated
 
 import typer
@@ -37,7 +39,7 @@ from mcpshape.config import load_settings
 from mcpshape.paths import daemon_lock_file, daemon_log_file, log_dir
 
 if TYPE_CHECKING:
-    from collections.abc import Generator
+    from collections.abc import Callable, Generator
     from pathlib import Path
 
 
@@ -258,7 +260,8 @@ def uninstall() -> None:
 
 
 def _autostart_paths(config_dir: Path, state_dir: Path) -> autostart.AutostartPaths:
-    """Only the directories the user overrode from the XDG defaults are passed as environment."""
+    """Only the directories the user overrode from the XDG defaults are passed as environment,
+    and the PATH of the shell installing, captured once so stdio children find their commands."""
     from mcpshape.paths import default_config_dir, default_state_dir  # noqa: PLC0415
 
     return autostart.AutostartPaths(
@@ -266,6 +269,71 @@ def _autostart_paths(config_dir: Path, state_dir: Path) -> autostart.AutostartPa
         command=autostart.installed_command(),
         config_dir=config_dir if config_dir != default_config_dir() else None,
         state_dir=state_dir if state_dir != default_state_dir() else None,
+        path=os.environ.get("PATH"),
+    )
+
+
+@dataclass(frozen=True)
+class _Unit:
+    """One autostart unit as ``daemon install`` handles it: what to write, how to register."""
+
+    kind: str
+    path: Path
+    rendered: bytes | str
+    write: Callable[[], Path]
+    register: Callable[[], None]
+    verb: str
+    """What registering is called for this init system: ``load`` or ``enable``."""
+
+
+def _install_unit(unit: _Unit) -> None:
+    """Write and register ``unit`` unless what is at its path already matches (#47).
+
+    Three outcomes, each said: installed, updated because the unit no longer matched what this
+    version writes, or left alone because it still does. Only a written unit is registered.
+    """
+    if not autostart.installed_unit_differs(unit.path, unit.rendered):
+        console.print(f"The {unit.kind} at {unit.path} is already installed and up to date")
+        return
+    existed = unit.path.is_file()
+    unit.write()
+    try:
+        unit.register()
+    except OSError as exc:
+        console.print(f"[yellow]![/] wrote {unit.path} but could not {unit.verb} it: {exc}")
+        return
+    done = (
+        f"Updated the {unit.kind} at {unit.path}; it no longer matched what this version writes"
+        if existed
+        else f"Installed the {unit.kind} at {unit.path}"
+    )
+    console.print(f"{done}, and {unit.verb}d it")
+
+
+def _install_launchd(paths: autostart.AutostartPaths) -> None:
+    path = autostart.launchd_plist_path()
+    _install_unit(
+        _Unit(
+            "launchd agent",
+            path,
+            autostart.render_launchd_plist(paths),
+            lambda: autostart.write_launchd(paths),
+            lambda: autostart.register_launchd(path),
+            "load",
+        )
+    )
+
+
+def _install_systemd(paths: autostart.AutostartPaths) -> None:
+    _install_unit(
+        _Unit(
+            "systemd unit",
+            autostart.systemd_unit_path(),
+            autostart.render_systemd_unit(paths),
+            lambda: autostart.write_systemd(paths),
+            autostart.register_systemd,
+            "enable",
+        )
     )
 
 
@@ -273,22 +341,10 @@ def _install_autostart(config_dir: Path, state_dir: Path, *, quiet: bool) -> Non
     system = platform.system()
     paths = _autostart_paths(config_dir, state_dir)
     if system == "Darwin":
-        path = autostart.write_launchd(paths)
-        try:
-            autostart.register_launchd(path)
-        except OSError as exc:
-            console.print(f"[yellow]![/] wrote {path} but could not load it: {exc}")
-        else:
-            console.print(f"Installed and loaded the launchd agent at {path}")
+        _install_launchd(paths)
         return
     if system == "Linux":
-        path = autostart.write_systemd(paths)
-        try:
-            autostart.register_systemd()
-        except OSError as exc:
-            console.print(f"[yellow]![/] wrote {path} but could not enable it: {exc}")
-        else:
-            console.print(f"Installed and enabled the systemd unit at {path}, with linger.")
+        _install_systemd(paths)
         return
     if not quiet:
         console.print(f"[dim]Autostart is not supported on {system}.[/dim]")
@@ -326,7 +382,13 @@ def _table(live: Live) -> Table:
 def _notes(live: Live) -> list[str]:
     """Why anything is unavailable or unhealthy, under the table that says it is."""
     notes: list[str] = []
+    daemon_path = live.state.path if live.state else None
     for upstream in live.state.upstreams if live.state else []:
+        if upstream.missing_command:
+            notes.append(
+                f"{upstream.name}: command {upstream.missing_command!r} is not found on the "
+                f"Daemon's PATH ({daemon_path})"
+            )
         if upstream.error:
             notes.append(f"{upstream.name}: {upstream.error}")
         if not upstream.supervised:
