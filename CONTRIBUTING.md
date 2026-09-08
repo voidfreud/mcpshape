@@ -79,10 +79,9 @@ under `docs/sessions/`, follow `CONTEXT.md`.
 6. **Pull request**: title `<type>: <subject>`, at most 72 characters, no trailing period. Body
    from the template, every section in order, then one `Closes #<n>` line per ticket; a wave that
    closes no ticket has none. Rule files and code never change in one pull request.
-7. **Checks**: wait for CI as its own step after the push has succeeded, with
-   `gh pr checks <n> --watch`. A red check is fixed on the branch and pushed. When `main` has
-   moved, the branch is brought up to date with `gh pr update-branch <n>`; nothing is ever
-   force-pushed.
+7. **Checks**: wait for the CI run of the pushed head as its own step after the push has
+   succeeded. A red check is fixed on the branch and pushed. When `main` has moved, the branch
+   is brought up to date with `gh pr update-branch <n>`; nothing is ever force-pushed.
 8. **Merge** by squash once every check is green: `gh pr merge <n> --squash`. The squash
    commit's subject is the title and its body is the pull request body. The branch is deleted.
 9. **Close**: the merge closes the tickets. If a parent's last sub-issue just closed, close the

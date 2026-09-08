@@ -16,8 +16,11 @@ jobs:
   release-please:
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    env:
+      BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
     steps:
       - name: The release pull request holds the version bump and the changelog of everything unreleased
+        if: env.BOT_TOKEN != ''
         uses: googleapis/release-please-action@v5
         with:
-          token: ${{ secrets.BOT_TOKEN || github.token }}
+          token: ${{ secrets.BOT_TOKEN }}
