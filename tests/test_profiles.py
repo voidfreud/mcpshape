@@ -391,7 +391,7 @@ def test_doctor_ignores_a_tool_the_proxy_hides(config_dir: ConfigDir) -> None:
 
 
 def test_doctor_for_a_client_says_which_upstream_needs_a_sync_first(config_dir: ConfigDir) -> None:
-    run_cli(config_dir, "add", "github", "--stdio", "cmd")
+    run_cli(config_dir, "add", "github", "--stdio", "sh")
 
     result = run_cli(config_dir, "doctor", "--for", "claude-code")
 

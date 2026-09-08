@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
+import os
 import platform
 import sys
 import time
@@ -258,7 +259,8 @@ def uninstall() -> None:
 
 
 def _autostart_paths(config_dir: Path, state_dir: Path) -> autostart.AutostartPaths:
-    """Only the directories the user overrode from the XDG defaults are passed as environment."""
+    """Only the directories the user overrode from the XDG defaults are passed as environment,
+    and the PATH of the shell installing, captured once so stdio children find their commands."""
     from mcpshape.paths import default_config_dir, default_state_dir  # noqa: PLC0415
 
     return autostart.AutostartPaths(
@@ -266,6 +268,7 @@ def _autostart_paths(config_dir: Path, state_dir: Path) -> autostart.AutostartPa
         command=autostart.installed_command(),
         config_dir=config_dir if config_dir != default_config_dir() else None,
         state_dir=state_dir if state_dir != default_state_dir() else None,
+        path=os.environ.get("PATH"),
     )
 
 
@@ -326,7 +329,13 @@ def _table(live: Live) -> Table:
 def _notes(live: Live) -> list[str]:
     """Why anything is unavailable or unhealthy, under the table that says it is."""
     notes: list[str] = []
+    daemon_path = live.state.path if live.state else None
     for upstream in live.state.upstreams if live.state else []:
+        if upstream.missing_command:
+            notes.append(
+                f"{upstream.name}: command {upstream.missing_command!r} is not found on the "
+                f"Daemon's PATH ({daemon_path})"
+            )
         if upstream.error:
             notes.append(f"{upstream.name}: {upstream.error}")
         if not upstream.supervised:

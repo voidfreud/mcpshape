@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Annotated
 
@@ -10,8 +11,9 @@ from rich.markup import escape
 
 from mcpshape import catalog, config
 from mcpshape.cli.common import client_profile, console, state, unscanned_note
+from mcpshape.commands import command_missing
 from mcpshape.hooks import UserCode, UserCodeError, load_user_code
-from mcpshape.model import CapError, CapSettings
+from mcpshape.model import CapError, CapSettings, StdioTransport
 from mcpshape.names import InvalidNameError, check_name
 from mcpshape.profiles import Profile, entry_name
 from mcpshape.proxy import (
@@ -23,6 +25,7 @@ from mcpshape.proxy import (
     orphaned_hooks,
     orphaned_overrides,
 )
+from mcpshape.secrets import SecretError
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -45,6 +48,44 @@ def name_problems(config_dir: Path) -> list[config.Problem]:
                 check_name(proxy, "Proxy")
             except InvalidNameError as exc:
                 problems.append(config.Problem(directory / f"{proxy}.toml", "", str(exc)))
+    return problems
+
+
+def command_problems(config_dir: Path) -> list[config.Problem]:
+    """Every stdio Upstream whose command nothing on this shell's PATH is (#48).
+
+    ``doctor`` runs in the user's terminal, so it judges against that terminal's PATH and says
+    so: under autostart the Daemon runs with the PATH ``daemon install`` captured, which is
+    what ``daemon status`` reports against. Either way the Upstream cannot start, so it is a
+    problem, not a warning. A command that is a reference nothing resolves is left to
+    ``secret_problems``, which names the unset variable.
+    """
+    secrets = config.secrets_for(config_dir)
+    path = os.environ.get("PATH")
+    problems: list[config.Problem] = []
+    for file, kind in config.all_files(config_dir):
+        if kind != "upstream":
+            continue
+        try:
+            upstream = config.load_upstream(config_dir, file.parent.name)
+        except config.ConfigError:
+            continue  # unreadable, which check_file reports on its own
+        transport = upstream.transport
+        if not isinstance(transport, StdioTransport):
+            continue
+        try:
+            resolved = secrets.expanded(transport)
+        except SecretError:
+            continue  # an unresolved reference, which secret_problems reports
+        if missing := command_missing(resolved, path):
+            problems.append(
+                config.Problem(
+                    file,
+                    "",
+                    f"command {missing!r} is not found on this shell's PATH ({path}); under "
+                    "autostart the Daemon uses the PATH written into its unit",
+                )
+            )
     return problems
 
 
@@ -235,6 +276,7 @@ def doctor(ctx: typer.Context, for_client: ForOpt = None) -> None:
     for path, kind in files:
         problems.extend(config.check_file(path, kind))
     problems.extend(config.secret_problems(config_dir))
+    problems.extend(command_problems(config_dir))
     console.print(f"Checked {len(files)} file(s) in {config_dir}")
     for problem in problems:
         console.print(f"[red]✗[/] {escape(str(problem))}")

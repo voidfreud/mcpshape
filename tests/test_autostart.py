@@ -35,6 +35,8 @@ WITH_ENV = AutostartPaths(
     config_dir=Path("/home/tester/.config/mcpshape-alt"),
     state_dir=Path("/home/tester/.local/state/mcpshape-alt"),
 )
+FIXED_PATH = "/home/tester/.local/bin:/usr/local/bin:/usr/bin:/bin"
+WITH_PATH = AutostartPaths(log_dir=FIXED_LOG_DIR, command=FIXED_COMMAND, path=FIXED_PATH)
 
 
 def test_launchd_plist_matches_the_golden_fixture() -> None:
@@ -51,6 +53,15 @@ def test_launchd_plist_carries_overridden_directories_as_environment() -> None:
 
 def test_systemd_unit_carries_overridden_directories_as_environment() -> None:
     assert render_systemd_unit(WITH_ENV) == (GOLDEN / "systemd-with-env.service").read_text()
+
+
+def test_launchd_plist_carries_the_installing_shells_path() -> None:
+    """#48: install captures PATH once, so a child spawned by a bare name is found."""
+    assert render_launchd_plist(WITH_PATH) == (GOLDEN / "launchd-with-path.plist").read_bytes()
+
+
+def test_systemd_unit_carries_the_installing_shells_path() -> None:
+    assert render_systemd_unit(WITH_PATH) == (GOLDEN / "systemd-with-path.service").read_text()
 
 
 def test_write_launchd_writes_the_rendered_plist(

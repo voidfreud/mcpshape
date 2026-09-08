@@ -28,6 +28,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import os
 from dataclasses import dataclass, field
 from functools import partial
 from typing import TYPE_CHECKING, Any, Protocol
@@ -39,10 +40,12 @@ from starlette.routing import Route
 from mcpshape import catalog as catalogs
 from mcpshape.adapters.fastmcp import CALLBACK_TIMEOUT, logged_in, login
 from mcpshape.calls import CallRecord
+from mcpshape.commands import command_missing
 from mcpshape.connection import TimedOutError, bounded
 from mcpshape.logs import tail
-from mcpshape.model import HttpTransport, SseTransport
+from mcpshape.model import HttpTransport, SseTransport, StdioTransport
 from mcpshape.paths import daemon_log_file
+from mcpshape.secrets import SecretError
 from mcpshape.tokens import Tokens
 
 if TYPE_CHECKING:
@@ -103,6 +106,8 @@ class UpstreamState(BaseModel):
     error: str | None = None
     supervised: bool = True
     """False once the keeper gave up on this Upstream, until a reload starts one (#50)."""
+    missing_command: str | None = None
+    """The stdio command nothing on the Daemon's PATH is, when there is one (#48)."""
     proxies: list[ProxyState] = Field(default_factory=list[ProxyState])
 
 
@@ -110,6 +115,9 @@ class LiveState(BaseModel):
     """What ``/api/status`` answers. The CLI reads it back through the same model."""
 
     upstreams: list[UpstreamState] = Field(default_factory=list[UpstreamState])
+    path: str | None = None
+    """The PATH the Daemon runs under: what ``missing_command`` was looked for on, which the
+    CLI's own PATH need not be, since autostart gives the Daemon the one install captured."""
 
 
 class ItemRef(BaseModel):
@@ -319,7 +327,10 @@ class Management:
     async def live(self) -> LiveState:
         """What every Upstream and Proxy is doing right now, each Proxy refreshed on the way."""
 
-        return LiveState(upstreams=[await self._state_of(upstream) for upstream in self.upstreams])
+        return LiveState(
+            upstreams=[await self._state_of(upstream) for upstream in self.upstreams],
+            path=os.environ.get("PATH"),
+        )
 
     async def _state_of(self, upstream: Upstream) -> UpstreamState:
         status = self.connections[upstream.name].status()
@@ -329,8 +340,25 @@ class Management:
             seconds=round(status.seconds, 3),
             error=status.error,
             supervised=status.supervised,
+            missing_command=self._missing_command(upstream),
             proxies=[await self.proxies[upstream.name, name].state() for name in upstream.proxies],
         )
+
+    def _missing_command(self, upstream: Upstream) -> str | None:
+        """The command an stdio Upstream would spawn that this Daemon's PATH does not answer.
+
+        Looked for on the Daemon's own PATH, which under autostart is the one ``daemon
+        install`` captured; a command that is a ``${VAR}`` reference nothing resolves is left
+        to ``doctor``, which names the unset variable instead.
+        """
+        transport = upstream.transport
+        if not isinstance(transport, StdioTransport):
+            return None
+        try:
+            resolved = self.secrets.expanded(transport)
+        except SecretError:
+            return None
+        return command_missing(resolved, os.environ.get("PATH"))
 
     # --- the endpoints ---------------------------------------------------------------------
 

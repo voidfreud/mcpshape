@@ -255,6 +255,12 @@ mcpshape doctor
 ### Autostart and distribution
 - `daemon install` writes a launchd user agent (macOS) or a `systemd --user` unit with linger
   (Linux). Offered on first `daemon up`.
+- The unit carries the PATH of the shell `daemon install` ran in, captured once (settled in
+  #48): the MCP SDK gives the Daemon's PATH to every stdio child, so an Upstream started by a
+  bare `npx` or `uvx` is found under autostart as it is in a terminal. Nothing is resolved at
+  spawn, and install is not expected to be run again. A command that cannot be found is a
+  different failure: `doctor` reports it against the shell it runs in and `daemon status`
+  against the Daemon's PATH, each naming the Upstream, the command, and the PATH looked in.
 - Home is GitHub. Releases go to PyPI; `uv tool install mcpshape` is the install path.
   Homebrew formula after the first stable release, built from PyPI. Python 3.12 minimum.
 - No telemetry, no update checks, no network calls except to configured Upstreams.

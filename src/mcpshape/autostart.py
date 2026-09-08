@@ -28,14 +28,19 @@ class AutostartPaths:
 
     ``command`` is how the unit invokes mcpshape, by absolute path: launchd and systemd run
     units with a PATH of their own that never holds ``~/.local/bin``, where ``uv tool``
-    installs, so a bare name would not be found. ``config_dir``/``state_dir`` are set only
-    when the user overrode the defaults, so the common case writes no environment at all.
+    installs, so a bare name would not be found. ``path`` is that same PATH problem one level
+    down: the MCP SDK passes the Daemon's PATH to every stdio child, so an Upstream started by
+    a bare ``npx`` or ``uvx`` is found under autostart only if the unit carries a PATH that
+    holds it. ``daemon install`` captures the installing shell's, the one the user already saw
+    work in a terminal, once (#48). ``config_dir``/``state_dir`` are set only when the user
+    overrode the defaults, so the common case writes no environment beyond the PATH.
     """
 
     log_dir: Path
     command: tuple[str, ...]
     config_dir: Path | None = None
     state_dir: Path | None = None
+    path: str | None = None
 
 
 def installed_command() -> tuple[str, ...]:
@@ -60,6 +65,8 @@ def _env(paths: AutostartPaths) -> dict[str, str]:
         env[CONFIG_DIR_ENV] = str(paths.config_dir)
     if paths.state_dir is not None:
         env[STATE_DIR_ENV] = str(paths.state_dir)
+    if paths.path is not None:
+        env["PATH"] = paths.path
     return env
 
 

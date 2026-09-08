@@ -476,10 +476,10 @@ def test_doctor_refuses_a_secrets_file_anyone_else_can_read(config_dir: ConfigDi
 
 def test_doctor_reads_a_secrets_file_that_answers_every_reference(config_dir: ConfigDir) -> None:
     config_dir.write_secrets({"DEMO_VALUE": STORED})
-    run_cli(config_dir, "add", "github", "--stdio", "github-mcp")
+    run_cli(config_dir, "add", "github", "--stdio", "sh")
     path = config_dir.path / "upstreams" / "github" / "upstream.toml"
     path.write_text(
-        'version = 1\ntransport = "stdio"\ncommand = "github-mcp"\n\n'
+        'version = 1\ntransport = "stdio"\ncommand = "sh"\n\n'
         '[env]\nGITHUB_TOKEN = "${DEMO_VALUE}"\n'
     )
 
