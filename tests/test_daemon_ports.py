@@ -14,7 +14,8 @@ if TYPE_CHECKING:
     from tests.support.seam import ConfigDir
 
 
-def _open(port: int) -> bool:
+def listening(port: int) -> bool:
+    """Whether something answers on ``port`` right now."""
     try:
         with socket.create_connection(("127.0.0.1", port), timeout=0.2):
             return True
@@ -32,7 +33,7 @@ async def test_a_proxy_with_a_port_override_is_served_on_that_port_besides_its_p
     )
 
     async with serving_daemon(config_dir) as url:
-        await until(lambda: _open(extra_port), "the Proxy's port override listener")
+        await until(lambda: listening(extra_port), "the Proxy's port override listener")
 
         async with Client(f"{url}/calc/mcp") as client:
             assert (await client.call_tool("add", {"a": 2, "b": 3})).data == 5
