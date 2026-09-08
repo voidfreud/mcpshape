@@ -227,12 +227,20 @@ def _locked(state_dir: Path, upstream: str) -> Generator[None]:
     rescans and its request handling sharing one process.
 
     Raises ``ForgottenError`` when the wait ended with the state directory gone, removed by a
-    ``forget`` that held this very lock (#49).
+    ``forget`` that held this very lock (#49), or when the lock file could not be opened
+    because a ``forget`` removed the directory just after it was made (#62).
     """
     directory = upstream_state_dir(state_dir, upstream)
     directory.mkdir(parents=True, exist_ok=True)
     lock_path = _lock_path(state_dir, upstream)
-    with lock_path.open("a+") as lock_file:
+    try:
+        opened = lock_path.open("a+")
+    except OSError:
+        if directory.is_dir():
+            raise
+        msg = f"Upstream {upstream}'s state was removed while taking its lock"
+        raise ForgottenError(msg) from None
+    with opened as lock_file:
         fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
         try:
             _check_not_forgotten(lock_file.fileno(), lock_path, upstream)
@@ -323,7 +331,7 @@ def forget(state_dir: Path, upstream: str) -> None:
     a held lock file is safe, and it is what tells a writer waiting behind this one that there
     is nothing left to write to. A second ``forget`` racing the first finds the state already
     gone and says nothing, whether it finds it gone before the lock, under the lock, or while
-    it is still taking one on a directory the other is removing (#62).
+    it is still opening a lock file in a directory the other has just removed (#62).
     """
     directory = upstream_state_dir(state_dir, upstream)
     if not directory.is_dir():
@@ -333,5 +341,5 @@ def forget(state_dir: Path, upstream: str) -> None:
             for path in directory.iterdir():
                 path.unlink(missing_ok=True)
             directory.rmdir()
-    except (ForgottenError, OSError):
+    except ForgottenError:
         return

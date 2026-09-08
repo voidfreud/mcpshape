@@ -341,6 +341,16 @@ def _nothing() -> Exposed:
     return Exposed(catalog=_empty(), name=None)
 
 
+def _reach(upstream: Upstream) -> tuple[type[object], dict[str, object]]:
+    """How the Upstream is reached: the transport's kind and settings, and nothing else.
+
+    The transport an Upstream carries is its whole file as loaded, Caps and lifecycle beside
+    the transport keys, so comparing it whole would have a Cap edit connect again (#46).
+    """
+    transport = upstream.transport
+    return type(transport), transport.model_dump(exclude={"version", "lifecycle", "caps"})
+
+
 async def rescan(state_dir: Path, secrets: Secrets, upstream: Upstream) -> bool:
     """Scan ``upstream`` into its Catalog on a first scan, else record Drift. Never raises;
     says whether the Upstream was reached.
@@ -472,10 +482,7 @@ class _Served:
                 return
             previous = self.upstream
             self._apply(upstream, settings.caps)
-            if (upstream.transport, upstream.lifecycle) != (
-                previous.transport,
-                previous.lifecycle,
-            ):
+            if _reach(upstream) != _reach(previous) or upstream.lifecycle != previous.lifecycle:
                 await self.connection.reconfigure(upstream)
 
     def _apply(self, upstream: Upstream, global_caps: CapSettings) -> None:

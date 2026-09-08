@@ -42,6 +42,7 @@ PAST_THE_BACKOFF = 5.0
 """Seconds to move the clock on by, comfortably past the first retry delay."""
 
 DESCRIPTION_CAP = 20
+CONNECTED = ("ready", "idle-pending")
 
 
 def upstream_file(config_dir: ConfigDir, upstream: str) -> Path:
@@ -94,12 +95,14 @@ async def test_an_upstream_cap_edited_while_the_daemon_runs_is_in_force_on_the_n
 
     async with running_daemon(config_dir) as daemon, daemon.client("/issues/mcp") as client:
         assert MARKER not in described(await client.list_tools(), "create_issue")
+        assert (await client.call_tool("create_issue", {"title": "x"})).data == "x" * 50
 
         set_upstream_caps(config_dir, "issues", tool_description=DESCRIPTION_CAP)
 
         description = described(await client.list_tools(), "create_issue")
         assert len(description) == DESCRIPTION_CAP
         assert description.endswith(MARKER)
+        assert await daemon.upstream_state("issues") in CONNECTED, "a Cap edit is no reconnect"
 
 
 async def test_reload_re_reads_the_upstream_files_too(config_dir: ConfigDir) -> None:
