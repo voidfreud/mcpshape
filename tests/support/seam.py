@@ -16,6 +16,7 @@ import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+import httpx2
 import pytest
 import uvicorn
 from fastmcp import Client, FastMCP
@@ -210,6 +211,27 @@ async def running_daemon(
     app = daemon_app.main
     async with app.router.lifespan_context(app):
         yield RunningDaemon(app)
+
+
+async def awaiting_state_at(url: str, name: str, *states: str, patience: float = 5.0) -> str:
+    """``RunningDaemon.awaiting_state`` for a Daemon served on a socket at ``url``.
+
+    Read from a thread, so the Daemon, which runs on this loop, keeps answering.
+    """
+
+    def state() -> str:
+        answer = httpx2.get(f"{url}{STATUS_PATH}").json()
+        return str(next(u["state"] for u in answer["upstreams"] if u["name"] == name))
+
+    deadline = time.monotonic() + patience
+    seen = await asyncio.to_thread(state)
+    while seen not in states:
+        if time.monotonic() > deadline:
+            msg = f"Upstream {name} stayed {seen!r}, never reached {states}"
+            raise AssertionError(msg)
+        await asyncio.sleep(0.02)
+        seen = await asyncio.to_thread(state)
+    return seen
 
 
 async def until(ready: Callable[[], bool], what: str, patience: float = 5.0) -> None:

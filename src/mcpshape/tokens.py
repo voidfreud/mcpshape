@@ -53,7 +53,9 @@ class Tokens:
 
     Read gives back what ``write`` was handed, or nothing when the Upstream has never logged
     in. Neither the key nor anything decrypted is held on to between calls, so a login the CLI
-    performs is picked up by the next connect with no restart.
+    performs is picked up by the next connect with no restart. Whether what is stored is a
+    finished login is the Adapter's to say (``logged_in``), since a file appears the moment a
+    login starts (#56).
     """
 
     def __init__(self, state_dir: Path, upstream: str) -> None:
@@ -63,10 +65,6 @@ class Tokens:
     @property
     def path(self) -> Path:
         return self.state_dir / TOKENS_DIR / f"{self.upstream}.json"
-
-    def stored(self) -> bool:
-        """Whether a login is on disk at all. Says nothing about whether it still works."""
-        return self.path.is_file()
 
     def read(self) -> dict[str, Any] | None:
         """What the login produced, or nothing when there is none."""

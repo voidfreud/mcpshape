@@ -260,6 +260,10 @@ class UpstreamConnection:
         """Try to connect again now: a login just stored what the last attempt lacked (#16)."""
         self._connection.retry()
 
+    def unscanned(self) -> None:
+        """The start-up scan reached nothing, so the first connect rescans (#57)."""
+        self._connection.unscanned()
+
     def running(self) -> AbstractAsyncContextManager[None]:
         """Warm, time, and finally let the connection go, for the life of the Daemon."""
         return self._connection.running()
@@ -1166,13 +1170,12 @@ class _TokenStorage(TokenStorage):
 def logged_in(tokens: Tokens) -> bool:
     """Whether a token set is stored, as opposed to only the client registration.
 
-    The SDK writes the registration first, so ``tokens.stored()`` is true from the moment a
-    login starts; the token set is what says the login finished.
+    The SDK writes the registration first, so the file is there from the moment a login
+    starts; the token set is what says the login finished (#56). A file that cannot be read
+    raises as ``Tokens.read`` does, naming files and never a value: a key that no longer
+    matches is for the user to hear about, not to log in over.
     """
-    try:
-        document = tokens.read() or {}
-    except Exception:  # noqa: BLE001  # an unreadable file is no login
-        return False
+    document = tokens.read() or {}
     return document.get(_TokenStorage.TOKENS) is not None
 
 
@@ -1214,7 +1217,7 @@ def _stored_auth(remote: HttpTransport | SseTransport, tokens: Tokens | None) ->
     if tokens is None:
         msg = "an OAuth Upstream is reached from where no stored login can be read"
         raise UpstreamTargetError(msg)
-    if not tokens.stored():
+    if not logged_in(tokens):
         raise LoginNeededError(tokens.upstream)
     redirect, callback = _refusing(tokens.upstream)
     return _provider(remote, tokens, NO_REDIRECT, redirect, callback)

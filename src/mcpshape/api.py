@@ -17,6 +17,8 @@ Routes, all behind the bearer token when one is configured:
 - ``POST /api/upstreams/<name>/sync``: scan now and record the Drift. Accepting it edits
   Proxy files, so it stays the CLI's: ``upstream sync --accept``.
 - ``GET`` and ``POST /api/upstreams/<name>/oauth``: the login's state, and starting one.
+- ``POST /api/upstreams/<name>/connect``: connect now instead of waiting out the backoff;
+  answers the connection's state. What a login from the CLI is followed by (#58).
 - ``GET /api/calls?upstream=&proxy=&limit=``: the latest calls, oldest first.
 - ``GET /api/logs?lines=``: the app log's tail.
 """
@@ -170,6 +172,12 @@ class LoginState(BaseModel):
     """Why the last login started here failed, until the next one starts."""
 
 
+class ConnectAnswer(BaseModel):
+    """``POST /api/upstreams/<name>/connect``: where the connection stands right after."""
+
+    state: str
+
+
 class CallsAnswer(BaseModel):
     calls: list[CallRecord] = Field(default_factory=list[CallRecord])
 
@@ -296,6 +304,7 @@ class Management:
             Route(f"{UPSTREAMS_PATH}/{{upstream}}/sync", self._sync, methods=["POST"]),
             Route(f"{UPSTREAMS_PATH}/{{upstream}}/oauth", self._login_state),
             Route(f"{UPSTREAMS_PATH}/{{upstream}}/oauth", self._login_start, methods=["POST"]),
+            Route(f"{UPSTREAMS_PATH}/{{upstream}}/connect", self._connect, methods=["POST"]),
             Route(CALLS_PATH, self._calls),
             Route(LOGS_PATH, self._logs),
         ]
@@ -308,19 +317,17 @@ class Management:
     async def live(self) -> LiveState:
         """What every Upstream and Proxy is doing right now, each Proxy refreshed on the way."""
 
-        async def state_of(upstream: Upstream) -> UpstreamState:
-            status = self.connections[upstream.name].status()
-            return UpstreamState(
-                name=upstream.name,
-                state=status.state,
-                seconds=round(status.seconds, 3),
-                error=status.error,
-                proxies=[
-                    await self.proxies[upstream.name, name].state() for name in upstream.proxies
-                ],
-            )
+        return LiveState(upstreams=[await self._state_of(upstream) for upstream in self.upstreams])
 
-        return LiveState(upstreams=[await state_of(upstream) for upstream in self.upstreams])
+    async def _state_of(self, upstream: Upstream) -> UpstreamState:
+        status = self.connections[upstream.name].status()
+        return UpstreamState(
+            name=upstream.name,
+            state=status.state,
+            seconds=round(status.seconds, 3),
+            error=status.error,
+            proxies=[await self.proxies[upstream.name, name].state() for name in upstream.proxies],
+        )
 
     # --- the endpoints ---------------------------------------------------------------------
 
@@ -424,6 +431,15 @@ class Management:
         except _ScanFailedError as exc:
             log.warning("after logging in, %s", exc)
         self.connections[upstream.name].retry()
+
+    async def _connect(self, request: Request) -> JSONResponse:
+        return await self._for_upstream(request, self._connect_of)
+
+    async def _connect_of(self, upstream: Upstream) -> JSONResponse:
+        """Have an ``unavailable`` Upstream try again now, and say where it stands."""
+        connection = self.connections[upstream.name]
+        connection.retry()
+        return _answer(ConnectAnswer(state=connection.status().state))
 
     async def _calls(self, request: Request) -> JSONResponse:
         """The latest calls of every Proxy, or of the Upstream or Proxy named, oldest first."""
