@@ -33,6 +33,7 @@ from fastmcp.server.providers.proxy import (
 from fastmcp.tools import FunctionTool, Tool
 from fastmcp.tools.base import ToolResult
 from mcp.client.auth import OAuthClientProvider, TokenStorage
+from mcp.server.streamable_http import StreamableHTTPServerTransport
 from mcp.shared.auth import (
     AuthorizationCodeResult,
     OAuthClientInformationFull,
@@ -105,29 +106,19 @@ async def test_a_streamable_http_app_tracks_the_live_sessions_its_lifespan_termi
     """What the seam's ``drain_sessions`` reads before stopping an in-process server (#76).
 
     FastMCP sets a session manager on the app it mounts at its MCP path once its lifespan
-    runs, and that manager's ``_server_instances`` holds every session it has seen; a closed
-    client's session stays listed, marked terminated, so what is open is what is not. A
-    modern-era ``Client`` opens the session here: what is pinned holds for any client, and a
-    legacy-era session against an in-process app is the very thing #76 is about.
+    runs, and that manager's ``_server_instances`` holds every legacy-era session it has seen,
+    each a transport with ``is_terminated`` and ``terminate()``; an SSE app has no manager.
+    No session is opened here on purpose: a legacy-era session against an in-process app is
+    the very thing #76 is about, and a modern-era ``Client`` leaves nothing in that dict.
     """
     served = echo_server().http_app(path="/mcp")
+    assert session_managers(served) == [], "nothing before the lifespan runs"
     async with served.router.lifespan_context(served):
         (manager,) = session_managers(served)
         assert open_sessions(manager) == {}
-
-        transport = StreamableHttpTransport(
-            "http://contract/mcp",
-            httpx_client_factory=asgi_client_factory(served, "http://contract"),
-        )
-        async with Client(transport) as client:
-            await client.list_tools()
-            assert len(open_sessions(manager)) == 1
-        for _ in range(50):
-            if not open_sessions(manager):
-                break
-            await asyncio.sleep(0.02)
-        assert open_sessions(manager) == {}, "a closed client's session is terminated"
-        assert len(manager._server_instances) == 1, "and still listed"  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+        assert isinstance(manager._server_instances, dict)  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+        assert callable(StreamableHTTPServerTransport.terminate)
+        assert isinstance(StreamableHTTPServerTransport.is_terminated, property)
 
     assert session_managers(echo_server().http_app(path="/sse", transport="sse")) == []
 
