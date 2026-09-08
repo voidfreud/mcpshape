@@ -214,6 +214,15 @@ def _lowered(inherited: CapSettings, level: str, given: dict[str, int]) -> CapSe
     return inherited.model_copy(update=given)
 
 
+def given_kinds(caps: CapSettings | CapOverrides) -> frozenset[str]:
+    """Which Cap kinds this level's file actually sets, not merely inherited defaults.
+
+    Used to report which level set the Cap in force for a kind (``doctor --for``), never to
+    change how a Cap is applied.
+    """
+    return frozenset(caps.model_fields_set) & frozenset(CAP_KINDS)
+
+
 class CapOverrides(BaseModel):
     """One Upstream's or one Proxy's Caps: unset keeps what it inherits, set only ever lowers
     it."""

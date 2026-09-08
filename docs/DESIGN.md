@@ -208,6 +208,9 @@ Claude Code is the first and best-integrated Profile, never a special case in th
 - Claude Code Profile defaults, set now: Caps for tool descriptions and Proxy instructions
   comfortably under the 2KB at which Claude Code cuts them off, and `doctor` reminds that
   critical text goes first because the first sentence carries the routing hint.
+- Settled in #44: `doctor --for` compares each Proxy's resolved Cap (global, then Upstream,
+  then Proxy) with the Profile's documented number and names the level that set it, instead of
+  only printing the Profile's recommendation as a note.
 
 ### Observability
 - App log with standard levels. Verbose by default during development; configurable down to

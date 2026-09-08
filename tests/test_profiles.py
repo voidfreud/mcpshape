@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 from fastmcp import FastMCP
 
 from tests.support.seam import run_cli
+from tests.test_caps import set_global_caps, set_proxy_caps, set_upstream_caps
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -366,6 +367,62 @@ def test_doctor_for_claude_code_reminds_that_critical_text_goes_first(
     assert "2KB" in result.output
     assert "1800" in result.output, "the Caps the Profile recommends are shown with their source"
     assert "checked 2026-09-07" in result.output
+    assert "Cap in force" not in result.output, "the resolved Caps are within the Profile's numbers"
+
+
+def test_doctor_for_a_client_compares_the_global_cap_with_the_profiles_number(
+    config_dir: ConfigDir,
+) -> None:
+    set_global_caps(config_dir, tool_description=4000)
+    synced(config_dir, "notes", notes())
+
+    result = run_cli(config_dir, "doctor", "--for", "claude-code")
+
+    assert result.exit_code == 0, result.output
+    assert "4000" in result.output
+    assert "config.toml [caps]" in result.output
+    assert "1800" in result.output
+    assert "tool_description" in result.output, "the finding names what to set"
+
+
+def test_doctor_for_a_client_names_the_upstream_level_that_set_the_cap(
+    config_dir: ConfigDir,
+) -> None:
+    set_global_caps(config_dir, tool_description=4000)
+    synced(config_dir, "notes", notes())
+    set_upstream_caps(config_dir, "notes", tool_description=2000)
+
+    result = run_cli(config_dir, "doctor", "--for", "claude-code")
+
+    assert result.exit_code == 0, result.output
+    assert "2000" in result.output
+    assert "Upstream notes" in result.output
+    assert "upstreams/notes/upstream.toml" in result.output
+
+
+def test_doctor_for_a_client_reports_nothing_when_a_proxy_lowers_the_cap_enough(
+    config_dir: ConfigDir,
+) -> None:
+    set_global_caps(config_dir, tool_description=4000)
+    synced(config_dir, "notes", notes())
+    set_proxy_caps(config_dir, "notes", "default", tool_description=1500)
+
+    result = run_cli(config_dir, "doctor", "--for", "claude-code")
+
+    assert result.exit_code == 0, result.output
+    assert "Cap in force" not in result.output
+
+
+def test_doctor_for_a_client_compares_the_instructions_cap_too(config_dir: ConfigDir) -> None:
+    set_global_caps(config_dir, instructions=4000)
+    synced(config_dir, "notes", notes())
+
+    result = run_cli(config_dir, "doctor", "--for", "claude-code")
+
+    assert result.exit_code == 0, result.output
+    assert "instructions" in result.output
+    assert "4000" in result.output
+    assert "config.toml [caps]" in result.output
 
 
 def test_doctor_for_a_client_reports_an_exposed_tool_name_over_its_budget(
