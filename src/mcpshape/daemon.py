@@ -312,9 +312,7 @@ async def rescan(state_dir: Path, secrets: Secrets, upstream: Upstream) -> bool:
     concurrent ``upstream sync``; a thread keeps that wait off the Daemon's own event loop.
     """
     try:
-        observed = await scan(
-            upstream.name, upstream.transport, secrets, Tokens(state_dir, upstream.name)
-        )
+        observed = await scan(upstream, secrets, Tokens(state_dir, upstream.name))
         await asyncio.to_thread(catalogs.record_scan, state_dir, upstream.name, observed)
     except Exception:  # an Upstream that cannot be reached must not keep the Daemon from starting
         log.warning("Upstream %s could not be scanned", upstream.name, exc_info=True)

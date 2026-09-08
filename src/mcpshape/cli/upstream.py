@@ -185,8 +185,8 @@ def login_line(state_dir: Path, upstream: Upstream) -> str:
             f"Auth: OAuth, not logged in. Log in with: "
             f"[bold]mcpshape upstream sync {upstream.name}[/bold]"
         )
-    granted = granted_scopes(tokens) or []
     line = "Auth: OAuth, logged in (the token is encrypted in the state directory)"
+    granted = granted_scopes(tokens)
     if granted:
         line += f"\nScopes granted: {' '.join(granted)}"
     if note := scope_note(upstream, granted):
@@ -194,22 +194,28 @@ def login_line(state_dir: Path, upstream: Upstream) -> str:
     return line
 
 
-def scope_note(upstream: Upstream, granted: list[str]) -> str | None:
+def scope_note(upstream: Upstream, granted: list[str] | None) -> str | None:
     """One line when the login was granted other scopes than the file asks for (#51).
 
     The browser flow asks for what the provider advertises, not what ``scopes`` says, so a
-    user who set them is told what they got instead; nothing when they match or none is set.
+    user who set them is told what they got instead. Nothing when they match, when the file
+    sets none, or when the provider did not say, which means it granted what was asked.
     """
     transport = upstream.transport
     if not isinstance(transport, HttpTransport | SseTransport) or not transport.scopes:
         return None
-    if set(transport.scopes) == set(granted):
+    if not granted or set(transport.scopes) == set(granted):
         return None
     return (
         f"[yellow]![/] {upstream.name}: the login was granted the scopes "
-        f"'{' '.join(granted) or '(none)'}', not the '{' '.join(transport.scopes)}' its file "
-        "asks for; the provider decides what the browser flow asks for"
+        f"'{' '.join(granted)}', not the '{' '.join(transport.scopes)}' its file asks for; "
+        "the provider decides what the browser flow asks for"
     )
+
+
+def scope_note_for(state_dir: Path, upstream: Upstream) -> str | None:
+    """``scope_note`` for the login stored for ``upstream``, or nothing."""
+    return scope_note(upstream, granted_scopes(token_store.Tokens(state_dir, upstream.name)))
 
 
 @app.command("sync", epilog=example("upstream sync github --accept"))
@@ -264,19 +270,15 @@ def scanned(
 
 
 def _scan(config_dir: Path, upstream: Upstream, tokens: token_store.Tokens) -> catalog.Catalog:
-    return asyncio.run(
-        scan(upstream.name, upstream.transport, config.secrets_for(config_dir), tokens)
-    )
+    return asyncio.run(scan(upstream, config.secrets_for(config_dir), tokens))
 
 
 def sync_one(
     config_dir: Path, state_dir: Path, upstream: Upstream, *, accept: bool, device: bool = False
 ) -> None:
     observed = scanned(config_dir, state_dir, upstream, device=device)
-    if oauth_upstream(upstream.transport):
-        granted = granted_scopes(token_store.Tokens(state_dir, upstream.name)) or []
-        if note := scope_note(upstream, granted):
-            console.print(note)
+    if oauth_upstream(upstream.transport) and (note := scope_note_for(state_dir, upstream)):
+        console.print(note)
     result = (
         catalog.accept_scan(state_dir, upstream.name, observed)
         if accept

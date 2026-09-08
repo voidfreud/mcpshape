@@ -140,11 +140,9 @@ class _Link:
     a Daemon restart.
     """
 
-    def __init__(
-        self, name: str, transport: Transport, secrets: Secrets, tokens: Tokens | None
-    ) -> None:
-        self.name = name
-        self.transport = transport
+    def __init__(self, upstream: Upstream, secrets: Secrets, tokens: Tokens | None) -> None:
+        self.upstream = upstream
+        self.transport = upstream.transport
         self.secrets = secrets
         self.tokens = tokens
         self._open: AsyncExitStack | None = None
@@ -168,7 +166,7 @@ class _Link:
         self._open = stack
         try:
             async with _concealing(self.transport, self.secrets, self.tokens):
-                with _child_stderr(self.name, self.transport) as errlog:
+                with _child_stderr(self.upstream, self.secrets) as errlog:
                     target = _target(self.transport, self.secrets, self.tokens, errlog)
                     client: ProxyClient[Any] = ProxyClient(target)
                     stack.push_async_callback(client.close)
@@ -221,7 +219,7 @@ class UpstreamConnection:
         on_catalog: Callable[[Catalog], Awaitable[None]] | None = None,
         tokens: Tokens | None = None,
     ) -> None:
-        self._link = _Link(upstream.name, upstream.transport, secrets, tokens)
+        self._link = _Link(upstream, secrets, tokens)
         self._on_catalog = on_catalog
         self._lifecycle = upstream.lifecycle
         self._connection = Connection(
@@ -262,9 +260,7 @@ class UpstreamConnection:
         if self._connection.status().state in CONNECTED:
             await self._connection.acquire()
             return await self._over_open_client()
-        return await scan(
-            self._link.name, self._link.transport, self._link.secrets, self._link.tokens
-        )
+        return await scan(self._link.upstream, self._link.secrets, self._link.tokens)
 
     def retry(self) -> None:
         """Try to connect again now: a login just stored what the last attempt lacked (#16)."""
@@ -337,16 +333,15 @@ def proxy_app(
     return ProxyApp(name=name, asgi=app, lifespan=lifespan, serve=serve, fail=runtime.fail)
 
 
-async def scan(
-    name: str, transport: Transport, secrets: Secrets, tokens: Tokens | None = None
-) -> Catalog:
-    """Everything the Upstream ``name`` behind ``transport`` advertises right now.
+async def scan(upstream: Upstream, secrets: Secrets, tokens: Tokens | None = None) -> Catalog:
+    """Everything ``upstream`` advertises right now.
 
     This opens a connection of its own. An Upstream the Daemon is already connected to is
     looked at over that connection instead, by ``UpstreamConnection``.
     """
+    transport = upstream.transport
     async with _concealing(transport, secrets, tokens):
-        with _child_stderr(name, transport) as errlog:
+        with _child_stderr(upstream, secrets) as errlog:
             async with Client(_target(transport, secrets, tokens, errlog)) as client:
                 return await _catalog_of(client)
 
@@ -1080,32 +1075,48 @@ def _target(
             return _import_server(memory.module, memory.attribute)
 
 
+STDERR_LINE_BYTES = 8192
+"""The most of one stderr line a relayed log line carries; a child that writes no newline is
+logged in pieces of this size rather than buffered without end."""
+
+
 @contextmanager
-def _child_stderr(name: str, transport: Transport) -> Generator[TextIO | None]:
-    """A pipe for an stdio child's stderr, read into the app log under ``name`` (#42).
+def _child_stderr(upstream: Upstream, secrets: Secrets) -> Generator[TextIO | None]:
+    """A pipe for an stdio child's stderr, read into the app log under its name (#42).
 
     The SDK hands a child the stream it is given as its stderr, which needs a real file
     descriptor: this is the writing end of a pipe, and a thread reads the other end line by
-    line into ``child_log`` until the child closes it. The block runs for the connect, after
-    which the Daemon's own copy of the writing end is closed, so the reader sees the end of
-    the file when the child exits and not before. Nothing but an stdio Upstream gets one.
+    line into ``child_log``, every resolved ``${VAR}`` written back as the reference, until
+    the end of the file. The block runs for the connect, after which the Daemon's own copy of
+    the writing end is closed, so the end comes when the child, and anything the child
+    started with its stderr, exits, and not before. Nothing but an stdio Upstream gets one.
+    In the CLI's process nothing handles the app log, so what a scan's child says is dropped.
     """
+    transport = upstream.transport
     if not isinstance(transport, StdioTransport):
         yield None
         return
     reading, writing = os.pipe()
-    threading.Thread(
-        target=_relay_stderr, args=(name, reading), name=f"stderr:{name}", daemon=True
-    ).start()
-    with os.fdopen(writing, "w") as errlog:
+    try:
+        threading.Thread(
+            target=_relay_stderr,
+            args=(upstream.name, transport, secrets, reading),
+            name=f"stderr:{upstream.name}",
+            daemon=True,
+        ).start()
+    except BaseException:
+        os.close(reading)
+        os.close(writing)
+        raise
+    with os.fdopen(writing, "w", encoding="utf-8") as errlog:
         yield errlog
 
 
-def _relay_stderr(name: str, descriptor: int) -> None:
-    with os.fdopen(descriptor, errors="replace") as lines:
-        for line in lines:
+def _relay_stderr(name: str, transport: StdioTransport, secrets: Secrets, descriptor: int) -> None:
+    with os.fdopen(descriptor, encoding="utf-8", errors="replace") as lines:
+        while line := lines.readline(STDERR_LINE_BYTES):
             if text := line.rstrip():
-                child_log.info("%s: %s", name, text)
+                child_log.info("%s: %s", name, secrets.concealed(text, transport))
 
 
 def _import_server(module: str, attribute: str) -> FastMCP[Any]:
@@ -1211,16 +1222,18 @@ class _TokenStorage(TokenStorage):
 
 
 def granted_scopes(tokens: Tokens) -> list[str] | None:
-    """The scopes the stored token set was granted, or nothing when no token set is stored.
+    """The scopes the stored token set was granted, or nothing when the provider did not say
+    or no token set is stored.
 
     The provider's word (``scope`` in the token answer), not what was asked for, which the
-    SDK's browser flow overwrites with what discovery found (#51). Never a token value.
+    SDK's browser flow overwrites with what discovery found (#51). A provider that answers
+    without ``scope`` granted what was asked (RFC 6749, 5.1). Never a token value.
     """
     document = tokens.read() or {}
     stored: Any = document.get(_TokenStorage.TOKENS)
     if stored is None:
         return None
-    return str(OAuthToken.model_validate(stored).scope or "").split()
+    return str(OAuthToken.model_validate(stored).scope or "").split() or None
 
 
 def logged_in(tokens: Tokens) -> bool:

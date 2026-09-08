@@ -414,7 +414,8 @@ async def test_a_lazy_url_upstream_that_dies_while_connected_is_noticed_by_the_n
             assert "connection dead" in await upstream_error(await daemon.status(), "calc")
             app_log = (config_dir.state / "log" / "daemon.log").read_text()
             assert "Upstream calc is unavailable (a call found the connection dead" in app_log
-            assert "Traceback" not in app_log, "letting a dead connection go wrote one (#52)"
+            assert "Upstream calc let its dead connection go: " in app_log
+            assert "did not close cleanly" not in app_log, "a dead close was news (#52)"
 
             await served.revive()
             await clock.advance(PAST_THE_BACKOFF)

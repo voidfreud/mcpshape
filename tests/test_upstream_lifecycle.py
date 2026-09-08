@@ -249,6 +249,31 @@ async def test_a_keeper_that_raises_is_restarted_up_to_a_cap(
         assert await daemon.awaiting_state("calc", "cold") == "cold"
 
 
+async def test_a_close_that_fails_for_any_other_reason_is_logged_with_its_traceback(
+    config_dir: ConfigDir, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#52: only a dead connection's close is one line; any other close failing is news."""
+    clock = FakeClock()
+    config_dir.add_memory_upstream("calc", calculator(), {"idle_timeout": 100})
+
+    # fault injection: no Client-driven path makes a healthy connection's close fail.
+    async def failing_close(_self: object) -> None:
+        msg = "injected close fault"
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr("mcpshape.adapters.fastmcp._Link.close", failing_close)
+
+    async with running_daemon(config_dir, clock) as daemon, daemon.client("/calc/mcp") as client:
+        assert (await client.call_tool("add", {"a": 2, "b": 3})).data == 5
+        await clock.advance(101)  # idle: the connection is let go, and closing it fails
+        assert await daemon.awaiting_state("calc", "cold") == "cold"
+
+    app_log = (config_dir.state / "log" / "daemon.log").read_text()
+    assert "Upstream calc did not close cleanly" in app_log
+    assert "Traceback" in app_log
+    assert "injected close fault" in app_log
+
+
 async def test_a_keeper_that_raises_past_the_cap_marks_the_upstream_unavailable(
     config_dir: ConfigDir, monkeypatch: pytest.MonkeyPatch
 ) -> None:

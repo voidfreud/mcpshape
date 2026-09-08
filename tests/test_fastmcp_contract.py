@@ -6,7 +6,6 @@ These tests talk to FastMCP directly, on purpose. Everything else goes through t
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
 import os
 import threading
@@ -777,7 +776,7 @@ async def test_a_dead_transport_raises_connection_closed_and_an_upstream_error_d
     async with restartable_upstream() as served:
         client: ProxyClient[Any] = ProxyClient(StreamableHttpTransport(served.url))
         dead: MCPError | None = None
-        with contextlib.suppress(Exception):  # what closing a dead client raises
+        with pytest.raises(Exception):  # noqa: B017, PT011, PT012  # closing a dead client raises its failure (#52)
             async with client:
                 async with client:
                     assert not (await client.call_tool_mcp("add", {"a": 1, "b": 1})).is_error

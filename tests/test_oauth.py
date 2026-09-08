@@ -273,6 +273,26 @@ async def test_device_code_pairing_is_granted_the_configured_scopes_with_no_note
     assert "Scopes granted: read" in shown.output
     assert "granted the scopes" not in synced.output
     assert "granted the scopes" not in shown.output
+    assert access_token(provider) not in synced.output + shown.output
+
+
+async def test_a_provider_that_names_no_scope_granted_what_was_asked(
+    config_dir: ConfigDir, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """RFC 6749, 5.1: no ``scope`` in the answer means the request's, so nothing to say."""
+    visiting_browser(monkeypatch)
+    async with serving_provider(calculator(), Issuer(names_scope=False)) as provider:
+        config_dir.add_upstream(
+            "x",
+            f'transport = "http"\nurl = {json.dumps(provider.mcp_url)}\nauth = "oauth"\n'
+            'scopes = ["read"]\n',
+        )
+        synced = await cli(config_dir, "upstream", "sync", "x")
+        shown = run_cli(config_dir, "upstream", "show", "x")
+
+    assert "OAuth, logged in" in shown.output
+    assert "Scopes granted" not in shown.output
+    assert "granted the scopes" not in synced.output + shown.output
 
 
 # --- reaching the Upstream afterwards ----------------------------------------------------------
