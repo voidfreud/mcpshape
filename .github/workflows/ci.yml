@@ -66,7 +66,7 @@ jobs:
             echo "::error::rule files (CONTRIBUTING.md, CLAUDE.md, .github/, the release-please files) and code never change in one pull request"; fail=1
           fi
           if [ "$bot" = 0 ]; then
-            if printf '%s\n' "$files" | grep -Eq '^(CHANGELOG\.md|\.release-please-manifest\.json)$'; then
+            if git diff --diff-filter=M --name-only "$(git merge-base "$BASE" "$HEAD")" "$HEAD" | grep -Eq '^(CHANGELOG\.md|\.release-please-manifest\.json)$'; then
               echo "::error::CHANGELOG.md and .release-please-manifest.json are written by release-please alone"; fail=1
             fi
             if git diff "$(git merge-base "$BASE" "$HEAD")" "$HEAD" -- pyproject.toml | grep -Eq '^[-+]version = '; then
