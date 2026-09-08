@@ -1,0 +1,23 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: The release pull request holds the version bump and the changelog of everything unreleased
+        uses: googleapis/release-please-action@v5
+        with:
+          token: ${{ secrets.BOT_TOKEN || github.token }}

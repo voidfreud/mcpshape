@@ -17,9 +17,10 @@ file; a remark in a session changes nothing.
 - **Follow-up**: a ticket filed for something seen while landing a wave that the wave does not fix.
 - **Frontier**: the tickets that can be landed now: open, `ready`, unblocked, unassigned, not a parent.
 - **Code**: anything under `src/` or `tests/`. **Rule files**: `CONTRIBUTING.md`, `CLAUDE.md`,
-  and everything under `.github/`.
+  everything under `.github/`, `release-please-config.json`, and `.release-please-manifest.json`.
 
-Names and wording, in tickets, pull requests, code, and docs, follow `CONTEXT.md`.
+Names and wording, in tickets, pull requests, code, and every Markdown file but the transcripts
+under `docs/sessions/`, follow `CONTEXT.md`.
 
 ## Tickets
 
@@ -44,15 +45,15 @@ Names and wording, in tickets, pull requests, code, and docs, follow `CONTEXT.md
 - A `ready` ticket is closed by the merge that lands it; a `ready` parent by the session that
   lands its last sub-issue. Nothing else closes either, and a ticket closed any other way is
   reopened.
-- A `decision` ticket is resolved by the maintainer: the decision is written as a comment and the
-  ticket is closed, or it is relabelled `ready` and rewritten to be landable.
+- A `decision` ticket is resolved by the maintainer's decision, written as a comment by whoever
+  records it, and closed; or it is relabelled `ready` and rewritten to be landable.
 - A `wish` ticket is closed when it is declined or superseded, or relabelled when it gets a plan.
 - A claim is released by unassigning: when a ticket drops out of a wave, or when it is found
   wrong while landing, in which case it is also relabelled `decision` with a comment saying why.
 - A ticket assigned with no open pull request naming it is a stale claim; the next session asks
   the maintainer before taking it over.
-- Follow-ups are filed as tickets before the wave's pull request merges, blockers linked.
-  Nothing is left in a comment, a TODO, or a memory.
+- Follow-ups are filed as tickets before the wave's pull request merges, blockers linked. A
+  follow-up is never left as a comment, a TODO, or a memory.
 - A pull request from outside gets a ticket filed by the maintainer and assigned to its author;
   it then lands like any wave, or is closed with a comment saying why.
 
@@ -61,16 +62,15 @@ Names and wording, in tickets, pull requests, code, and docs, follow `CONTEXT.md
 1. **Claim** every ticket of the wave. This is the session's first write to GitHub.
 2. **Branch** from `main`: `<type>/<slug>`, the type from the list below, the slug lowercase
    letters, digits, and hyphens, at most 40 characters. One branch per wave.
-3. **Implement** on the branch. Tests drive the system through the seam `docs/DESIGN.md`
-   describes. No rule constrains the commits on the branch, their messages or their number; the
+3. **Implement** on the branch. No rule constrains the commits on the branch, their messages or their number; the
    pull request is what lands. Before review, the commands CI's `test` job runs are green locally:
    `uv lock --check && uv sync --locked && uv run ruff check . && uv run ruff format --check . && uv run pyright && uv run vulture src tests --min-confidence 80 && uv run pytest`
 4. **Review** on the branch, before the pull request opens, by a reviewer that did not write
    the code, on the whole diff:
    - spec: each ticket's acceptance criteria, met or not, with evidence; and nothing built that
      no ticket asked for;
-   - standards: this file, `CONTEXT.md` (terms and Avoid lists, in names and in text),
-     `docs/DESIGN.md` and the ADRs, the test seam, duplication;
+   - standards: this file, `CONTEXT.md` (terms and Avoid lists, in names and in text), the
+     design brief and the ADRs `CLAUDE.md` names, duplication;
    - rules, when a rule file changed: every rule once, no two in conflict, none ambiguous, none
      unenforced that could be.
    Every finding is fixed on the branch or answered; none is deferred. The session landing the
@@ -91,6 +91,32 @@ Names and wording, in tickets, pull requests, code, and docs, follow `CONTEXT.md
 Types: `build`, `chore`, `ci`, `docs`, `feat`, `fix`, `perf`, `refactor`, `revert`, `style`,
 `test`.
 
+## Bots
+
+Two bots open pull requests of their own. A bot's pull request is not a wave: nothing is
+claimed, branched, reviewed, or filed for it, and it closes no ticket. The `rules` job exempts
+its branch, `dependabot/*` or `release-please--*`, from the branch-name, body-section, and
+`Closes` checks and from nothing else; every other check applies, and it merges green and up
+to date like any pull request.
+
+- Dependabot, weekly and grouped: a minor or patch update merges by itself once its checks are
+  green; a major update opens as its own pull request and stays open until the maintainer
+  decides. On every push to `main`, every open Dependabot pull request is asked to rebase, so
+  its checks rerun on the new `main`.
+- release-please keeps one release pull request open whenever an unreleased `feat`, `fix`,
+  `perf`, or `revert` commit exists, holding the version bump and the changelog; commits of the
+  other types ship inside the next such release. The maintainer merges it, or tells a session
+  to. The merge creates the tag `vX.Y.Z` and the GitHub release, and the `Publish` workflow
+  ships that release to PyPI; a `Publish` run that failed is rerun from the Actions page.
+  `CHANGELOG.md`, `.release-please-manifest.json`, and the version in `pyproject.toml` are
+  written by release-please alone, and its two `autorelease:` labels are its own, on its pull
+  requests only.
+
+The bots' workflows run with the `BOT_TOKEN` secret, a fine-grained token with contents and
+pull requests read and write, since anything done with GitHub's own token triggers no
+workflow: a pull request it opened gets no checks, and a merge it performed runs nothing on
+`main`. Without the secret the bots' workflows do nothing and fail nothing.
+
 ## Sessions and agents
 
 - One session lands a wave and is responsible for it. Subagents work in the same working tree,
@@ -106,8 +132,9 @@ Types: `build`, `chore`, `ci`, `docs`, `feat`, `fix`, `perf`, `refactor`, `rever
 
 The pull request is the record of a wave: what changed, how it was tested, what review found.
 GitHub links each closed ticket to it. Nothing is written a second time on the ticket or
-anywhere else. A dated fact about a Client or FastMCP goes in `docs/clients.md`; a
-hard-to-reverse design decision gets an ADR in `docs/adr/`.
+anywhere else. A dated fact is recorded in the document `CLAUDE.md` names for facts; a
+hard-to-reverse design decision is an ADR, where `CLAUDE.md` says they live. A tag `baseline-<date>`
+marks a state the maintainer wants to find again; a tag `vX.Y.Z` is a release.
 
 ## Enforced
 
@@ -115,7 +142,9 @@ hard-to-reverse design decision gets an ADR in `docs/adr/`.
 | --- | --- |
 | Pull requests only; squash only; linear history; every check green and up to date; no bypass | ruleset `protect-main` |
 | Squash subject is the title, body is the body; branch deleted on merge | repository settings |
-| Branch is `<type>/<slug>`; title is `type: subject`, at most 72 characters, no trailing period | CI, job `rules` |
-| Body has the template's sections in order; `Closes #<n>` when code changed; every `Closes` ticket is open, `ready`, assigned to the author, and not a parent; rule files and code never in one pull request | CI, job `rules` |
+| Branch is `<type>/<slug>`; title is `type: subject`, at most 72 characters, no trailing period; a bot's pull request is exempt from the branch, body, and `Closes` checks | CI, job `rules` |
+| Body has the template's sections in order; `Closes #<n>` when code changed; every `Closes` ticket is open, `ready`, assigned to the author, and not a parent; rule files and code never in one pull request; release-please's files written by release-please alone | CI, job `rules` |
 | Ticket sections and labels, checked on every open and edit, one comment until they pass | CI, workflow `Issue` |
 | Lint, format, types, tests, lock file, dead code | CI, job `test` |
+| Dependabot's minor and patch updates merge by themselves when green, and every open one is asked to rebase on each push to `main` | CI, workflow `Bots` |
+| The release pull request exists; merging it tags, releases, and publishes | CI, workflows `Release` and `Publish` |

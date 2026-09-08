@@ -24,7 +24,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Branch, title, body, and tickets follow CONTRIBUTING.md
+      - name: Branch, title, body, and tickets follow CONTRIBUTING.md; a bot's branch and body are exempt
         env:
           TITLE: ${{ github.event.pull_request.title }}
           BRANCH: ${{ github.head_ref }}
@@ -39,7 +39,9 @@ jobs:
           types='build|chore|ci|docs|feat|fix|perf|refactor|revert|style|test'
           body=$(printf '%s' "$BODY" | tr -d '\r')
           fail=0
-          if ! printf '%s\n' "$BRANCH" | grep -Eq "^($types)/[a-z0-9-]{1,40}$"; then
+          bot=0
+          case "$BRANCH" in dependabot/*|release-please--*) bot=1;; esac
+          if [ "$bot" = 0 ] && ! printf '%s\n' "$BRANCH" | grep -Eq "^($types)/[a-z0-9-]{1,40}$"; then
             echo "::error::branch is not <type>/<slug> (lowercase, digits, hyphens, at most 40): $BRANCH"; fail=1
           fi
           if ! printf '%s\n' "$TITLE" | grep -Eq "^($types): [^ .](.*[^. ])?$"; then
@@ -50,18 +52,26 @@ jobs:
           fi
           expected='## Summary,## Changes,## Tests,## Review'
           found=$(printf '%s\n' "$body" | grep -E '^## (Summary|Changes|Tests|Review)$' | paste -sd, -)
-          if [ "$found" != "$expected" ]; then
+          if [ "$bot" = 0 ] && [ "$found" != "$expected" ]; then
             echo "::error::body sections are not the template's, in order: expected '$expected', found '$found'"; fail=1
           fi
           files=$(git diff --name-only "$(git merge-base "$BASE" "$HEAD")" "$HEAD")
           code=$(printf '%s\n' "$files" | grep -Ec '^(src|tests)/' || true)
-          rulefiles=$(printf '%s\n' "$files" | grep -Ec '^(CONTRIBUTING\.md|CLAUDE\.md|\.github/)' || true)
+          rulefiles=$(printf '%s\n' "$files" | grep -Ec '^(CONTRIBUTING\.md|CLAUDE\.md|\.github/|release-please-config\.json|\.release-please-manifest\.json)' || true)
           closes=$(printf '%s\n' "$body" | grep -Eo '^Closes #[0-9]+' | grep -Eo '[0-9]+' || true)
-          if [ "$code" -gt 0 ] && [ -z "$closes" ]; then
+          if [ "$bot" = 0 ] && [ "$code" -gt 0 ] && [ -z "$closes" ]; then
             echo "::error::src/ or tests/ changed but the body has no 'Closes #<n>' line"; fail=1
           fi
           if [ "$code" -gt 0 ] && [ "$rulefiles" -gt 0 ]; then
-            echo "::error::rule files (CONTRIBUTING.md, CLAUDE.md, .github/) and code never change in one pull request"; fail=1
+            echo "::error::rule files (CONTRIBUTING.md, CLAUDE.md, .github/, the release-please files) and code never change in one pull request"; fail=1
+          fi
+          if [ "$bot" = 0 ]; then
+            if git diff --diff-filter=M --name-only "$(git merge-base "$BASE" "$HEAD")" "$HEAD" | grep -Eq '^(CHANGELOG\.md|\.release-please-manifest\.json)$'; then
+              echo "::error::CHANGELOG.md and .release-please-manifest.json are written by release-please alone"; fail=1
+            fi
+            if git diff "$(git merge-base "$BASE" "$HEAD")" "$HEAD" -- pyproject.toml | grep -Eq '^[-+]version = '; then
+              echo "::error::the version in pyproject.toml is written by release-please alone"; fail=1
+            fi
           fi
           for n in $closes; do
             if ! json=$(gh api "repos/$REPO/issues/$n" 2>/dev/null); then
