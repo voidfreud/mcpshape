@@ -80,7 +80,7 @@ def scan(
     for candidate in candidates:
         if candidate.found.env:
             console.print(
-                f"[yellow]![/] {escape(candidate.found.name)} sets "
+                f"[yellow]![/] {escape(describe_found(candidate.found))} sets "
                 f"{', '.join(candidate.found.env)} in its Client's file. Only the names are "
                 f"carried over, as ${{VAR}} references: set each in the Daemon's environment "
                 f"or in {config.SECRETS_FILE}."
@@ -101,18 +101,25 @@ def triage(
     seen = set(taken)
     for server in found:
         name = discovery.slug_for(server.name)
+        where = describe_found(server)
         if discovery.is_own_proxy(server.transport, daemon):
-            skipped.append(f"{server.name} in {server.path} is an mcpshape Proxy already")
+            skipped.append(f"{where} is an mcpshape Proxy already")
         elif server.disabled:
-            skipped.append(f"{server.name} in {server.path} is switched off there")
+            skipped.append(f"{where} is switched off there")
         elif name is None:
             skipped.append(f"{server.name!r} in {server.path} yields no valid Upstream name")
         elif name in seen:
-            skipped.append(f"{server.name} in {server.path} is already the Upstream {name}")
+            skipped.append(f"{where} is already the Upstream {name}")
         else:
             seen.add(name)
             candidates.append(Candidate(server, name))
     return candidates, skipped
+
+
+def describe_found(found: Found) -> str:
+    """``<name> in <path>``, naming the project directory too for a per-project entry."""
+    where = f" (project {found.project})" if found.project else ""
+    return f"{found.name}{where} in {found.path}"
 
 
 def table(candidates: list[Candidate]) -> Table:
@@ -121,9 +128,10 @@ def table(candidates: list[Candidate]) -> Table:
         rendered.add_column(column, overflow="fold")
     for candidate in candidates:
         found = candidate.found
+        project = f" (project {escape(found.project)})" if found.project else ""
         rendered.add_row(
             candidate.name,
-            escape(found.name),
+            f"{escape(found.name)}{project}",
             escape(describe_transport(found.transport)),
             found.client or "",
             str(found.path),

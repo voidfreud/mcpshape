@@ -59,6 +59,22 @@ data for Client Profiles. Checked 2026-09-06/07 against primary documentation.
 - Codex CLI: `~/.codex/config.toml`, `[mcp_servers.<name>]`.
 - Goose: YAML `extensions:` block. Cline: `cline_mcp_settings.json`.
   Continue: `config.yaml`. OpenCode: `opencode.json`.
+- Checked 2026-09-08, primary docs, for ticket #23:
+  - Claude Code's `local` scope nests per-project servers in the same `~/.claude.json` as the
+    `user` scope, under `projects.<absolute project dir>.mcpServers`, one map per project
+    directory, sibling to the top-level `mcpServers` the `user` scope writes.
+    (code.claude.com/docs/en/mcp)
+  - Claude Desktop for Linux exists as a beta (`code.claude.com/docs/en/desktop-linux`,
+    apt-installed on Ubuntu/Debian), but no primary source — that page, the install and MCP
+    help-center articles, or the enterprise-configuration article — documents a config file
+    path for `claude_desktop_config.json` on Linux; only macOS's path is documented. Not added
+    to the Claude Desktop Profile.
+  - Goose and Continue stay YAML-only: mcpshape carries no YAML dependency for a listing, so
+    their files are reported as found and unread, by name (decision recorded in each Profile's
+    `notes`).
+  - `discovery.py`'s `list` entry shape (`Profile.entry_shape = "list"`) is unreachable from
+    `upstream scan`: the only list-shaped Client, Continue, is YAML and so is never parsed.
+    Left as-is; it becomes reachable the day a JSON- or TOML-shaped list Client is added.
 
 ### Config file shapes (checked 2026-09-07, primary docs)
 What `proxy install` has to write. Where nothing is listed here, no primary source was found

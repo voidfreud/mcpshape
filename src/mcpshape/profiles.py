@@ -166,6 +166,10 @@ class Profile:
     file_format: Format = "json"
     container: tuple[str, ...] = ("mcpServers",)
     """Key path from the top of the config file down to the map of servers."""
+    project_container: tuple[str, ...] | None = None
+    """Key path to a map keyed by absolute project directory, where each value holds another
+    ``container`` of servers scoped to that project. ``None`` for a Client that keeps no such
+    nesting."""
     url_key: str = "url"
     """The key an HTTP entry puts the Proxy URL under."""
     http_fields: Mapping[str, Any] = field(default_factory=dict[str, Any])
@@ -231,6 +235,7 @@ CLAUDE_CODE = Profile(
     name="Claude Code",
     reach=("http", "stdio"),
     locations=(Location(".mcp.json", "project"), Location("~/.claude.json", "user")),
+    project_container=("projects",),
     http_fields={"type": "http"},
     scheme=NameScheme(
         template="mcp__{server}__{tool}",
@@ -258,6 +263,11 @@ CLAUDE_CODE = Profile(
         (
             "Defers tool definitions and searches on demand; the model sees names plus server "
             "instructions until it loads a tool."
+        ),
+        (
+            "Its 'local' scope nests servers under projects.<absolute project dir>.mcpServers "
+            "in ~/.claude.json, alongside the 'user' scope's top-level mcpServers in the same "
+            "file; upstream scan reads both."
         ),
     ),
 )
@@ -371,6 +381,12 @@ GOOSE = Profile(
     http_fields={"type": "streamable_http", "enabled": True},
     name_field="name",
     limits=Limits(tool_timeout_seconds=300, source=DOC),
+    notes=(
+        (
+            "YAML: mcpshape carries no YAML dependency for a listing, so config.yaml is "
+            "reported as found and unread, by name."
+        ),
+    ),
 )
 
 CLINE = Profile(
@@ -394,6 +410,14 @@ CONTINUE = Profile(
     entry_shape="list",
     name_field="name",
     http_fields={"type": "streamable-http"},
+    notes=(
+        (
+            "YAML: mcpshape carries no YAML dependency for a listing, so config.yaml is "
+            "reported as found and unread, by name. Its list-shaped mcpServers is also the "
+            "only reason discovery.py's list entry shape exists; it stays unreachable until a "
+            "list-shaped Client with a JSON or TOML file exists."
+        ),
+    ),
 )
 
 OPENCODE = Profile(

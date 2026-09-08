@@ -217,6 +217,59 @@ def test_scan_names_a_yaml_config_it_cannot_read(config_dir: ConfigDir, home: Pa
     assert "YAML" in result.output
 
 
+def test_scan_lists_claude_codes_per_project_servers_with_their_project_directory(
+    config_dir: ConfigDir, home: Path
+) -> None:
+    """Claude Code's ``local`` scope nests servers under ``projects.<dir>.mcpServers`` in the
+    same ``~/.claude.json`` its ``user`` scope uses for the top-level ``mcpServers``.
+
+    The project directories are just JSON keys here, not real paths: they need not exist.
+    """
+    project_a = "/repo-a"
+    project_b = "/repo-b"
+    write(
+        home / ".claude.json",
+        json.dumps(
+            {
+                "mcpServers": {"shared": {"command": "top-level-mcp"}},
+                "projects": {
+                    project_a: {"mcpServers": {"alpha": {"command": "alpha-mcp"}}},
+                    project_b: {"mcpServers": {"shared": {"command": "b-mcp"}}},
+                },
+            }
+        ),
+    )
+
+    result = scan(config_dir, home, "--list")
+
+    assert result.exit_code == 0, result.output
+    assert "top-level-mcp" in result.output
+    assert "alpha-mcp" in result.output
+    assert f"alpha (project {project_a})" in result.output
+    # "shared" collides with the top-level entry's Upstream name, so it is skipped, but the
+    # skip note still names the project directory it came from.
+    assert f"shared (project {project_b})" in result.output
+    assert "already the Upstream shared" in result.output
+
+
+def test_scan_imports_a_per_project_claude_code_server(config_dir: ConfigDir, home: Path) -> None:
+    write(
+        home / ".claude.json",
+        json.dumps(
+            {
+                "projects": {
+                    "/repo": {"mcpServers": {"local": {"type": "http", "url": "http://local/mcp"}}}
+                }
+            }
+        ),
+    )
+
+    result = scan(config_dir, home, "--yes")
+
+    assert result.exit_code == 0, result.output
+    assert 'url = "http://local/mcp"' in upstream_file(config_dir, "local").read_text()
+
+
 def test_scan_with_nothing_configured_says_there_is_nothing_to_add(
     config_dir: ConfigDir, home: Path
 ) -> None:
