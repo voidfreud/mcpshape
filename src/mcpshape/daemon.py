@@ -62,10 +62,14 @@ if TYPE_CHECKING:
 log = logging.getLogger("mcpshape.daemon")
 
 STATUS_PATH = "/api/status"
-"""One of two management routes so far: live state, which #16 grows into the management API."""
+"""One of three management routes so far: live state, which #16 grows into the management API."""
 
 SHUTDOWN_PATH = "/api/shutdown"
 """What ``daemon down`` posts to: sets the stop event ``serve`` is watching."""
+
+RELOAD_PATH = "/api/reload"
+"""What ``daemon reload`` posts to: every Proxy re-reads its files now, and the live state
+that came of it is the answer (#10)."""
 
 
 def is_loopback(host: str) -> bool:
@@ -225,7 +229,18 @@ class _Proxy:
             await self._held.close()
             self._held = None
 
+    async def reload(self) -> None:
+        """Re-read every source now, whether or not it changed: ``daemon reload``."""
+        self._stamp = None
+        await self.refresh()
+
     async def refresh(self) -> None:
+        """Re-read the sources that changed since the last look, on every request (#10).
+
+        This is the file watching: the stamps are checked when a request comes in, so a
+        change is served on the next request after it, the affected Proxy alone, and no
+        watcher runs between requests.
+        """
         async with self._lock:
             stamp = tuple(_stamp(path) for path in self._sources)
             if stamp == self._stamp:
@@ -387,6 +402,7 @@ def build_app(
     stop = asyncio.Event()
     routes: list[BaseRoute] = [
         Route(STATUS_PATH, _status(upstreams, connections, proxies)),
+        Route(RELOAD_PATH, _reload(upstreams, connections, proxies), methods=["POST"]),
         Route(SHUTDOWN_PATH, _shutdown(stop), methods=["POST"]),
     ]
     routes += [
@@ -434,12 +450,12 @@ def _proxy_ports(config_dir: Path, upstreams: list[Upstream]) -> dict[tuple[str,
     return ports
 
 
-def _status(
+async def _live(
     upstreams: list[Upstream],
     connections: dict[str, UpstreamConnection],
     proxies: dict[tuple[str, str], _Proxy],
-) -> Callable[[Request], Awaitable[JSONResponse]]:
-    """The ``/api/status`` endpoint: what every Upstream and Proxy is doing right now."""
+) -> LiveState:
+    """What every Upstream and Proxy is doing right now, each Proxy refreshed on the way."""
 
     async def state_of(upstream: Upstream) -> UpstreamState:
         status = connections[upstream.name].status()
@@ -451,8 +467,39 @@ def _status(
             proxies=[await proxies[upstream.name, name].state() for name in upstream.proxies],
         )
 
+    return LiveState(upstreams=[await state_of(upstream) for upstream in upstreams])
+
+
+def _status(
+    upstreams: list[Upstream],
+    connections: dict[str, UpstreamConnection],
+    proxies: dict[tuple[str, str], _Proxy],
+) -> Callable[[Request], Awaitable[JSONResponse]]:
+    """The ``/api/status`` endpoint: what every Upstream and Proxy is doing right now."""
+
     async def endpoint(_request: Request) -> JSONResponse:
-        live = LiveState(upstreams=[await state_of(upstream) for upstream in upstreams])
+        live = await _live(upstreams, connections, proxies)
+        return JSONResponse(live.model_dump(mode="json"))
+
+    return endpoint
+
+
+def _reload(
+    upstreams: list[Upstream],
+    connections: dict[str, UpstreamConnection],
+    proxies: dict[tuple[str, str], _Proxy],
+) -> Callable[[Request], Awaitable[JSONResponse]]:
+    """``/api/reload``: every Proxy re-reads its files now, changed or not (#10).
+
+    What ``daemon reload`` posts to. A Proxy re-reads a changed file on the next request
+    anyway; this is for forcing the matter, and for seeing every Proxy's health in one
+    answer, which is the live state after the reload.
+    """
+
+    async def endpoint(_request: Request) -> JSONResponse:
+        for proxy in proxies.values():
+            await proxy.reload()
+        live = await _live(upstreams, connections, proxies)
         return JSONResponse(live.model_dump(mode="json"))
 
     return endpoint

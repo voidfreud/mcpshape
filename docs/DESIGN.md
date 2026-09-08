@@ -71,6 +71,10 @@ Claude Code is the first and best-integrated Profile, never a special case in th
 - `initialize` and `tools/list` are answered from the stored Catalog instantly.
 - Connect failures within the connect timeout return a tool error with a configurable message.
 - Auto-reconnect with capped exponential backoff.
+- A call that fails because the open connection is dead, not because the Upstream answered
+  an error, moves the Upstream to `unavailable` at once and is answered with the same
+  configurable message; the backoff and reconnect follow as after a failed connect (settled
+  in #22). A warm Upstream's failed ping does the same.
 - Health of every Upstream and Proxy is shown by `ls`, `daemon status`, and the dashboard.
 
 ### Catalog and Drift
@@ -99,16 +103,36 @@ Claude Code is the first and best-integrated Profile, never a special case in th
 - User code lives in `<proxy>.py` next to `<proxy>.toml`, uses mcpshape's own decorator API
   (`@hook.before`, `@hook.after`, `@tool`, `upstream.call`), sync or async.
 - Settled while landing #9: an `after` Hook runs on every result the Proxy is about to send,
-  a short-circuited one included; an error the Upstream reports skips the `after` Hooks and
-  reaches the Client as is; a Virtual Tool's exposed name is its identity, so Hooks keyed by
-  it run around it, and a Virtual Tool named like an exposed Catalog tool is a load error, not
-  a shadow; `upstream.call`, `read`, and `get` go straight to the Upstream, past the Hooks.
-- Hooks run in-process with no sandbox. Exceptions become tool errors and log lines. A Hook
-  that blocks forever or calls `sys.exit` is not guarded against; this is documented, not solved.
+  a short-circuited one included; a Virtual Tool's exposed name is its identity, so Hooks
+  keyed by it run around it, and a Virtual Tool named like an exposed Catalog tool is a load
+  error, not a shadow; `upstream.call`, `read`, and `get` go straight to the Upstream, past
+  the Hooks.
+- Settled in #24: a tool's `after` Hooks run on an error result too. The result they receive
+  says `is_error`, and what they return is what the Client gets: a success, or another error.
+  Raising from a Hook stays an error. A resource read or a prompt get has no error result on
+  the wire, only an exception, so an error there still skips the `after` Hooks.
+- Settled in #25: a Hook's result that cannot satisfy the tool's output schema is a tool
+  error at the Proxy naming the Hook, the tool, and what the schema expects, not a rejection
+  at the Client. `doctor` cannot know what a Hook returns, so the runtime error is the check.
+- Settled in #26: a sync Hook or Virtual Tool runs in a worker thread, as FastMCP runs a sync
+  tool, and from there `upstream.call`, `read`, and `get` block until the Upstream answers;
+  an async one awaits them. So a sync function reaches the Upstream, and one that blocks
+  stalls only its own call.
+- Settled in #27: while a Proxy's Python file loads, its Upstream's directory is importable,
+  so `import helpers` finds `upstreams/<name>/helpers.py`; a helper is re-imported on every
+  load, so every Proxy of the Upstream re-reads its files when a helper changes, and a
+  helper of one Upstream is never seen by another's Proxy. `doctor` loads files the same way.
+- Hooks run in-process with no sandbox. Exceptions become tool errors and log lines. An async
+  Hook that blocks forever stalls the Daemon, and `sys.exit` anywhere in user code is not
+  guarded against; this is documented, not solved.
 - Files are watched and the affected Proxy reloaded (`daemon reload` also exists). Load errors
   mark the Proxy unhealthy: it keeps advertising its last exposed set and every call
   returns a tool error naming the Proxy and reason. Nothing reaches the Upstream. The Daemon
   never crashes on user code.
+- Settled while landing #10: watching is a look at the files' stamps on every request a Proxy
+  serves and on every read of the live state, so a change is served on the next request
+  after it, the affected Proxy alone, and no watcher runs between requests. `daemon reload`
+  makes every Proxy re-read its files now and reports each one's health with its reason.
 - Per-Proxy `instructions` override is a first-class feature: in Clients that defer tool
   loading (Claude Code today), instructions are what the model sees first.
 
@@ -130,6 +154,16 @@ Claude Code is the first and best-integrated Profile, never a special case in th
   Python; no config value, environment variable, or CLI flag does.
 - OAuth for remote Upstreams: CLI opens the browser and receives the loopback callback;
   dashboard flow second; device-code pairing on headless.
+- Settled in #12: an http or sse Upstream file says `auth = "oauth"`; the login runs from
+  the CLI, at `upstream add --oauth` and, whenever no usable token is stored, at
+  `upstream sync`, with `--device` asking for device-code pairing where the provider's
+  metadata offers it. The Daemon never opens a browser or waits on a login: with no usable
+  token it moves the Upstream to `unavailable` with a message naming the command to run.
+  Tokens and the provider's client registration are kept under the state directory,
+  encrypted with a key held in a mode-0600 file there; a token is refreshed without the user
+  when the provider allows, and an expired token that cannot be refreshed is the
+  `unavailable` case above. No token, key, or code ever reaches a log line, an error
+  message, or the terminal.
 
 ### Client Profiles
 - One Profile per supported Client: config file path and format, transports accepted, whether

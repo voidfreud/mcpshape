@@ -8,6 +8,7 @@ only ``mcpshape``.
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 import textwrap
 from typing import TYPE_CHECKING, Any
@@ -15,10 +16,11 @@ from typing import TYPE_CHECKING, Any
 from fastmcp import FastMCP
 from mcp_types import TextContent, TextResourceContents
 
-from tests.support.seam import run_cli, running_daemon
+from tests.support.seam import run_cli, running_daemon, serving_daemon
 from tests.test_overrides import curate, synced
 
 if TYPE_CHECKING:
+    import pytest
     from fastmcp.client.client import CallToolResult
 
     from tests.support.seam import ConfigDir
@@ -197,6 +199,33 @@ async def test_a_hook_that_raises_answers_a_tool_error_carrying_its_message(
     assert error_text(stumbled) == "after went wrong"
     assert error_text(still_fine) == "after went wrong"
     assert received == [("close_issue", {"id": 1}), ("close_issue", {"id": 2})]
+
+
+async def test_a_hook_that_raises_is_a_log_line_and_leaves_the_proxy_healthy(
+    config_dir: ConfigDir, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Story 48: an exception inside a Hook is a tool error and a log line, nothing more."""
+    server, _ = tracker()
+    await synced(config_dir, server)
+    user_code(
+        config_dir,
+        """
+        @hook.before("create_issue")
+        def block(call):
+            raise PermissionError("no new issues from here")
+        """,
+    )
+
+    with caplog.at_level(logging.WARNING, logger="mcpshape"):
+        async with running_daemon(config_dir) as daemon, daemon.client("/issues/mcp") as client:
+            failed = await client.call_tool("create_issue", {"title": "Bug"}, raise_on_error=False)
+            status = await daemon.status()
+
+    assert error_text(failed) == "no new issues from here"
+    assert status["upstreams"][0]["proxies"][0]["health"] == "ok"
+    lines = [record.getMessage() for record in caplog.records if "block" in record.getMessage()]
+    assert lines == ["Hook block on tool create_issue raised"]
+    assert any("no new issues from here" in (record.exc_text or "") for record in caplog.records)
 
 
 async def test_hooks_are_keyed_by_catalog_name_and_see_catalog_arguments(
@@ -607,6 +636,64 @@ async def test_a_broken_user_file_fails_every_call_naming_the_proxy_until_it_is_
         assert (await daemon.status())["upstreams"][0]["proxies"][0]["health"] == "ok"
 
     assert received == [("close_issue", {"id": 1}), ("close_issue", {"id": 3})]
+
+
+async def test_a_user_file_that_raises_while_loading_leaves_the_daemon_up(
+    config_dir: ConfigDir,
+) -> None:
+    """Not an import error: user code that runs at module level and fails. The Daemon keeps
+    answering, the Proxy says why it is unhealthy, and nothing reached the Upstream."""
+    server, received = tracker()
+    await synced(config_dir, server)
+    user_code(config_dir, "")
+
+    async with running_daemon(config_dir) as daemon, daemon.client("/issues/mcp") as client:
+        before = sorted(t.name for t in await client.list_tools())
+
+        user_code(config_dir, 'settings = {}\nlimit = settings["limit"]\n')
+        await asyncio.sleep(0.01)  # a new mtime, on file systems that count in whole seconds
+        failed = await client.call_tool("close_issue", {"id": 2}, raise_on_error=False)
+        status = await daemon.status()
+        assert sorted(t.name for t in await client.list_tools()) == before
+
+    proxy = status["upstreams"][0]["proxies"][0]
+    assert proxy["health"] == "unhealthy"
+    assert proxy["detail"] == "default.py, line 3: KeyError: 'limit'"
+    assert error_text(failed) == "Proxy issues/default is unhealthy: " + proxy["detail"]
+    assert received == []
+
+
+async def test_daemon_reload_re_reads_every_proxy_and_reports_each_ones_health(
+    config_dir: ConfigDir,
+) -> None:
+    """``daemon reload`` (story 44): every Proxy re-reads its files now, and the command says
+    what came of it, unhealthy ones with their reason."""
+    server, _ = tracker()
+    await synced(config_dir, server)
+    run_cli(config_dir, "proxy", "new", "issues/review")
+    user_code(config_dir, "")
+
+    async with serving_daemon(config_dir):
+        user_code(config_dir, "import nonexistent_module\n", proxy="review")
+        reloaded = await asyncio.to_thread(run_cli, config_dir, "daemon", "reload")
+        assert reloaded.exit_code == 0, reloaded.output
+        assert "Reloaded every Proxy" in reloaded.stdout
+        assert re.search(r"review\s+unhealthy", reloaded.stdout), reloaded.stdout
+        assert re.search(r"default\s+ok", reloaded.stdout), reloaded.stdout
+        assert "issues/review: review.py, line 2: ModuleNotFoundError" in reloaded.stdout
+
+        user_code(config_dir, "", proxy="review")
+        recovered = await asyncio.to_thread(run_cli, config_dir, "daemon", "reload")
+        assert re.search(r"review\s+ok", recovered.stdout), recovered.stdout
+        assert "unhealthy" not in recovered.stdout
+
+
+def test_daemon_reload_says_so_when_nothing_is_running(config_dir: ConfigDir) -> None:
+    result = run_cli(config_dir, "daemon", "reload")
+
+    assert result.exit_code == 0, result.output
+    assert "Daemon not running" in result.stdout
+    assert "reads every file when it starts" in result.stdout
 
 
 def test_doctor_loads_user_files_and_reports_the_broken_and_the_orphaned(
