@@ -260,10 +260,13 @@ and the Profile writes the common `mcpServers` + `{"type": "http", "url": ...}` 
   merely stopped is at the same risk when a session is still open at that moment, which a slow
   runner makes likely (#76, seen on macOS CI): FastMCP terminates live transports when its
   lifespan exits, reading `session_manager._server_instances` on the app it mounts at its MCP
-  path, but uvicorn stops the server before that lifespan exits. A closed client's session
-  stays in that dict marked `is_terminated`, so what is open is what is not terminated. An
-  SSE app (`transport="sse"`) has no session manager at all (checked 2026-09-08, 4.0.3;
-  pinned in `tests/test_fastmcp_contract.py`).
+  path, but uvicorn stops the server before that lifespan exits. A closed legacy-era client's
+  session stays in that dict marked `is_terminated`, so what is open is what is not
+  terminated; a modern-era `Client` leaves nothing in it. An SSE app (`transport="sse"`) has
+  no session manager at all. The manager, the dict, and the transport's `is_terminated` and
+  `terminate` are pinned in `tests/test_fastmcp_contract.py`; the closed-session fact was
+  observed and is not pinned, since opening a legacy-era session against an in-process app is
+  the hazard itself (checked 2026-09-08, 4.0.3; see #76).
 - The MCP SDK's OAuth client writes the dynamic client registration to its `TokenStorage`
   before any token set, at the start of a login (checked 2026-09-08, `mcp` 2.x behind
   FastMCP 4.0.3). So a token file's existence says a login started, not that it finished; the
