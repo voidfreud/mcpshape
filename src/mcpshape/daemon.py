@@ -23,6 +23,7 @@ import asyncio
 import contextlib
 import hmac
 import logging
+import socket
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Literal
@@ -197,6 +198,8 @@ class _Proxy:
             self._code_path,
         )
         self._label = f"{upstream.name}/{name}"
+        self._key = (upstream.name, name)
+        self._listeners = owner.listeners
         self._config_dir, self._state_dir, self._name = config_dir, state_dir, name
         self._stamp: tuple[_StampEntry, ...] | None = None
         self._connection = owner.connection
@@ -205,6 +208,10 @@ class _Proxy:
         self._held: _Held | None = None
         self.health = "ok"
         self.detail: str | None = None
+        self.listener_problem: str | None = None
+        """Why the port this Proxy's file asks for is not listened on, while it is not (#70)."""
+        self._port: int | None = None
+        self._gone = False
         self.app: ProxyApp = proxy_app(upstream, name, _nothing(), self._connection, calls)
 
     @property
@@ -222,8 +229,26 @@ class _Proxy:
             return
         self._held = _Held(self.app)
         await self._held.ready()
+        self._want_port_now()
+
+    def _want_port_now(self) -> None:
+        """Ask for the port the Proxy file sets before any request derives it (#13, #70).
+
+        A port set at Daemon start is listened on as the Daemon comes up, not on the first
+        request; a file that cannot be read is left to ``refresh``, which reports it.
+        """
+        try:
+            self._port = load_proxy(self._config_dir, self._upstream.name, self._name).port
+        except ConfigError:
+            return
+        self._listeners.want(self._key, self._port, self)
 
     async def stop(self) -> None:
+        """Let the app go. A stopped Proxy is gone: a request that still reaches it, on a
+        port listener not yet closed, is answered not found naming it (#68)."""
+        self._gone = True
+        self._listeners.forget(self._key)
+        self.listener_problem = None
         if self._held is not None:
             await self._held.close()
             self._held = None
@@ -270,6 +295,8 @@ class _Proxy:
             upstream, global_caps = self._owner.upstream, self._owner.global_caps
             stamp = (*(_stamp(path) for path in self._sources), *self._helper_stamps())
             if stamp == self._stamp:
+                if self.listener_problem is not None:  # a look is a retry of the port (#70)
+                    self._listeners.want(self._key, self._port, self)
                 return
             self._stamp = stamp
             try:
@@ -296,6 +323,8 @@ class _Proxy:
                 self.app.fail(str(exc))
                 return
             self.health, self.detail = "ok", None
+            self._port = proxy.port
+            self._listeners.want(self._key, self._port, self)
             if server_name(upstream, self._name, exposed) == self.app.name:
                 self.app.serve(exposed)
                 return
@@ -325,7 +354,10 @@ class _Proxy:
     async def state(self) -> ProxyState:
         await self._owner.refresh()
         await self.refresh()
-        return ProxyState(name=self._name, health=self.health, detail=self.detail)
+        health, detail = self.health, self.detail
+        if health == "ok" and self.listener_problem is not None:
+            health, detail = "unhealthy", self.listener_problem
+        return ProxyState(name=self._name, health=health, detail=detail)
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] == "http":
@@ -336,6 +368,9 @@ class _Proxy:
                     {"error": f"no Upstream named {self._owner.upstream.name!r}"}, status_code=404
                 )
                 await answer(scope, receive, send)
+                return
+            if self._gone:
+                await _not_found(f"no Proxy {self._label}", scope, receive, send)
                 return
             await self.refresh()
         await self.app.asgi(scope, receive, send)
@@ -401,7 +436,9 @@ class _Served:
     unhealthy with the reason. A file that is gone retires the Upstream: its Proxies answer
     not found, its connection is let go, and nothing is written to its state directory again,
     since only the Daemon, which knows the file, can tell a removed Upstream from a new one
-    (#46, #62).
+    (#46, #62). The Upstream's directory is watched too: a Proxy file that appears is adopted
+    (#67), and one that is gone has its Proxy let go, its URL answering not found, while the
+    connection and every other Proxy stay as they are (#68).
     """
 
     def __init__(  # noqa: PLR0913, PLR0917  # every one of these is state the Upstream needs
@@ -413,10 +450,12 @@ class _Served:
         secrets: Secrets,
         clock: Clock | None,
         calls: CallLog,
+        listeners: Listeners,
     ) -> None:
         self._config_dir, self._state_dir = config_dir, state_dir
         self._name = upstream.name
         self._file = upstream_dir(config_dir, upstream.name) / UPSTREAM_FILE
+        self.listeners = listeners
         self._sources = (
             self._file,
             config_dir / SETTINGS_FILE,
@@ -555,6 +594,7 @@ class _Served:
             previous = self.upstream
             self._apply(upstream, settings.caps)
             await self._adopt()
+            await self._let_go()
             if (
                 _reached_by(upstream) != _reached_by(previous)
                 or upstream.lifecycle != previous.lifecycle
@@ -588,23 +628,43 @@ class _Served:
         log.info("Upstream %s: adopted new Proxy %s", self._name, name)
         return proxy
 
+    async def _let_go(self) -> None:
+        """Stop and drop every held Proxy the Upstream no longer lists: its file is gone (#68).
+
+        Seen the way adoption is, by the directory's stamp. The Upstream's connection is not
+        touched, since it is the Upstream's, and no other Proxy is.
+        """
+        for name in list(self.proxies):
+            if name not in self.upstream.proxies:
+                await self._let_go_of(name)
+
+    async def _let_go_of(self, name: str) -> None:
+        proxy = self.proxies.pop(name, None)
+        if proxy is None:
+            return
+        await proxy.stop()
+        log.info("Upstream %s: Proxy %s was removed; letting it go", self._name, name)
+
     async def proxy(self, name: str) -> _Proxy | None:
-        """The held Proxy called ``name``, adopting it now if its file appeared since (#67).
+        """The held Proxy called ``name``, adopting it now if its file appeared since (#67),
+        or letting it go now if its file is gone (#68).
 
         The route's fallback so a request never depends on the directory stamp alone: a Proxy
-        added and requested before any other look at the Upstream is still found. Only a name
-        the directory lists as a Proxy counts: ``upstream.toml`` is a TOML file too, and is not
-        one.
+        added, or removed, and requested before any other look at the Upstream is still found,
+        or refused. Only a name the directory lists as a Proxy counts: ``upstream.toml`` is a
+        TOML file too, and is not one.
         """
         held = self.proxies.get(name)
-        if held is not None:
+        if held is not None and proxy_file(self._config_dir, self._name, name).is_file():
             return held
-        if name not in list_proxies(self._config_dir, self._name):
+        if held is None and name not in list_proxies(self._config_dir, self._name):
             return None
         async with self._lock:
-            held = self.proxies.get(name)
-            if held is not None:
-                return held
+            if name in self.proxies:
+                if proxy_file(self._config_dir, self._name, name).is_file():
+                    return self.proxies[name]
+                await self._let_go_of(name)
+                return None
             return await self._adopt_one(name)
 
     async def on_catalog(self, observed: Catalog) -> None:
@@ -764,10 +824,12 @@ class _Upstreams:
         secrets: Secrets,
         clock: Clock | None,
         calls: CallLog,
+        listeners: Listeners,
         held: dict[str, _Served],
     ) -> None:
         self._config_dir, self._state_dir = config_dir, state_dir
         self._secrets, self._clock, self._calls = secrets, clock, calls
+        self._listeners = listeners
         self._lock = asyncio.Lock()
         self._held = held
 
@@ -815,6 +877,7 @@ class _Upstreams:
             self._secrets,
             self._clock,
             self._calls,
+            self._listeners,
         )
         self._held[name] = owner
         owner.launch()
@@ -869,15 +932,174 @@ class _Upstreams:
             await owner.stop()
 
 
+_Key = tuple[str, str]
+"""A Proxy by Upstream name and Proxy name."""
+
+
+@dataclass
+class _Listener:
+    """One listener on one port, serving one Proxy, until its own ``stop``."""
+
+    key: _Key
+    proxy: _Proxy
+    task: asyncio.Task[None]
+    stop: asyncio.Event
+
+    async def close(self) -> None:
+        self.stop.set()
+        try:
+            await self.task
+        except Exception:
+            log.warning("a Proxy port listener did not close cleanly", exc_info=True)
+
+
+class Listeners:
+    """The additional listeners the Proxies' port overrides ask for (#13), kept in step with
+    the files while the Daemon runs (#70).
+
+    A Proxy asks for its port whenever it derives, and gives it up when it stops; ``serve``
+    is the loop that starts a listener on every port asked for, moves one whose port changed,
+    closes one no longer asked for, and answers a bind that fails by telling the Proxy why, so
+    it reports itself unhealthy with the reason while its path is served as before. The next
+    look at the file, or ``daemon reload``, asks again, which is the retry. Two Proxies asking
+    for one port get it in name order: the first listens, the second is told who has it. A
+    listener is the Proxy's, not its name's: a Proxy let go and a new one under the same name
+    and port is a listener closed and another opened. The loop wakes when what is asked for
+    changes and when a listener ends on its own, which is logged and, while its port is still
+    asked for, tried again.
+    """
+
+    def __init__(self, token: str | None) -> None:
+        self._token = token
+        self._wanted: dict[_Key, tuple[int, _Proxy]] = {}
+        self._changed = asyncio.Event()
+
+    def want(self, key: _Key, port: int | None, proxy: _Proxy) -> None:
+        """What ``key``'s file asks for now: a port, or none."""
+        if port is None:
+            self._wanted.pop(key, None)
+            proxy.listener_problem = None
+        else:
+            self._wanted[key] = (port, proxy)
+        self._changed.set()
+
+    def forget(self, key: _Key) -> None:
+        """``key`` is stopping, so nothing is listened on for it any more."""
+        if self._wanted.pop(key, None) is not None:
+            self._changed.set()
+
+    async def serve(self, host: str, stop: asyncio.Event) -> None:
+        """Keep the listeners in step with what is asked for, until ``stop``."""
+        running: dict[int, _Listener] = {}
+        try:
+            while not stop.is_set():
+                await self._reconcile(host, running)
+                ended = [listener.task for listener in running.values()]
+                await _either((self._changed, stop), ended)
+                self._changed.clear()
+        finally:
+            for listener in running.values():
+                await listener.close()
+
+    async def _reconcile(self, host: str, running: dict[int, _Listener]) -> None:
+        for port, listener in list(running.items()):
+            if listener.task.done():
+                del running[port]
+                _reap(listener, port)
+        wanted = self._by_port()
+        for port, listener in list(running.items()):
+            if port not in wanted or wanted[port][1] is not listener.proxy:
+                await listener.close()
+                del running[port]
+                log.info("Proxy %s/%s: no longer listening on port %d", *listener.key, port)
+        wanted = self._by_port()  # asked again: every close above was awaited
+        for port, (key, proxy) in wanted.items():
+            if port in running:
+                continue
+            try:
+                sock = _bound(host, port)
+            except OSError as exc:
+                problem = f"port {port} cannot be bound: {exc.strerror or exc}"
+                if problem != proxy.listener_problem:
+                    log.warning("Proxy %s/%s: %s", *key, problem)
+                proxy.listener_problem = problem
+                continue
+            proxy.listener_problem = None
+            own_stop = asyncio.Event()
+            task = asyncio.create_task(
+                serve(
+                    _authed(proxy, self._token),
+                    host,
+                    port,
+                    own_stop,
+                    lifespan="off",
+                    sockets=[sock],
+                    signals=False,
+                )
+            )
+            running[port] = _Listener(key, proxy, task, own_stop)
+            log.info("Proxy %s/%s: listening on port %d", *key, port)
+
+    def _by_port(self) -> dict[int, tuple[_Key, _Proxy]]:
+        """Every port asked for, by the first Proxy in name order that asks for it."""
+        by_port: dict[int, tuple[_Key, _Proxy]] = {}
+        for key, (port, proxy) in sorted(self._wanted.items()):
+            if port in by_port:
+                holder = by_port[port][0]
+                proxy.listener_problem = f"port {port} is taken by Proxy {holder[0]}/{holder[1]}"
+                continue
+            by_port[port] = (key, proxy)
+        return by_port
+
+
+def _bound(host: str, port: int) -> socket.socket:
+    """A listening socket on ``host``:``port``, or the ``OSError`` that says why not."""
+    family = socket.AF_INET6 if ":" in host else socket.AF_INET
+    sock = socket.socket(family)
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind((host, port))
+        sock.listen(128)
+    except OSError:
+        sock.close()
+        raise
+    return sock
+
+
+def _reap(listener: _Listener, port: int) -> None:
+    """Say how a listener that ended on its own ended; nothing here cancels one."""
+    if listener.task.cancelled():
+        return
+    if (failure := listener.task.exception()) is not None:
+        log.warning("Proxy %s/%s: the listener on port %d died: %s", *listener.key, port, failure)
+        return
+    log.info("Proxy %s/%s: the listener on port %d ended", *listener.key, port)
+
+
+async def _either(events: tuple[asyncio.Event, ...], tasks: list[asyncio.Task[None]]) -> None:
+    """Wait until any one of ``events`` is set or any one of ``tasks`` is done.
+
+    The tasks are watched, never cancelled: only the waits on the events are this function's.
+    """
+    waits = [asyncio.ensure_future(event.wait()) for event in events]
+    try:
+        await asyncio.wait([*waits, *tasks], return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        for wait in waits:
+            wait.cancel()
+        await asyncio.gather(*waits, return_exceptions=True)
+
+
 @dataclass(frozen=True)
 class DaemonApp:
-    """Every ASGI app the Daemon serves: the main one, and one per Proxy port override.
+    """What the Daemon serves: the main ASGI app, and the listeners its Proxies' port
+    overrides ask for, kept in step with the files while it runs (#70).
 
     ``stop`` is what ``/api/shutdown`` sets and what ``serve`` watches to close its sockets.
     """
 
     main: Starlette
-    extra: dict[int, ASGIApp]
+    listeners: Listeners
     stop: asyncio.Event
 
 
@@ -892,10 +1114,10 @@ def build_app(
     Every Proxy is served at ``/<upstream>/<proxy>/mcp``; the ``default`` Proxy also at
     ``/<upstream>/mcp``; live state at ``/api/status``; ``/api/shutdown`` stops it. ``clock``
     is what every lifecycle timer runs on, so tests advance time instead of waiting for it. A
-    Proxy whose file sets ``port`` is also mounted alone on that additional listener, in
-    ``.extra``; the ports are read here, at build, so one set later waits for a restart.
-    ``token``, when given, requires ``Authorization: Bearer <token>`` on every request to any
-    of them.
+    Proxy whose file sets ``port`` is also served alone on that additional listener, which
+    ``.listeners`` keeps in step with the file while the Daemon runs (#70); ``serve_all`` is
+    what runs them. ``token``, when given, requires ``Authorization: Bearer <token>`` on every
+    request to any of them.
     """
     running_clock = clock or SystemClock()
     loaded = load_upstreams(config_dir)  # raises on a broken file, so the build still fails
@@ -903,18 +1125,14 @@ def build_app(
     configure_app_log(state_dir, settings.log.level, settings.log.max_bytes)
     calls = CallLog(RotatingFile(call_log_file(state_dir), settings.log.max_bytes))
     secrets = secrets_for(config_dir)
+    listeners = Listeners(token)
     held = {
         upstream.name: _Served(
-            config_dir, state_dir, upstream, settings.caps, secrets, clock, calls
+            config_dir, state_dir, upstream, settings.caps, secrets, clock, calls, listeners
         )
         for upstream in loaded
     }
-    proxies = {
-        (name, proxy_name): proxy
-        for name, owner in held.items()
-        for proxy_name, proxy in owner.proxies.items()
-    }
-    upstreams = _Upstreams(config_dir, state_dir, secrets, clock, calls, held)
+    upstreams = _Upstreams(config_dir, state_dir, secrets, clock, calls, listeners, held)
     stop = asyncio.Event()
     management = Management(
         upstreams=upstreams,
@@ -938,38 +1156,29 @@ def build_app(
             yield
 
     main = Starlette(routes=routes, lifespan=lifespan, middleware=_middleware(token))
-    ports = _proxy_ports(config_dir, loaded)
-    extra = {port: _authed(proxies[key], token) for key, port in ports.items()}
-    return DaemonApp(main=main, extra=extra, stop=stop)
+    return DaemonApp(main=main, listeners=listeners, stop=stop)
 
 
-def _proxy_ports(config_dir: Path, upstreams: list[Upstream]) -> dict[tuple[str, str], int]:
-    """The additional port every Proxy that sets one asks to be served on besides its path."""
-    ports: dict[tuple[str, str], int] = {}
-    for upstream in upstreams:
-        for proxy_name in upstream.proxies:
-            try:
-                proxy = load_proxy(config_dir, upstream.name, proxy_name)
-            except ConfigError:
-                continue
-            if proxy.port is not None:
-                ports[upstream.name, proxy_name] = proxy.port
-    return ports
-
-
-async def serve(
+async def serve(  # noqa: PLR0913  # a listener is what, where, for whom, until when, and how
     app: ASGIApp,
     host: str,
     port: int,
     stop: asyncio.Event | None = None,
     *,
     lifespan: Literal["on", "off"] = "on",
+    sockets: list[socket.socket] | None = None,
+    signals: bool = True,
 ) -> None:
     """Serve ``app`` on ``host``:``port`` until ``stop`` is set or the process is signalled.
 
     The Daemon process's main loop. A cooperative stop lets the server close its socket;
     cancelling the task would leave it open. ``lifespan="off"`` is for a Proxy's port
-    override: the Proxy's own lifespan is already run once, by the main app.
+    override: the Proxy's own lifespan is already run once, by the main app. ``sockets``,
+    when given, are already bound, so a port that cannot be had is known before anything is
+    served (#70). ``signals=False`` is for a port override too: uvicorn takes the process's
+    SIGINT and SIGTERM handlers for every server it serves and puts back, when that server
+    ends, whatever it found, so a listener that comes and goes would leave the handlers on a
+    server that is gone; the main server alone owns them, and its end is what stops the rest.
     """
     import uvicorn  # noqa: PLC0415  # only the running Daemon needs a server
 
@@ -983,7 +1192,10 @@ async def serve(
 
     stopper = asyncio.create_task(stop_when_asked())
     try:
-        await server.serve()
+        if signals:
+            await server.serve(sockets=sockets)
+        else:
+            await server._serve(sockets)  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]  # serve() without its signal handlers
     finally:
         stopper.cancel()
         with contextlib.suppress(asyncio.CancelledError):
@@ -991,14 +1203,20 @@ async def serve(
 
 
 async def serve_all(daemon: DaemonApp, host: str, port: int) -> None:
-    """Serve the main app on ``host``:``port`` and every Proxy port override alongside it."""
-    await asyncio.gather(
-        serve(daemon.main, host, port, daemon.stop),
-        *(
-            serve(app, host, extra_port, daemon.stop, lifespan="off")
-            for extra_port, app in daemon.extra.items()
-        ),
-    )
+    """Serve the main app on ``host``:``port``, and every Proxy port override alongside it,
+    started, moved, and closed as the Proxy files change (#70).
+
+    The main server ends on ``daemon down`` or a signal; either way its end sets ``stop``,
+    so the listeners close with it and this returns.
+    """
+
+    async def main() -> None:
+        try:
+            await serve(daemon.main, host, port, daemon.stop)
+        finally:
+            daemon.stop.set()
+
+    await asyncio.gather(main(), daemon.listeners.serve(host, daemon.stop))
 
 
 def run(config_dir: Path, state_dir: Path) -> None:

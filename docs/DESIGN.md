@@ -97,6 +97,14 @@ Claude Code is the first and best-integrated Profile, never a special case in th
   old one. The one hand-edit limit this leaves: an Upstream directory removed and re-created
   by hand between two looks, with no `upstream rm` in between, is seen as an edit of the same
   Upstream, since only the file's stamp is watched.
+- Settled in #68 and #70: a Proxy file that is gone has its Proxy let go on the next look at
+  its Upstream, on a request to any of its Proxies, on `daemon status`, or on `daemon reload`:
+  its URL answers not found naming it, it is no longer listed, and its app is closed, while
+  the Upstream's connection and its other Proxies stay as they are; a file back under the same
+  name is a new Proxy. A Proxy's `port` override is kept in step with its file the same way:
+  a port set is listened on after the next look at the file, one changed moves the listener,
+  one removed closes it, and one that cannot be bound is an unhealthy Proxy with the reason
+  while its path is served as before, asked for again on the next look or on `daemon reload`.
 - Health of every Upstream and Proxy is shown by `ls`, `daemon status`, and the dashboard.
 
 ### Catalog and Drift
@@ -315,7 +323,9 @@ mcpshape doctor
   import internal modules to assert on their state. Exceptions: the stdio shim (real subprocess),
   real Upstream transports (`tests/test_real_transports.py`: a child process and a loopback
   server behind the Daemon, since only those show one child shared by every Proxy and session),
-  autostart unit writers (golden files), the Adapter contract tests,
+  autostart unit writers (golden files), the Daemon under a signal (`tests/test_daemon_ports.py`:
+  a real process, since a signal cannot be sent to the test process itself), the Adapter
+  contract tests,
   `tests/test_config_roundtrip.py` (the tomlkit round-trip property, at the config module),
   `tests/test_overrides_property.py` (the Override application property, at the proxy module), and
   `tests/test_boundaries.py`, which reads source files to enforce the import rule below, and
