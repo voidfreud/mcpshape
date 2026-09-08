@@ -27,7 +27,18 @@ mcpshape add docs --url https://example.com/mcp
 mcpshape add legacy --url https://example.com/sse --sse
 ```
 
-`add` registers the Upstream and gives it a Proxy named `default`. Then read its Catalog:
+`add` registers the Upstream and gives it a Proxy named `default`. A hosted server that
+requires OAuth is added with `--oauth`, which logs in at once: your browser opens the
+provider's page, and the CLI takes the answer on a loopback callback. On a machine with no
+browser, `--device` pairs by device code where the provider offers it: the CLI prints an
+address and a code to enter there.
+
+```
+mcpshape add docs --url https://example.com/mcp --oauth
+mcpshape add docs --url https://example.com/mcp --oauth --device
+```
+
+Then read its Catalog:
 
 ```
 mcpshape upstream sync github
@@ -40,7 +51,9 @@ Catalog.
 
 `mcpshape upstream scan` finds the MCP servers already configured for your Clients, in the
 locations mcpshape knows and in any directory you name, and offers to add each as an
-Upstream. `--list` only lists; `--yes` adds them all.
+Upstream. A server a Client keeps per project, as Claude Code does in `~/.claude.json`, is
+listed with its project directory. `--list` only lists; `--yes` adds them all. Files in YAML
+(Goose, Continue) are reported by name and not read.
 
 ## Proxies and where they are served
 
@@ -326,6 +339,35 @@ GITHUB_PERSONAL_ACCESS_TOKEN = "${GITHUB_TOKEN}"
 
 A child process is given only a small set of the Daemon's environment (HOME, LOGNAME, PATH,
 SHELL, TERM, USER) plus its `env` block, so anything the server needs goes in that block.
+
+### OAuth logins
+
+An Upstream reached by URL may say `auth = "oauth"`, with an optional `scopes` list:
+
+```toml
+# upstreams/docs/upstream.toml
+version = 1
+transport = "http"
+url = "https://example.com/mcp"
+auth = "oauth"
+scopes = ["read"]
+```
+
+What the login produced is kept under the state directory in `oauth/<upstream>.json`,
+encrypted with a key in `oauth.key`, a mode-0600 file that is refused when anyone else may
+read it. A Daemon started or restarted later uses the stored token without a new login and
+refreshes it without asking. The Daemon itself never opens a browser: when no usable token is
+stored, or the token has expired and cannot be refreshed, the Upstream is reported
+`unavailable` with a message naming the command that logs in again:
+
+```
+mcpshape upstream sync docs            # logs in when it must, then scans
+mcpshape upstream sync docs --device   # the same, pairing by device code
+mcpshape upstream show docs            # says whether a login is stored, never its value
+mcpshape upstream rm docs              # forgets the stored login with the Upstream
+```
+
+No token, code, or key ever appears in a log line, an error message, or the terminal.
 
 ## Checking everything
 
