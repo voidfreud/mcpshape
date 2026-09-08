@@ -28,6 +28,9 @@ if TYPE_CHECKING:
 
 REPO = Path(__file__).parent.parent
 EXIT_TIMEOUT = 15.0
+STARTUP_PATIENCE = 60.0
+"""Seconds a real Daemon process may take to import everything, scan its stdio Upstream, and
+listen on every port: a loaded runner has taken well over five (#76)."""
 
 
 def listening(port: int) -> bool:
@@ -97,6 +100,7 @@ async def test_a_signal_stops_a_daemon_after_a_port_override_came_and_went(
         await until(
             lambda: listening(main_port) and listening(first_port) and listening(second_port),
             "every listener",
+            patience=STARTUP_PATIENCE,
         )
         log = config_dir.state / "log" / "daemon.log"
         for file, port in ((first, first_port), (second, second_port)):
