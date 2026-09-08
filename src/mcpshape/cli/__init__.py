@@ -11,8 +11,7 @@ import typer
 from mcpshape.cli import daemon, doctor, proxy, tool, upstream
 from mcpshape.cli import serve as serving
 from mcpshape.cli.common import HELP_OPTIONS, State, console, drift_notice, example, fail, state
-from mcpshape.cli.live import read_live
-from mcpshape.config import load_settings
+from mcpshape.cli.live import page_status, read_live
 from mcpshape.paths import CONFIG_DIR_ENV, STATE_DIR_ENV, default_config_dir, default_state_dir
 
 app = typer.Typer(
@@ -93,23 +92,34 @@ app.command("doctor", epilog=example("doctor"))(doctor.doctor)
 def ui(ctx: typer.Context) -> None:
     """Open the dashboard in a browser: the read-only page a running Daemon serves at /."""
     config_dir = state(ctx).config_dir
-    if not load_settings(config_dir).daemon.dashboard:
-        fail(
-            "the dashboard is off: [daemon] dashboard = false in config.toml; "
-            "set it to true and restart the Daemon"
-        )
     live = read_live(config_dir)
+    page = f"{live.url}/"
     if not live.running:
         console.print(
             "Daemon not running, so there is no dashboard to open. "
             "Start it with: mcpshape daemon up"
         )
         return
-    page = f"{live.url}/"
-    webbrowser.open(page)
-    console.print(f"Opened {page}")
+    answered = page_status(config_dir)
+    if answered == NOT_FOUND:
+        fail(
+            "the dashboard is off: the Daemon started with [daemon] dashboard = false in "
+            "config.toml; set it to true and restart the Daemon"
+        )
+    if answered == UNAUTHORIZED:
+        console.print(
+            f"The Daemon has a [daemon] token, and a browser does not send it on its own: "
+            f"open {page} through your own routing, with the Authorization header."
+        )
+        return
+    if webbrowser.open(page):
+        console.print(f"Opened {page}")
+        return
+    console.print(f"No browser could be opened here; open {page} yourself.")
 
 
 app.command("serve", hidden=True, epilog=serving.EPILOG)(serving.serve)
+
+NOT_FOUND, UNAUTHORIZED = 404, 401
 
 __all__ = ["app", "console"]

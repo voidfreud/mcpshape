@@ -9,6 +9,7 @@ read back through the Daemon's own models (``mcpshape.api``).
 
 from __future__ import annotations
 
+import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
@@ -118,6 +119,21 @@ def connect_upstream(config_dir: Path, name: str) -> bool:
     not an error: a Daemon reads the stored login when it starts.
     """
     return connect_now(config_dir, name) is not None
+
+
+def page_status(config_dir: Path) -> int | None:
+    """What the Daemon answers a bare ``GET /`` with, or nothing when nothing answered:
+    what ``ui`` asks before opening a browser, since the Daemon read ``dashboard`` at its
+    start and a token is a header a browser does not send on its own (#17)."""
+    daemon = load_settings(config_dir).daemon
+    request = urllib.request.Request(f"{_url(daemon)}/", method="GET")  # noqa: S310
+    try:
+        with urllib.request.urlopen(request, timeout=TIMEOUT) as answer:  # noqa: S310
+            return int(answer.status)
+    except urllib.error.HTTPError as refused:
+        return refused.code
+    except OSError:
+        return None
 
 
 def connect_now(config_dir: Path, name: str) -> str | None:

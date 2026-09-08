@@ -25,6 +25,9 @@ async function api(path) {
 
 function nextAttempt(upstream) {
   if (upstream.state !== "unavailable") return "";
+  if (!upstream.supervised) {
+    return "the keeper stopped supervising; run mcpshape daemon reload to bring it back";
+  }
   if (upstream.retry_in == null) return "the next call tries again";
   return `retry in ${duration(upstream.retry_in)}`;
 }
@@ -95,15 +98,22 @@ function renderFilters(upstreams) {
   const upstreamSelect = byId("filter-upstream");
   const proxySelect = byId("filter-proxy");
   const names = upstreams.map((u) => u.name);
-  fillSelect(upstreamSelect, names, state.filter.upstream);
+  state.filter.upstream = fillSelect(upstreamSelect, names, state.filter.upstream);
   const chosen = upstreams.find((u) => u.name === state.filter.upstream);
   const proxies = chosen ? chosen.proxies.map((p) => p.name) : [];
-  fillSelect(proxySelect, proxies, state.filter.proxy);
+  state.filter.proxy = fillSelect(proxySelect, proxies, state.filter.proxy);
   proxySelect.disabled = !chosen;
 }
 
+// Rebuilds the options only when the names changed, so an open popup is not closed under
+// the user by the next poll; answers the choice that is still there, or none.
 function fillSelect(select, names, chosen) {
   const current = names.includes(chosen) ? chosen : "";
+  const shown = [...select.options].slice(1).map((option) => option.value);
+  if (shown.length === names.length && shown.every((name, i) => name === names[i])) {
+    select.value = current;
+    return current;
+  }
   select.replaceChildren();
   const all = document.createElement("option");
   all.value = "";
@@ -116,6 +126,7 @@ function fillSelect(select, names, chosen) {
     select.appendChild(option);
   }
   select.value = current;
+  return current;
 }
 
 function renderCalls() {
@@ -141,7 +152,7 @@ function renderCalls() {
 
 function renderUpdated() {
   const updated = byId("updated");
-  if (!state.updatedAt) return;
+  if (!state.updatedAt || document.body.classList.contains("unreachable")) return;
   const ago = Math.round((Date.now() - state.updatedAt) / 1000);
   updated.textContent = `updated ${ago}s ago`;
 }
@@ -231,6 +242,18 @@ async function showExposed(upstream, proxy) {
   try {
     const exposed = await api(`${UPSTREAMS}/${upstream}/proxies/${proxy}/exposed`);
     const node = document.createElement("div");
+    if (exposed.health !== "ok") {
+      const warning = document.createElement("p");
+      warning.className = "error";
+      warning.textContent = `This Proxy is ${exposed.health}: ${exposed.detail || ""}. ` +
+        "What follows is the last exposed set it derived, which it keeps advertising.";
+      node.appendChild(warning);
+    }
+    if (!exposed.scanned) {
+      const notYet = document.createElement("p");
+      notYet.textContent = `No Catalog yet: run mcpshape upstream sync ${upstream}.`;
+      node.appendChild(notYet);
+    }
     const name = document.createElement("p");
     name.textContent = `server name: ${exposed.name}`;
     node.appendChild(name);

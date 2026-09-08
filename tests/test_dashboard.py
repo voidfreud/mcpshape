@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any
 
 from mcpshape.api import STATUS_PATH, UPSTREAMS_PATH
 from tests.support.seam import free_port, run_cli, running_daemon, serving_daemon
-from tests.test_catalog_drift import cli
+from tests.test_catalog_drift import cli, notes
 from tests.test_overrides import issues
 from tests.test_proxy_seam import calculator
 
@@ -77,6 +77,10 @@ async def test_the_dashboard_is_served_at_the_root_and_reads_only_the_api(
         assert (await daemon.request("GET", "/__init__.py")).status_code == 404, (
             "only the page's files are served, never the package's"
         )
+        assert (await daemon.request("GET", "/api/nope")).status_code == 404
+
+        async with daemon.client("/calc/mcp") as client:  # the Proxies still answer beside it
+            assert (await client.call_tool("add", {"a": 2, "b": 3})).data == 5
 
 
 async def test_the_dashboard_is_behind_the_bearer_token_like_every_route(
@@ -139,6 +143,47 @@ async def test_the_exposed_set_route_answers_the_catalog_with_its_overrides_appl
         assert status == 404
 
 
+async def test_the_exposed_set_covers_every_kind_of_item(config_dir: ConfigDir) -> None:
+    config_dir.add_memory_upstream("notes", notes())
+    await cli(config_dir, "upstream", "sync", "notes")
+
+    async with running_daemon(config_dir) as daemon:
+        status, answer = await daemon.api("GET", f"{UPSTREAMS_PATH}/notes/proxies/default/exposed")
+        assert status == 200
+        assert answer["health"] == "ok"
+        assert answer["scanned"] is True
+        assert set(by_name(answer["items"], "tool")) == {"add_note"}
+        assert set(by_name(answer["items"], "resource")) == {"notes://all"}
+        assert set(by_name(answer["items"], "resource_template")) == {"notes://{id}"}
+        assert set(by_name(answer["items"], "prompt")) == {"greeting"}
+        assert all(item["hidden"] is False for item in answer["items"])
+
+
+async def test_the_exposed_set_says_when_the_proxy_is_unhealthy_or_the_upstream_unscanned(
+    config_dir: ConfigDir,
+) -> None:
+    """An unhealthy Proxy keeps advertising its last exposed set; the route says so rather
+    than reporting that set as the Proxy's choices."""
+    config_dir.add_memory_upstream("calc", calculator())
+    config_dir.break_upstream("calc")  # so the Daemon's start-up scan reaches nothing
+
+    async with running_daemon(config_dir) as daemon:
+        status, answer = await daemon.api("GET", f"{UPSTREAMS_PATH}/calc/proxies/default/exposed")
+        assert status == 200
+        assert answer["scanned"] is False
+        assert answer["items"] == []
+
+        config_dir.restore_upstream("calc")
+        await cli(config_dir, "upstream", "sync", "calc")
+        (config_dir.path / "upstreams" / "calc" / "default.py").write_text("this is not python (\n")
+
+        status, answer = await daemon.api("GET", f"{UPSTREAMS_PATH}/calc/proxies/default/exposed")
+        assert status == 200
+        assert answer["health"] == "unhealthy"
+        assert "default.py" in answer["detail"]
+        assert answer["scanned"] is True
+
+
 async def test_the_exposed_set_lists_a_virtual_tool_beside_the_catalogs(
     config_dir: ConfigDir,
 ) -> None:
@@ -194,15 +239,55 @@ def test_ui_says_so_when_the_daemon_is_not_running(
     assert opened == []
 
 
-def test_ui_says_so_when_the_dashboard_is_off(
+async def test_ui_says_so_when_the_daemon_serves_no_dashboard(
+    config_dir: ConfigDir, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """What the running Daemon answers decides, not the file: the Daemon read the setting
+    at its start, and the file may have changed since."""
+    config_dir.add_memory_upstream("calc", calculator())
+    opened = browser(monkeypatch)
+
+    async with serving_daemon(config_dir, dashboard=False) as url:
+        config = config_dir.path / "config.toml"
+        config.write_text(config.read_text().replace("dashboard = false", "dashboard = true"))
+        # edited since the Daemon started: the Daemon still serves no page
+        result = await asyncio.to_thread(run_cli, config_dir, "ui")
+
+    assert result.exit_code != 0, result.output
+    assert "dashboard = false" in result.output
+    assert url not in "".join(opened)
+    assert opened == []
+
+
+async def test_ui_says_a_token_guarded_page_needs_the_users_routing(
     config_dir: ConfigDir, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     config_dir.add_memory_upstream("calc", calculator())
-    settings(config_dir, port=free_port(), dashboard=False)
     opened = browser(monkeypatch)
 
-    result = run_cli(config_dir, "ui")
+    async with serving_daemon(config_dir, token=TOKEN) as url:
+        result = await asyncio.to_thread(run_cli, config_dir, "ui")
 
-    assert result.exit_code != 0
-    assert "dashboard = false" in result.output
+    assert result.exit_code == 0, result.output
+    assert "token" in result.output
+    assert f"{url}/" in result.output
     assert opened == []
+
+
+async def test_ui_says_so_when_no_browser_opens(
+    config_dir: ConfigDir, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A headless machine has no browser to open; the URL is printed to open by hand."""
+    config_dir.add_memory_upstream("calc", calculator())
+
+    def no_browser(_url: str, *_args: object, **_kwargs: object) -> bool:
+        return False
+
+    monkeypatch.setattr("webbrowser.open", no_browser)
+
+    async with serving_daemon(config_dir) as url:
+        result = await asyncio.to_thread(run_cli, config_dir, "ui")
+
+    assert result.exit_code == 0, result.output
+    assert "No browser" in result.output
+    assert f"{url}/" in result.output

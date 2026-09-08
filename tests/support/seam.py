@@ -317,19 +317,26 @@ def free_port() -> int:
 
 @contextlib.asynccontextmanager
 async def serving_daemon(
-    cfg: ConfigDir, clock: Clock | None = None, token: str | None = None
+    cfg: ConfigDir,
+    clock: Clock | None = None,
+    token: str | None = None,
+    *,
+    dashboard: bool = True,
 ) -> AsyncGenerator[str]:
     """Run the Daemon from ``cfg`` on a loopback port, as ``daemon up`` would, and yield its URL.
 
     For the tests that need a socket: a subprocess speaking to a Proxy, or the CLI reading
     live state. Everything else uses ``running_daemon``. The port is written into
-    ``config.toml`` so the CLI computes the same URLs. The Daemon's own ``/api/shutdown``
-    stop event is what is watched, so ``daemon down`` and this fixture's own cleanup agree.
+    ``config.toml`` so the CLI computes the same URLs, with ``dashboard = false`` when asked.
+    The Daemon's own ``/api/shutdown`` stop event is what is watched, so ``daemon down`` and
+    this fixture's own cleanup agree.
     """
     port = free_port()
     settings = f"version = 1\n[daemon]\nport = {port}\n"
     if token:
         settings += f'token = "{token}"\n'
+    if not dashboard:
+        settings += "dashboard = false\n"
     (cfg.path / "config.toml").write_text(settings)
     daemon_app = build_app(cfg.path, cfg.state, clock, token)
     server = asyncio.create_task(serve_all(daemon_app, "127.0.0.1", port))

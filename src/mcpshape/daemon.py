@@ -107,8 +107,8 @@ def check_bind(settings: DaemonSettings) -> None:
 class _BearerAuth:
     """Requires ``Authorization: Bearer <token>`` on every HTTP request when a token is set.
 
-    Wraps every route: Proxies, the management API, and, later, the dashboard. Never logs the
-    token itself, given or expected.
+    Wraps every route: Proxies, the management API, and the dashboard. Never logs the token
+    itself, given or expected.
     """
 
     def __init__(self, app: ASGIApp, token: str) -> None:

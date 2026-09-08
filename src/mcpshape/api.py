@@ -17,8 +17,10 @@ Routes, all behind the bearer token when one is configured:
 - ``POST /api/shutdown``: what ``daemon down`` posts to.
 - ``GET /api/upstreams/<name>/catalog``: the accepted Catalog, or ``null`` before a scan.
 - ``GET /api/upstreams/<name>/drift``: the unreviewed Drift, or ``null``.
-- ``GET /api/upstreams/<name>/proxies/<proxy>/exposed``: the Proxy's exposed set, the
-  Catalog with its Overrides applied, as the Daemon derives it, with what it hides (#17).
+- ``GET /api/upstreams/<name>/proxies/<proxy>/exposed``: the Proxy's exposed set as the
+  Daemon derives it, the Catalog with its Overrides and Caps applied and its Virtual Tools,
+  beside what it hides, and the Proxy's health, since an unhealthy Proxy keeps its last
+  exposed set (#17).
 - ``POST /api/upstreams/<name>/sync``: scan now and record the Drift. Accepting it edits
   Proxy files, so it stays the CLI's: ``upstream sync --accept``.
 - ``GET`` and ``POST /api/upstreams/<name>/oauth``: the login's state, and starting one.
@@ -186,6 +188,13 @@ class ExposedAnswer(BaseModel):
 
     name: str
     """The server name a Client sees."""
+    health: str
+    detail: str | None = None
+    """The Proxy's health as ``/api/status`` reports it: an unhealthy Proxy keeps advertising
+    its last exposed set, which is what ``items`` then is."""
+    scanned: bool = True
+    """Whether the Upstream has a Catalog at all; before its first scan there is nothing to
+    expose and nothing to hide."""
     instructions: str | None = None
     items: list[ExposedItem] = Field(default_factory=list[ExposedItem])
 
@@ -489,11 +498,15 @@ class Management:
         proxy = await served.proxy(proxy_name)
         if proxy is None:
             return _refusal(f"no Proxy {upstream}/{proxy_name}", NOT_FOUND)
+        health = await proxy.state()
         exposed = await proxy.exposed_now()
         stored = await asyncio.to_thread(catalogs.load_catalog, self.state_dir, upstream)
         return _answer(
             ExposedAnswer(
                 name=server_name(served.upstream, proxy_name, exposed),
+                health=health.health,
+                detail=health.detail,
+                scanned=stored is not None,
                 instructions=exposed.catalog.instructions,
                 items=_exposed_items(exposed, stored),
             )
