@@ -75,6 +75,10 @@ Claude Code is the first and best-integrated Profile, never a special case in th
   an error, moves the Upstream to `unavailable` at once and is answered with the same
   configurable message; the backoff and reconnect follow as after a failed connect (settled
   in #22). A warm Upstream's failed ping does the same.
+- The keeper's restart cap is a rate, five failures within ten minutes on the Daemon's clock,
+  so failures spread over a long life never end supervision (settled in #50). Past it the
+  Upstream is `unavailable` with the reason, `daemon status` says the keeper stopped, and
+  `daemon reload` starts a keeper again.
 - Health of every Upstream and Proxy is shown by `ls`, `daemon status`, and the dashboard.
 
 ### Catalog and Drift

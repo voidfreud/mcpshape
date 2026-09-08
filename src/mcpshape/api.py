@@ -101,6 +101,8 @@ class UpstreamState(BaseModel):
     state: str
     seconds: float
     error: str | None = None
+    supervised: bool = True
+    """False once the keeper gave up on this Upstream, until a reload starts one (#50)."""
     proxies: list[ProxyState] = Field(default_factory=list[ProxyState])
 
 
@@ -326,6 +328,7 @@ class Management:
             state=status.state,
             seconds=round(status.seconds, 3),
             error=status.error,
+            supervised=status.supervised,
             proxies=[await self.proxies[upstream.name, name].state() for name in upstream.proxies],
         )
 
@@ -335,9 +338,15 @@ class Management:
         return _answer(await self.live())
 
     async def _reload(self, _request: Request) -> JSONResponse:
-        """Every Proxy re-reads its files now, changed or not (#10), and says how it went."""
+        """Every Proxy re-reads its files now, changed or not (#10), and says how it went.
+
+        Every connection is supervised again on the way, which is what brings back a keeper
+        that gave up (#50) and nothing at all for an Upstream whose keeper is still running.
+        """
         for proxy in self.proxies.values():
             await proxy.reload()
+        for connection in self.connections.values():
+            await connection.reload()
         return _answer(await self.live())
 
     async def _shutdown(self, _request: Request) -> JSONResponse:

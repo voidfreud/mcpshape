@@ -329,6 +329,11 @@ def _notes(live: Live) -> list[str]:
     for upstream in live.state.upstreams if live.state else []:
         if upstream.error:
             notes.append(f"{upstream.name}: {upstream.error}")
+        if not upstream.supervised:
+            notes.append(
+                f"{upstream.name}: the keeper stopped supervising; "
+                "run mcpshape daemon reload to bring it back"
+            )
         notes += [
             f"{upstream.name}/{proxy.name}: {proxy.detail}"
             for proxy in upstream.proxies

@@ -8,15 +8,16 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from fastmcp import Client
 from mcp_types import TextContent
 
-from mcpshape.connection import Connection
+from mcpshape.connection import KEEPER_RESTART_WINDOW, Connection
 from tests.support.clock import FakeClock, settle
 from tests.support.seam import (
     RunningDaemon,
+    awaiting_state_at,
     free_port,
     run_cli,
     running_daemon,
@@ -293,6 +294,106 @@ async def test_a_keeper_that_raises_past_the_cap_marks_the_upstream_unavailable(
         error = next(u["error"] for u in status["upstreams"] if u["name"] == "calc")
         assert error is not None
         assert "keeper" in error
+
+
+def failing_plan(budget: list[int], monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make ``Connection._plan`` raise while ``budget`` says so, and count each one down.
+
+    The same sanctioned fault injection the two tests above use: no Client-driven path makes
+    the keeper raise, so the fault has to be put where the keeper's own guarded paths are not.
+    """
+    real_plan = Connection._plan  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+
+    def flaky_plan(self: Connection) -> tuple[str, float | None]:
+        if budget[0] != 0:
+            budget[0] -= 1
+            msg = "injected keeper fault"
+            raise RuntimeError(msg)
+        return real_plan(self)
+
+    monkeypatch.setattr(Connection, "_plan", flaky_plan)
+
+
+async def upstream_status(daemon: RunningDaemon, name: str) -> dict[str, Any]:
+    """What the Daemon says about one Upstream at ``/api/status``."""
+    return next(u for u in (await daemon.status())["upstreams"] if u["name"] == name)
+
+
+async def test_keeper_failures_spread_over_time_never_reach_the_cap(
+    config_dir: ConfigDir, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#50: the cap is a rate, so failures a window apart never end supervision.
+
+    Four failures, a quiet window, then four more: eight in all, which the old count-only-ever-
+    grows rule would have given up on, and which this one forgets between the two bursts.
+    """
+    clock = FakeClock()
+    budget = [4]
+    config_dir.add_memory_upstream("calc", calculator(), {"idle_timeout": 100})
+    failing_plan(budget, monkeypatch)
+
+    async with running_daemon(config_dir, clock) as daemon, daemon.client("/calc/mcp") as client:
+        assert (await client.call_tool("add", {"a": 2, "b": 3})).data == 5
+        await settle()
+        assert budget[0] == 0, "the first four failures never happened"
+        assert await daemon.upstream_state("calc") in CONNECTED
+
+        await clock.advance(KEEPER_RESTART_WINDOW + 1)  # the record of them goes quiet
+        await settle()
+
+        budget[0] = 4
+        assert (await client.call_tool("add", {"a": 1, "b": 1})).data == 2
+        await settle()
+        assert budget[0] == 0, "the second four failures never happened"
+        assert await daemon.awaiting_state("calc", *CONNECTED) in CONNECTED
+
+        await clock.advance(101)
+        assert await daemon.awaiting_state("calc", "cold") == "cold"
+        calc = await upstream_status(daemon, "calc")
+        assert calc["supervised"] is True
+        assert calc["error"] is None
+
+
+async def test_daemon_reload_brings_back_a_keeper_that_gave_up(
+    config_dir: ConfigDir, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#50: past the cap the Upstream stays unavailable until ``daemon reload`` supervises it."""
+    clock = FakeClock()
+    budget = [-1]  # every plan fails, until the test says otherwise
+    config_dir.add_memory_upstream("calc", calculator())
+    failing_plan(budget, monkeypatch)
+
+    async with running_daemon(config_dir, clock) as daemon:
+        assert await daemon.awaiting_state("calc", "unavailable") == "unavailable"
+        gave_up = await upstream_status(daemon, "calc")
+        assert gave_up["supervised"] is False
+        assert "keeper" in str(gave_up["error"])
+
+        budget[0] = 0
+        code, _ = await daemon.api("POST", "/api/reload")
+        assert code == 200
+
+        assert await daemon.awaiting_state("calc", *CONNECTED) in CONNECTED
+        back = await upstream_status(daemon, "calc")
+        assert back["supervised"] is True
+        assert back["error"] is None
+
+
+async def test_daemon_status_says_the_keeper_stopped_supervising(
+    config_dir: ConfigDir, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#50: the note under the table names the keeper and the command that brings it back."""
+    config_dir.add_memory_upstream("calc", calculator())
+    failing_plan([-1], monkeypatch)
+
+    async with serving_daemon(config_dir) as url:
+        await awaiting_state_at(url, "calc", "unavailable")
+
+        status = await asyncio.to_thread(run_cli, config_dir, "daemon", "status")
+
+    assert status.exit_code == 0, status.output
+    assert "the keeper stopped supervising" in status.stdout
+    assert "mcpshape daemon reload" in status.stdout
 
 
 async def seconds_in_state(daemon: RunningDaemon, name: str) -> float:

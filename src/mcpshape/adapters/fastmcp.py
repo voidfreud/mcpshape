@@ -266,6 +266,10 @@ class UpstreamConnection:
         """Try to connect again now: a login just stored what the last attempt lacked (#16)."""
         self._connection.retry()
 
+    async def reload(self) -> None:
+        """Supervise this Upstream again when the keeper gave up: ``daemon reload`` (#50)."""
+        await self._connection.reload()
+
     def unscanned(self) -> None:
         """The start-up scan reached nothing, so the first connect rescans (#57)."""
         self._connection.unscanned()
