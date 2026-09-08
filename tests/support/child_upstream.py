@@ -8,7 +8,11 @@ What it does is all reported through MCP or through files the test reads: every 
 its pid to the file ``MCPSHAPE_TEST_SPAWNS`` names, so a test counts the children; the server
 advertises one more tool while the file ``MCPSHAPE_TEST_GROWN`` names exists, so a rescan has
 something to find; and it never finishes starting while the file ``MCPSHAPE_TEST_HANG`` names
-exists, which is the connect a connect timeout exists for.
+exists, which is the connect a connect timeout exists for; and the ``die`` tool ends the
+process while answering, which is an Upstream dying with a call in flight.
+
+``--http <port>`` serves Streamable HTTP on a loopback port instead of stdio, for the tests
+that need an Upstream by URL they can kill (see ``ServedUpstream`` in the seam).
 """
 
 from __future__ import annotations
@@ -26,6 +30,8 @@ MODULE = "tests.support.child_upstream"
 SPAWNS = "MCPSHAPE_TEST_SPAWNS"
 GROWN = "MCPSHAPE_TEST_GROWN"
 HANG = "MCPSHAPE_TEST_HANG"
+HTTP = "--http"
+"""The flag that makes this server answer on a loopback port instead of over stdio."""
 
 FOREVER = 3600.0
 REPO = Path(__file__).parent.parent.parent
@@ -34,6 +40,11 @@ REPO = Path(__file__).parent.parent.parent
 def args() -> list[str]:
     """What to run this module with, next to ``sys.executable`` as the command."""
     return ["-m", MODULE]
+
+
+def http_args(port: int) -> list[str]:
+    """What to run this module with so it serves Streamable HTTP on ``port`` instead."""
+    return ["-m", MODULE, HTTP, str(port)]
 
 
 def env(**extra: str) -> dict[str, str]:
@@ -81,6 +92,12 @@ def pid() -> int:
 
 
 @child.tool
+def die() -> int:
+    """End this process at once, without answering."""
+    os._exit(0)  # the point is an Upstream that dies mid-call, with no unwinding
+
+
+@child.tool
 def env_value(name: str) -> str:
     """What this process's environment holds under ``name``, or an empty string."""
     return os.environ.get(name, "")
@@ -106,6 +123,10 @@ def main() -> None:
             log.write(f"{os.getpid()}\n")
     if marked(HANG):
         time.sleep(FOREVER)
+        return
+    if HTTP in sys.argv:
+        port = int(sys.argv[sys.argv.index(HTTP) + 1])
+        child.run(transport="http", host="127.0.0.1", port=port, path="/mcp", show_banner=False)
         return
     child.run(transport="stdio", show_banner=False)
 

@@ -177,6 +177,22 @@ class _Link:
             msg = "the Upstream did not answer a ping"
             raise UpstreamTargetError(msg)
 
+    def died(self, exc: BaseException) -> bool:
+        """Whether ``exc`` means this open connection is dead, not something the Upstream said.
+
+        An error the Upstream itself answered leaves the connection standing: a JSON-RPC error
+        such as method not found or invalid params, an ``isError`` result, and a ``ToolError``
+        a Hook or a Virtual Tool raised. A dead transport is the MCP SDK's own
+        ``CONNECTION_CLOSED``, which is what a call over a transport whose other end is gone
+        raises, and, for whatever a call racing that one hits instead, a session FastMCP has
+        already torn down (checked 2026-09-08, FastMCP 4.0.3; see docs/clients.md).
+        """
+        if isinstance(exc, FastMCPError):
+            return False
+        if isinstance(exc, MCPError):
+            return exc.error.code == mcp_types.CONNECTION_CLOSED
+        return self._client is not None and not self._client.is_connected()
+
 
 class UpstreamConnection:
     """One Upstream's connection: the client every Proxy of it calls through (story 74).
@@ -196,6 +212,7 @@ class UpstreamConnection:
     ) -> None:
         self._link = _Link(upstream.transport, secrets, tokens)
         self._on_catalog = on_catalog
+        self._lifecycle = upstream.lifecycle
         self._connection = Connection(
             upstream.name,
             self._link,
@@ -233,6 +250,18 @@ class UpstreamConnection:
             raise ToolError(str(exc), log_level=logging.WARNING) from exc
         return self._link.client
 
+    async def died(self, exc: BaseException) -> str | None:
+        """The Upstream's message when ``exc`` means the open connection is dead, else nothing.
+
+        A call is what finds a lazy Upstream gone, since nothing pings one; telling the
+        lifecycle here is what moves it to ``unavailable`` at once and starts the backoff,
+        instead of leaving the transport's own words to reach the model.
+        """
+        if not self._link.died(exc):
+            return None
+        await self._connection.lost(str(exc) or type(exc).__name__)
+        return self._lifecycle.unavailable_message
+
 
 def server_name(upstream: Upstream, proxy_name: str, exposed: Exposed) -> str:
     """The name the Proxy's server announces: the user's, else ``<upstream>/<proxy>``."""
@@ -243,7 +272,7 @@ def proxy_app(
     upstream: Upstream, proxy_name: str, exposed: Exposed, connection: UpstreamConnection
 ) -> ProxyApp:
     """The Proxy ``proxy_name`` of ``upstream``, exposing ``exposed`` over ``connection``."""
-    runtime = _Runtime(f"{upstream.name}/{proxy_name}", _Handle(connection.client))
+    runtime = _Runtime(f"{upstream.name}/{proxy_name}", connection)
     provider = _CatalogProvider(connection.client, runtime)
     name = server_name(upstream, proxy_name, exposed)
     server = FastMCP(name=name)
@@ -351,51 +380,65 @@ _MESSAGE_CONTENT: TypeAdapter[Any] = TypeAdapter(
 
 
 class _Handle:
-    """``upstream`` for one Proxy: its own Upstream's shared client, under Catalog names."""
+    """``upstream`` for one Proxy: its own Upstream's shared client, under Catalog names.
 
-    def __init__(self, client_factory: ClientFactory) -> None:
-        self._client_factory = client_factory
+    An error the Upstream answered is an ``UpstreamError`` user code may catch. A connection
+    found dead instead is not the user's to handle: it moves the Upstream to ``unavailable``
+    and fails this call with the Upstream's message, exactly as reaching for the client of an
+    Upstream that is not connected already does.
+    """
+
+    def __init__(self, connection: UpstreamConnection) -> None:
+        self._connection = connection
 
     async def call(self, name: str, args: dict[str, Any]) -> hooks.ToolResult:
-        client = await self._client_factory()
+        client = await self._connection.client()
         async with client:
             try:
                 raw = await client.call_tool_mcp(name, args)
             except MCPError as exc:
-                raise UpstreamError(exc.error.message) from exc
+                raise await self._failure(exc) from exc
         result = _tool_result_of(raw.content, raw.structured_content)
         if raw.is_error:
             raise UpstreamError(result.text or "the Upstream reported an error")
         return result
 
     async def read(self, uri: str) -> hooks.ResourceResult:
-        client = await self._client_factory()
+        client = await self._connection.client()
         async with client:
             try:
                 contents = await client.read_resource(uri)
             except MCPError as exc:
-                raise UpstreamError(exc.error.message) from exc
+                raise await self._failure(exc) from exc
         return hooks.ResourceResult(contents=[_content_of(item) for item in contents])
 
     async def get(self, name: str, args: dict[str, Any]) -> hooks.PromptResult:
-        client = await self._client_factory()
+        client = await self._connection.client()
         async with client:
             try:
                 raw = await client.get_prompt(name, args)
             except MCPError as exc:
-                raise UpstreamError(exc.error.message) from exc
+                raise await self._failure(exc) from exc
         return hooks.PromptResult(
             messages=[_message_of(message.role, message.content) for message in raw.messages],
             description=raw.description,
         )
 
+    async def _failure(self, exc: MCPError) -> Exception:
+        """What ``exc`` becomes: the Upstream's message when it is dead, else what it said."""
+        message = await self._connection.died(exc)
+        if message is None:
+            return UpstreamError(exc.error.message)
+        return ToolError(message, log_level=logging.WARNING)
+
 
 class _Runtime:
     """What every component of one Proxy runs its calls through: the Hooks, or the failure."""
 
-    def __init__(self, label: str, handle: _Handle) -> None:
+    def __init__(self, label: str, connection: UpstreamConnection) -> None:
         self.label = label
-        self.handle = handle
+        self.connection = connection
+        self.handle = _Handle(connection)
         self.code = UserCode()
         self.failure: str | None = None
 
@@ -414,7 +457,12 @@ class _Runtime:
         cap: Callable[[R], R] | None = None,
         check: Callable[[R, str], None] | None = None,
     ) -> R:
-        """``call`` through the Hooks, with user failures turned into ``error`` for the Client."""
+        """``call`` through the Hooks, with user failures turned into ``error`` for the Client.
+
+        A forward that raises because the open connection is dead is the Upstream going away
+        mid-call: the lifecycle hears of it and the Client is answered with the Upstream's
+        ``unavailable_message``, the same words a call during the backoff gets.
+        """
         if self.failure is not None:
             msg = f"Proxy {self.label} is unhealthy: {self.failure}"
             raise error(msg, log_level=logging.WARNING)
@@ -424,7 +472,9 @@ class _Runtime:
             except FastMCPError:
                 raise
             except Exception as exc:
-                raise error(str(exc) or type(exc).__name__, log_level=logging.WARNING) from exc
+                away = await self.connection.died(exc)
+                reason = away or str(exc) or type(exc).__name__
+                raise error(reason, log_level=logging.WARNING) from exc
 
 
 def _capped_output(ceiling: int | None) -> Callable[[hooks.ToolResult], hooks.ToolResult] | None:

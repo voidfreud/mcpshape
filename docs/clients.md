@@ -227,3 +227,20 @@ and the Profile writes the common `mcpServers` + `{"type": "http", "url": ...}` 
   - `fastmcp.client.oauth_callback.create_oauth_callback_server` serves `/callback` on a given
     port and fills an `OAuthCallbackResult` with the code, state, and `iss`, then sets the
     event it was handed; the event is only ever `.set()`, so an `asyncio.Event` does.
+- What a call over a dead connection raises (checked 2026-09-08, 4.0.3 with `mcp` 2.x). A
+  `call_tool_mcp`, `read_resource` or `get_prompt` on a session whose other end is gone raises
+  `MCPError` with `mcp_types.CONNECTION_CLOSED` (-32000), whatever the transport: a Streamable
+  HTTP server that stopped answering, an stdio child that exited. The SDK uses the same code
+  for its own "SSE stream ended without a response". An error the Upstream itself answered is
+  something else: a failing or unknown tool is an `isError` result, and a missing resource or
+  prompt is an `MCPError` carrying that error's own JSON-RPC code (`INVALID_PARAMS` for a
+  resource FastMCP does not have). After a `CONNECTION_CLOSED` the client reports
+  `is_connected()` false, and closing it raises whatever the transport failed with, so the
+  caller has to swallow that. A new client on the same URL reaches an Upstream that came back;
+  the dead one cannot be reused (it fails with `nesting counter should be 0`).
+- Killing a FastMCP HTTP server in-process while a legacy-era client still has a session open
+  leaves every later FastMCP HTTP server in that process unable to serve the legacy era: each
+  new connect ends with `SSE stream ended without a response`, from another process too, while
+  a modern-era `Client` and an in-memory `ProxyClient` still work (checked 2026-09-08, 4.0.3).
+  mcpshape's Upstream client is a `ProxyClient`, which is legacy-era, so a test that kills an
+  HTTP Upstream serves it from a child process instead of in-process uvicorn.

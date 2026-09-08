@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import os
 import re
 import socket
 import time
@@ -24,7 +25,7 @@ from typer.testing import CliRunner, Result  # annotated at runtime
 from mcpshape.cli import app
 from mcpshape.config import memory_upstreams_allowed
 from mcpshape.daemon import STATUS_PATH, build_app, serve_all
-from tests.support import upstreams
+from tests.support import child_upstream, upstreams
 from tests.support.asgi import asgi_client_factory
 
 if TYPE_CHECKING:
@@ -298,7 +299,8 @@ async def serving_upstream(server: FastMCP, transport: str = "http") -> AsyncGen
     """Serve ``server`` on a loopback port as a real Upstream, and yield the URL it answers on.
 
     In-process, like everything else, but over a socket: a Streamable HTTP or legacy SSE
-    Upstream is reached by URL, which is the point of the test that uses it.
+    Upstream is reached by URL, which is the point of the test that uses it. An Upstream that
+    has to die while the Daemon is connected to it needs ``restartable_upstream`` instead.
     """
     port = free_port()
     path = "/mcp" if transport == "http" else "/sse"
@@ -313,6 +315,55 @@ async def serving_upstream(server: FastMCP, transport: str = "http") -> AsyncGen
     finally:
         running.should_exit = True
         await serving
+
+
+@dataclass
+class ServedUpstream:
+    """An Upstream served over Streamable HTTP by a child process, which a test can kill.
+
+    A process of its own, not this one: killing a server that a legacy-era client still has
+    a session on leaves every later FastMCP HTTP server in the same process unable to serve
+    that era (checked 2026-09-08, FastMCP 4.0.3; see docs/clients.md). That would poison the
+    reconnect the test is here to watch, and a child is what a dying Upstream is anyway.
+
+    The port is held for the life of the context, so the Upstream that comes back answers on
+    the URL the Upstream file already names.
+    """
+
+    port: int = field(default_factory=free_port)
+    _child: asyncio.subprocess.Process | None = None
+
+    @property
+    def url(self) -> str:
+        return f"http://127.0.0.1:{self.port}/mcp"
+
+    async def revive(self) -> None:
+        """Start the child, and do not come back before it answers on its port."""
+        self._child = await asyncio.create_subprocess_exec(
+            child_upstream.command(),
+            *child_upstream.http_args(self.port),
+            env={**os.environ, **child_upstream.env()},
+        )
+        await _wait_for_port(self.port)
+
+    async def kill(self) -> None:
+        """End the child at once, as an Upstream whose host went away, and reap it."""
+        child, self._child = self._child, None
+        if child is None or child.returncode is not None:
+            return
+        child.kill()
+        await child.wait()
+
+
+@contextlib.asynccontextmanager
+async def restartable_upstream() -> AsyncGenerator[ServedUpstream]:
+    """An Upstream over Streamable HTTP that a test can kill and put back on the same URL."""
+    served = ServedUpstream()
+    await served.revive()
+    try:
+        yield served
+    finally:
+        await served.kill()
 
 
 async def _wait_for_port(port: int, attempts: int = 100) -> None:

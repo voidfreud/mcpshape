@@ -16,8 +16,9 @@ States:
 ``idle-pending``
     Connected, with the idle timer running towards ``idle_timeout``.
 ``unavailable``
-    The last connect or ping failed. A backoff timer is running; calls fail at once with the
-    Upstream's ``unavailable_message`` rather than waiting for it.
+    The last connect or ping failed, or a call found the open connection dead. A backoff timer
+    is running; calls fail at once with the Upstream's ``unavailable_message`` rather than
+    waiting for it.
 ``stopping``
     The Daemon is shutting the connection down.
 
@@ -190,6 +191,18 @@ class Connection:
             return
         raise UpstreamUnavailableError(self._settings.unavailable_message)
 
+    async def lost(self, reason: str) -> None:
+        """A call found the connection it used dead, which fails it as a failed ping does.
+
+        Only a connected Upstream is failed this way: several calls dying together on one dead
+        connection are the one failure, since the first of them moves the state before anything
+        is awaited and the rest find the Upstream already ``unavailable``, where every call is
+        answered with its message anyway.
+        """
+        if self._state not in CONNECTED:
+            return
+        await self._fail(f"a call found the connection dead: {reason}")
+
     # --- the keeper ------------------------------------------------------------------------
 
     async def _keep(self) -> None:
@@ -327,17 +340,22 @@ class Connection:
             log.exception("Upstream %s could not be rescanned after reconnecting", self._name)
 
     async def _fail(self, reason: str) -> None:
-        await self._shut()
+        """Record why, enter the backoff, and only then let the dead link go.
+
+        Nothing is awaited before the state moves, so a second call failing on the same dead
+        connection cannot count a second failure and restart the backoff under the first.
+        """
         self._error = reason
         self._failures += 1
         self._enter("unavailable")
-        self._nudge()
         log.warning(
             "Upstream %s is unavailable (%s); retrying in %.0fs",
             self._name,
             reason,
             self._backoff(),
         )
+        await self._shut()
+        self._nudge()
 
     async def _shut(self) -> None:
         try:

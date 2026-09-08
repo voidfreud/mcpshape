@@ -6,6 +6,7 @@ These tests talk to FastMCP directly, on purpose. Everything else goes through t
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 from typing import TYPE_CHECKING, Any, cast
@@ -37,6 +38,7 @@ from mcp.shared.auth import (
     OAuthClientMetadata,
     OAuthToken,
 )
+from mcp.shared.exceptions import MCPError
 from mcp_types import TextContent, TextResourceContents
 from pydantic import AnyUrl, PrivateAttr
 from starlette.applications import Starlette
@@ -45,7 +47,7 @@ from starlette.routing import Mount
 from tests.support import child_upstream
 from tests.support.asgi import asgi_client_factory
 from tests.support.oauth_provider import serving_provider
-from tests.support.seam import free_port, until
+from tests.support.seam import free_port, restartable_upstream, until
 from tests.test_proxy_seam import calculator
 
 if TYPE_CHECKING:
@@ -651,3 +653,40 @@ async def test_the_callback_server_hands_back_the_code_and_state_the_browser_car
         await serving
 
     assert (result.code, result.state, result.error) == ("abc", "xyz", None)
+
+
+async def test_a_dead_transport_raises_connection_closed_and_an_upstream_error_does_not() -> None:
+    """How mcpshape tells an Upstream that is gone from one that answered an error (#22).
+
+    A tool that fails and a tool the Upstream does not have are ``isError`` results, and a
+    resource it does not have is an ``MCPError`` carrying its own JSON-RPC code; none of those
+    says anything about the connection. A transport whose other end is gone raises
+    ``CONNECTION_CLOSED`` instead and leaves the session no longer connected, which is what
+    ``_Link.died`` classifies on. Closing such a client raises too, which is why the state
+    machine lets a dead link go without minding what saying goodbye costs. An Upstream back on
+    the same URL is reached by a new client, which is the reconnect after the backoff.
+    """
+    async with restartable_upstream() as served:
+        client: ProxyClient[Any] = ProxyClient(StreamableHttpTransport(served.url))
+        dead: MCPError | None = None
+        with contextlib.suppress(Exception):  # what closing a dead client raises
+            async with client:
+                async with client:
+                    assert not (await client.call_tool_mcp("add", {"a": 1, "b": 1})).is_error
+                    assert (await client.call_tool_mcp("no_such_tool", {})).is_error
+                    with pytest.raises(MCPError) as unknown:
+                        await client.read_resource("data://nowhere")
+                    assert unknown.value.error.code != mcp_types.CONNECTION_CLOSED
+
+                    await served.kill()
+                    with pytest.raises(MCPError) as gone:
+                        await client.call_tool_mcp("add", {"a": 1, "b": 1})
+                    dead = gone.value
+        assert dead is not None
+        assert dead.error.code == mcp_types.CONNECTION_CLOSED
+        assert not client.is_connected()
+
+        await served.revive()
+        back: ProxyClient[Any] = ProxyClient(StreamableHttpTransport(served.url))
+        async with back, back:
+            assert not (await back.call_tool_mcp("add", {"a": 1, "b": 1})).is_error
