@@ -126,6 +126,9 @@ Claude Code is the first and best-integrated Profile, never a special case in th
   so `import helpers` finds `upstreams/<name>/helpers.py`; a helper is re-imported on every
   load, so every Proxy of the Upstream re-reads its files when a helper changes, and a
   helper of one Upstream is never seen by another's Proxy. `doctor` loads files the same way.
+- Settled in #45: a Virtual Tool's name is its identity, so a Cap never cuts it; one longer
+  than the tool name Cap in force is a load error naming the tool and the Cap, and `doctor`
+  reports it.
 - Hooks run in-process with no sandbox. Exceptions become tool errors and log lines. An async
   Hook that blocks forever stalls the Daemon, and `sys.exit` anywhere in user code is not
   guarded against; this is documented, not solved.

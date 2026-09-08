@@ -176,7 +176,8 @@ describe the same kind differently."""
 
 
 class CapError(ValueError):
-    """A Cap tried to raise what it inherits; a Cap may only be lowered."""
+    """A Cap tried to raise what it inherits, a Cap may only be lowered; or a Virtual Tool's
+    name, its identity, is longer than the tool name Cap in force, and cannot be cut."""
 
 
 class CapSettings(BaseModel):

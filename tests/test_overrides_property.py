@@ -4,8 +4,9 @@ At the proxy module on purpose (see CLAUDE.md): the property is about the pure a
 and driving thousands of generated Catalogs through in-memory Upstreams would prove nothing
 more. Whatever the Overrides say, an exposed set has unique names per kind, maps every exposed
 item back to exactly one Catalog item, never changes a schema type, and only refuses for the
-three reasons it may: a name collision, a hidden argument nothing would supply, or a resource
-template exposed with other parameters than it takes.
+four reasons it may: a name collision, a hidden argument nothing would supply, a resource
+template exposed with other parameters than it takes, or a Virtual Tool named over the tool
+name Cap in force (its name is its identity, so it cannot be cut).
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ from hypothesis import strategies as st
 
 from mcpshape.catalog import KINDS, Catalog, Item
 from mcpshape.config import ProxyFile
+from mcpshape.hooks import UserCode, VirtualTool
 from mcpshape.model import CapError, CapSettings, ToolCapOverrides
 from mcpshape.proxy import Exposed, OverrideError, cap, expose
 
@@ -169,18 +171,24 @@ def _exposed_or_reason(catalog: Catalog, proxy: ProxyFile) -> Exposed | str:
         return str(refused)
 
 
-def _capped_or_reason(exposed: Exposed, caps: CapSettings, proxy: ProxyFile) -> Exposed | str:
-    """What Caps do to ``exposed``, or the one-line reason cutting a name could not stay unique.
+def _capped_or_reason(
+    exposed: Exposed, caps: CapSettings, proxy: ProxyFile, *, over_cap: bool
+) -> Exposed | str:
+    """What Caps do to ``exposed``, or the one-line reason it refused to.
 
     ``tool_cap_overrides`` never generates a value above what it inherits, so a ``CapError``
-    here would mean the property's own setup is wrong, not something ``cap`` should refuse.
+    here is only ever the ``over_cap`` case a Virtual Tool named over the tool name Cap raises;
+    anything else would mean the property's own setup is wrong, not something ``cap`` should
+    refuse.
     """
     try:
         return cap(exposed, caps, proxy)
     except OverrideError as refused:
         return str(refused)
     except CapError as raised:
-        pytest.fail(f"a Cap that only ever lowers should never raise: {raised}")
+        if not over_cap:
+            pytest.fail(f"a Cap that only ever lowers should never raise: {raised}")
+        return str(raised)
 
 
 def _hidden(proxy: ProxyFile, kind: str, name: str) -> bool:
@@ -227,8 +235,25 @@ def tool_cap_overrides(draw: st.DrawFn, base: CapSettings) -> ToolCapOverrides:
     )
 
 
+def _fn() -> None:
+    """A trivial function: only its name and description matter to a Virtual Tool's Cap."""
+
+
+virtual_tool_names = st.from_regex(r"[d-f][a-z0-9_]{0,9}", fullmatch=True)
+"""Lengths 1 to 10, straddling the 1-to-6 range ``cap_settings`` draws a tool name Cap from, so
+generated Virtual Tool names land both under and over it. Prefixed away from ``names`` (which
+starts ``a``-``c``) only to keep the strategies easy to read apart; a collision with a Catalog
+tool name is still possible and is left to ``expose`` to refuse, as the design calls for."""
+
+
 @st.composite
-def capped_cases(draw: st.DrawFn) -> tuple[Catalog, ProxyFile, CapSettings]:
+def virtual_tools(draw: st.DrawFn) -> UserCode:
+    drawn = draw(st.lists(virtual_tool_names, max_size=3, unique=True))
+    return UserCode(tools={name: VirtualTool(name, _fn, "d") for name in drawn})
+
+
+@st.composite
+def capped_cases(draw: st.DrawFn) -> tuple[Catalog, ProxyFile, CapSettings, UserCode]:
     catalog, proxy = draw(cases())
     caps = draw(cap_settings())
     capped_tools = {
@@ -236,23 +261,31 @@ def capped_cases(draw: st.DrawFn) -> tuple[Catalog, ProxyFile, CapSettings]:
         for name, override in proxy.tools.items()
     }
     proxy = proxy.model_copy(update={"tools": capped_tools})
-    return catalog, proxy, caps
+    code = draw(virtual_tools())
+    return catalog, proxy, caps, code
 
 
 @given(capped_cases())
 def test_capping_keeps_names_unique_every_length_within_its_cap_and_origins_intact(
-    case: tuple[Catalog, ProxyFile, CapSettings],
+    case: tuple[Catalog, ProxyFile, CapSettings, UserCode],
 ) -> None:
-    catalog, proxy, caps = case
+    catalog, proxy, caps, code = case
     try:
-        exposed = expose(catalog, proxy)
+        exposed = expose(catalog, proxy, code)
     except OverrideError:
         return  # the Override property already covers why this refuses
-    capped = _capped_or_reason(exposed, caps, proxy)
+    over_cap = any(len(virtual.name) > caps.tool_name for virtual in code.tools.values())
+    capped = _capped_or_reason(exposed, caps, proxy, over_cap=over_cap)
     if isinstance(capped, str):
-        # only a Cap-caused name collision that no marker could tell apart may refuse here.
-        assert "cannot be cut to a name unique" in capped
+        if over_cap:
+            assert "Virtual Tool" in capped
+        else:
+            # only a Cap-caused name collision that no marker could tell apart may refuse here.
+            assert "cannot be cut to a name unique" in capped
         return
+    assert not over_cap, (
+        "a Virtual Tool over the tool name Cap should have refused with CapError, not exposed"
+    )
 
     _assert_names_unique_and_origins_intact(catalog, proxy, capped)
     if capped.catalog.instructions is not None:
@@ -262,6 +295,7 @@ def test_capping_keeps_names_unique_every_length_within_its_cap_and_origins_inta
         override = proxy.tools.get(origin_name)
         effective = override.caps.over(caps, "tool") if override is not None else caps
         _assert_tool_within_its_caps(name, definition, effective)
+    _assert_virtual_tools_exposed_intact(capped)
 
 
 def _assert_names_unique_and_origins_intact(
@@ -273,6 +307,14 @@ def _assert_names_unique_and_origins_intact(
         visible = {name for name in catalog.items(kind) if not _hidden(proxy, kind, name)}
         origins = {capped.origin(Item(kind, name)) for name in kind_names}
         assert origins == visible
+    tool_names = capped.tool_names()  # Catalog tools and Virtual Tools together
+    assert len(tool_names) == len(set(tool_names))
+
+
+def _assert_virtual_tools_exposed_intact(capped: Exposed) -> None:
+    """Every Virtual Tool is exposed under exactly its own name, uncut."""
+    for name, virtual in capped.code.tools.items():
+        assert virtual.name == name
 
 
 def _assert_tool_within_its_caps(

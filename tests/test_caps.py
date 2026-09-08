@@ -9,6 +9,7 @@ many characters were cut, and a Cap that tries to raise what it inherits is a ``
 from __future__ import annotations
 
 import asyncio
+import textwrap
 from typing import TYPE_CHECKING, Any
 
 from fastmcp import FastMCP
@@ -331,3 +332,90 @@ def test_a_name_cap_too_small_to_keep_names_unique_is_a_doctor_error(
 
     assert doctor.exit_code == 1
     assert "cannot be cut to a name unique" in doctor.output
+
+
+# --- a Virtual Tool's name is its identity: checked against the tool name Cap, never cut --------
+
+
+def user_code(
+    config_dir: ConfigDir, text: str, upstream: str = "issues", proxy: str = "default"
+) -> None:
+    """Write the Proxy's Python file, as a user would."""
+    path = config_dir.path / "upstreams" / upstream / f"{proxy}.py"
+    path.write_text(
+        "from mcpshape import hook, tool, upstream, Message, UpstreamError\n"
+        + textwrap.dedent(text)
+    )
+
+
+async def test_a_virtual_tool_named_over_the_tool_name_cap_marks_the_proxy_unhealthy(
+    config_dir: ConfigDir,
+) -> None:
+    set_global_caps(config_dir, tool_name=8)
+    await synced(config_dir, issues())
+
+    async with running_daemon(config_dir) as daemon, daemon.client("/issues/mcp") as client:
+        before = sorted(t.name for t in await client.list_tools())
+
+        user_code(
+            config_dir,
+            """
+            @tool
+            def very_long_name() -> None:
+                \"\"\"Way over the tool name Cap.\"\"\"
+                return None
+            """,
+        )
+        await asyncio.sleep(0.01)  # a new mtime, on file systems that count in whole seconds
+        assert sorted(t.name for t in await client.list_tools()) == before
+        status = await daemon.status()
+
+    proxy = status["upstreams"][0]["proxies"][0]
+    assert proxy["health"] == "unhealthy"
+    assert "very_long_name" in proxy["detail"]
+    assert "8" in proxy["detail"]
+
+
+async def test_a_virtual_tool_named_exactly_the_tool_name_cap_is_exposed_uncut(
+    config_dir: ConfigDir,
+) -> None:
+    set_global_caps(config_dir, tool_name=8)
+    await synced(config_dir, issues())
+    user_code(
+        config_dir,
+        """
+        @tool
+        def eightchr() -> None:
+            \"\"\"Exactly the tool name Cap.\"\"\"
+            return None
+        """,
+    )
+
+    async with running_daemon(config_dir) as daemon, daemon.client("/issues/mcp") as client:
+        names = [t.name for t in await client.list_tools()]
+
+    assert "eightchr" in names
+    assert len("eightchr") == 8
+
+
+def test_a_virtual_tool_named_over_the_tool_name_cap_is_a_doctor_error(
+    config_dir: ConfigDir,
+) -> None:
+    config_dir.add_memory_upstream("issues", issues())
+    run_cli(config_dir, "upstream", "sync", "issues")
+    set_global_caps(config_dir, tool_name=8)
+    user_code(
+        config_dir,
+        """
+        @tool
+        def very_long_name() -> None:
+            \"\"\"Way over the tool name Cap.\"\"\"
+            return None
+        """,
+    )
+
+    doctor = run_cli(config_dir, "doctor")
+
+    assert doctor.exit_code == 1
+    assert "very_long_name" in doctor.output
+    assert "8" in doctor.output
