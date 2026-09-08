@@ -89,6 +89,14 @@ Claude Code is the first and best-integrated Profile, never a special case in th
   connection is let go, it is no longer listed, and its state directory is never written
   again, with a reconnect's rescan that finds the file gone dropping what it saw and removing
   anything it wrote. `upstream rm` signals a running Daemon, so this happens at once.
+- Settled in #67: an Upstream added while the Daemon runs (its directory and `upstream.toml`
+  appearing under `upstreams/`) is found on its first request, on `daemon status`, and on
+  `daemon reload`, and launched the same way one present at Daemon start is; a Proxy added
+  the same way to an Upstream already held is found and launched the same way, sharing its
+  Upstream's connection; a removed and re-added name is a new Upstream, not an edit of the
+  old one. The one hand-edit limit this leaves: an Upstream directory removed and re-created
+  by hand between two looks, with no `upstream rm` in between, is seen as an edit of the same
+  Upstream, since only the file's stamp is watched.
 - Health of every Upstream and Proxy is shown by `ls`, `daemon status`, and the dashboard.
 
 ### Catalog and Drift

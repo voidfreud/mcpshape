@@ -9,9 +9,11 @@ reads the answers back through the same models.
 
 Routes, all behind the bearer token when one is configured:
 
-- ``GET /api/status``: every Upstream and Proxy, with lifecycle state and health.
+- ``GET /api/status``: every Upstream and Proxy, with lifecycle state and health; an Upstream
+  or Proxy added while the Daemon runs is found and listed too (#67).
 - ``POST /api/reload``: every Upstream file is re-read, changed or not, and so is every
-  file of every Proxy left; answers the live state after.
+  file of every Proxy left; an Upstream or Proxy added while the Daemon runs is found the same
+  way; answers the live state after.
 - ``POST /api/shutdown``: what ``daemon down`` posts to.
 - ``GET /api/upstreams/<name>/catalog``: the accepted Catalog, or ``null`` before a scan.
 - ``GET /api/upstreams/<name>/drift``: the unreviewed Drift, or ``null``.
@@ -223,6 +225,13 @@ class ServedLike(Protocol):
     def proxies(self) -> Mapping[str, ProxyLike]: ...
     @property
     def retired(self) -> bool: ...
+
+
+class UpstreamsLike(Protocol):
+    """Every Upstream the Daemon holds, read at call time, and found on demand (#67)."""
+
+    def held(self) -> Mapping[str, ServedLike]: ...
+    async def lookup(self, name: str) -> ServedLike | None: ...
     async def refresh(self) -> None: ...
     async def reload(self) -> None: ...
 
@@ -315,13 +324,15 @@ class _Login:
 class Management:
     """Everything the API answers from: built by the Daemon, one per Daemon."""
 
-    served: Mapping[str, ServedLike]
+    upstreams: UpstreamsLike
     calls: CallLog
     state_dir: Path
     secrets: Secrets
     clock: Clock
     stop: asyncio.Event
-    _logins: dict[str, _Login] = field(default_factory=dict[str, _Login])
+    _logins: dict[str, tuple[ServedLike, _Login]] = field(
+        default_factory=dict[str, tuple[ServedLike, _Login]]
+    )
 
     def routes(self) -> list[BaseRoute]:
         return [
@@ -340,22 +351,24 @@ class Management:
 
     async def close(self) -> None:
         """Let go of whatever the API started and is still waiting on: pending logins."""
-        for pending in self._logins.values():
+        for _served, pending in self._logins.values():
             await pending.close()
 
     async def live(self) -> LiveState:
         """What every Upstream and Proxy is doing right now, each refreshed on the way.
 
-        Every Upstream file is looked at first, so one that was edited is in force and one
-        that is gone is retired before anything is reported; a retired Upstream is not listed
-        at all (#46, #62).
+        The registry is refreshed first, so an Upstream or Proxy added since is found (#67),
+        one that was edited is in force, and one that is gone is retired, before anything is
+        reported; a retired Upstream is not listed at all (#46, #62). A launching Upstream is
+        listed as it is, its connection ``cold`` until the launch starts it: nothing here
+        awaits ``ready()``, since the CLI reads live state on a short timeout and a launch can
+        take a full ``connect_timeout``.
         """
-        for served in self.served.values():
-            await served.refresh()
+        await self.upstreams.refresh()
         return LiveState(
             upstreams=[
                 await self._state_of(served)
-                for served in self.served.values()
+                for served in self.upstreams.held().values()
                 if not served.retired
             ],
             path=os.environ.get("PATH"),
@@ -397,13 +410,12 @@ class Management:
     async def _reload(self, _request: Request) -> JSONResponse:
         """Every file is re-read now, changed or not (#10, #46), and it says how it went.
 
-        Every Upstream file first, so an edit to it is in force and a removed Upstream is
-        retired, then every Proxy of what is left, and every connection is supervised again,
-        which is what brings back a keeper that gave up (#50) and nothing at all for an
-        Upstream whose keeper is still running.
+        Every Upstream file first, so an Upstream or Proxy added since is found (#67), an edit
+        to it is in force, and a removed Upstream is retired, then every Proxy of what is
+        left, and every connection is supervised again, which is what brings back a keeper
+        that gave up (#50) and nothing at all for an Upstream whose keeper is still running.
         """
-        for served in self.served.values():
-            await served.reload()
+        await self.upstreams.reload()
         return _answer(await self.live())
 
     async def _shutdown(self, _request: Request) -> JSONResponse:
@@ -469,7 +481,7 @@ class Management:
         return await self._for_upstream(request, self._login_state_of)
 
     async def _login_state_of(self, served: ServedLike) -> JSONResponse:
-        found = self._login_of(served)
+        found = await self._login_of(served)
         if found is None:
             return _refusal(_not_oauth(served.upstream), BAD_REQUEST)
         return _answer(found.state())
@@ -478,24 +490,35 @@ class Management:
         return await self._for_upstream(request, self._login_start_of)
 
     async def _login_start_of(self, served: ServedLike) -> JSONResponse:
-        found = self._login_of(served)
+        found = await self._login_of(served)
         if found is None:
             return _refusal(_not_oauth(served.upstream), BAD_REQUEST)
         return _answer(await found.start())
 
-    def _login_of(self, served: ServedLike) -> _Login | None:
+    async def _login_of(self, served: ServedLike) -> _Login | None:
+        """The cached login for ``served``, closing and replacing a stale one first.
+
+        A re-added Upstream is a new owner (#67): ``served`` is compared by identity to what
+        was cached, so a new owner gets a new ``_Login`` bound to it, and the old one, bound
+        to an owner nothing reaches any more, is closed.
+        """
         upstream = served.upstream
         transport = upstream.transport
         if not isinstance(transport, HttpTransport | SseTransport) or transport.auth != "oauth":
             return None
-        if upstream.name not in self._logins:
-            self._logins[upstream.name] = _Login(
-                upstream,
-                self.secrets,
-                Tokens(self.state_dir, upstream.name),
-                partial(self._logged_in, served),
-            )
-        return self._logins[upstream.name]
+        cached = self._logins.get(upstream.name)
+        if cached is not None and cached[0] is served:
+            return cached[1]
+        if cached is not None:
+            await cached[1].close()
+        login = _Login(
+            upstream,
+            self.secrets,
+            Tokens(self.state_dir, upstream.name),
+            partial(self._logged_in, served),
+        )
+        self._logins[upstream.name] = (served, login)
+        return login
 
     async def _logged_in(self, served: ServedLike) -> None:
         """Scan the Upstream a login just made reachable, and have it connect now."""
@@ -533,16 +556,15 @@ class Management:
     async def _for_upstream(
         self, request: Request, answer: Callable[[ServedLike], Awaitable[JSONResponse]]
     ) -> JSONResponse:
-        """Answer for the Upstream the path names, its file looked at first (#46).
+        """Answer for the Upstream the path names, found and re-read on the way (#46, #67).
 
-        One whose file is gone is retired, and is then as unknown here as a name nothing was
-        ever registered under (#62).
+        ``lookup`` finds one added since, refreshes one already held, and answers ``None`` for
+        one whose file is gone or never existed, which is as unknown here as a name nothing
+        was ever registered under (#62).
         """
         name: str = request.path_params["upstream"]
-        found = self.served.get(name)
-        if found is not None:
-            await found.refresh()
-        if found is None or found.retired:
+        found = await self.upstreams.lookup(name)
+        if found is None:
             return _refusal(f"no Upstream named {name!r}", NOT_FOUND)
         return await answer(found)
 

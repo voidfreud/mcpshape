@@ -7,7 +7,10 @@ Starting the Daemon rescans every Upstream, recording Drift rather than serving 
 One connection per Upstream is built here and shared by all of that Upstream's Proxies and
 every Client (story 74); one owner per Upstream holds it, warms it, times it, and lets it go,
 and re-reads the Upstream file the same way a Proxy re-reads its own, so an edit is in force
-on the next request and a removed Upstream is retired (#46, #62). The management API
+on the next request and a removed Upstream is retired (#46, #62). An Upstream or Proxy added
+while the Daemon runs is found on its first request, on ``daemon status``, and on ``daemon
+reload``, and launched the same way one present at Daemon start is; a removed and re-added
+name is a new Upstream (#67). The management API
 under ``/api`` (``mcpshape.api``) is the live state the CLI and the dashboard read: nothing
 there is configuration, which is read from files whether the Daemon runs or not. Every tool
 call through a Proxy goes to the call log, and the app log goes to the state directory, both
@@ -36,6 +39,7 @@ from mcpshape.calls import CallLog
 from mcpshape.config import (
     SETTINGS_FILE,
     UPSTREAM_FILE,
+    UPSTREAMS_DIR,
     ConfigError,
     DaemonSettings,
     load_proxy,
@@ -56,7 +60,7 @@ from mcpshape.proxy import Exposed, OverrideError, cap, expose
 from mcpshape.tokens import Tokens
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator
+    from collections.abc import AsyncGenerator, Mapping
     from pathlib import Path
 
     from starlette.routing import BaseRoute
@@ -201,6 +205,13 @@ class _Proxy:
         return self._owner.upstream
 
     async def start(self) -> None:
+        """Idempotent for the app currently held: a Proxy adopted during its Upstream's
+        launch is already held by the time the launch's own ``start()`` reaches it (#67).
+        ``_rebuild`` clears ``self._held`` first, so a changed server name still gets a
+        fresh hold on its new app.
+        """
+        if self._held is not None:
+            return
         self._held = _Held(self.app)
         await self._held.ready()
 
@@ -298,6 +309,7 @@ class _Proxy:
     async def _rebuild(self, exposed: Exposed) -> None:
         previous = self._held
         self.app = proxy_app(self._upstream, self._name, exposed, self._connection, self._calls)
+        self._held = None  # a new app needs its own hold; start()'s idempotency is per app
         await self.start()
         if previous is not None:
             await previous.close()
@@ -309,6 +321,7 @@ class _Proxy:
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] == "http":
+            await self._owner.ready()
             await self._owner.refresh()
             if self._owner.retired:
                 answer = JSONResponse(
@@ -396,10 +409,20 @@ class _Served:
         self._config_dir, self._state_dir = config_dir, state_dir
         self._name = upstream.name
         self._file = upstream_dir(config_dir, upstream.name) / UPSTREAM_FILE
-        self._sources = (self._file, config_dir / SETTINGS_FILE)
+        self._sources = (
+            self._file,
+            config_dir / SETTINGS_FILE,
+            upstream_dir(config_dir, upstream.name),
+        )
         self._stamp: tuple[_Stat, ...] | None = self._stamps()
         self._lock = asyncio.Lock()
         self._retiring: asyncio.Task[None] | None = None
+        self._secrets = secrets
+        self._clock = clock
+        self._running_clock = clock or SystemClock()
+        self._calls = calls
+        self._launched = asyncio.Event()
+        self._launch: asyncio.Task[None] | None = None
         self.upstream: Upstream = upstream
         self.global_caps: CapSettings = global_caps
         self.upstream_problem: str | None = None
@@ -419,14 +442,57 @@ class _Served:
     def _stamps(self) -> tuple[_Stat, ...]:
         return tuple(_stamp(path) for path in self._sources)
 
+    def launch(self) -> None:
+        """Start the launch task: the start-up scan, then ``start()`` (#67).
+
+        Needs a running loop, so this is called from the lifespan or from a request that
+        found the Upstream, never from ``build_app`` itself.
+        """
+        self._launch = asyncio.create_task(self._start_up())
+
+    async def _start_up(self) -> None:
+        """The Daemon's start-up scan for this one Upstream, then ``start()``.
+
+        What every Upstream held at Daemon start goes through in the lifespan; an Upstream
+        found later goes through the same thing, on its own task, so it is served the same
+        way (#67). Never lets an unexpected exception escape unnoticed.
+        """
+        try:
+            reached = await _bounded_rescan(
+                self._state_dir, self._secrets, self.upstream, self._running_clock
+            )
+            if not reached:
+                self.connection.unscanned()
+            if self.retired:  # checked right before starting; a retirement raced the scan
+                return
+            await self.start()
+        except Exception:
+            log.exception("Upstream %s failed to launch", self._name)
+        finally:
+            self._launched.set()
+
+    async def ready(self) -> None:
+        """Wait until the launch has reached the point ``start()`` was called, or given up."""
+        await self._launched.wait()
+
+    async def launched(self) -> None:
+        """Await the launch task itself, so an exception at Daemon start still propagates."""
+        if self._launch is not None:
+            await self._launch
+
     async def start(self) -> None:
-        """Start every Proxy, then supervise the connection: the Daemon's lifespan."""
+        """Start every Proxy, then supervise the connection: what the launch task calls."""
         for proxy in self.proxies.values():
             await proxy.start()
         await self.connection.start()
 
     async def stop(self) -> None:
         """Let the connection go, then stop every Proxy: the Daemon's lifespan again."""
+        launch, self._launch = self._launch, None
+        if launch is not None and not launch.done():
+            launch.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await launch
         await self._settle_retirement()
         await self.connection.stop()
         for proxy in self.proxies.values():
@@ -434,6 +500,8 @@ class _Served:
 
     async def reload(self) -> None:
         """Re-read the Upstream file now, changed or not, and reload what is left of it."""
+        if not self._launched.is_set():  # still launching: its own read covers this
+            return
         self._stamp = None
         await self.refresh()
         if self.retired:
@@ -444,6 +512,8 @@ class _Served:
 
     async def refresh(self) -> None:
         """Re-read the Upstream file when it changed since the last look, on every request."""
+        if not self._launched.is_set():  # still launching: its own read covers this
+            return
         async with self._lock:
             if self.retired:
                 return
@@ -469,6 +539,7 @@ class _Served:
                 return
             previous = self.upstream
             self._apply(upstream, settings.caps)
+            await self._adopt()
             if (
                 _reached_by(upstream) != _reached_by(previous)
                 or upstream.lifecycle != previous.lifecycle
@@ -483,6 +554,41 @@ class _Served:
         if recovered or capped:
             for proxy in self.proxies.values():
                 proxy.derive_again()
+
+    async def _adopt(self) -> None:
+        """Build and start a Proxy for every name the Upstream now lists that is not held.
+
+        The Upstream's own directory is one of ``_sources`` (#67), so a Proxy file appearing
+        changes the directory's stamp and is seen by the next ``refresh()``, right after the
+        Upstream this re-read just derived is applied.
+        """
+        for name in self.upstream.proxies:
+            if name not in self.proxies:
+                await self._adopt_one(name)
+
+    async def _adopt_one(self, name: str) -> _Proxy:
+        proxy = _Proxy(self._config_dir, self._state_dir, self, name, self._calls)
+        self.proxies[name] = proxy
+        await proxy.start()
+        log.info("Upstream %s: adopted new Proxy %s", self._name, name)
+        return proxy
+
+    async def proxy(self, name: str) -> _Proxy | None:
+        """The held Proxy called ``name``, adopting it now if its file appeared since (#67).
+
+        The route's fallback so a request never depends on the directory stamp alone: a Proxy
+        added and requested before any other look at the Upstream is still found.
+        """
+        held = self.proxies.get(name)
+        if held is not None:
+            return held
+        if not proxy_file(self._config_dir, self._name, name).is_file():
+            return None
+        async with self._lock:
+            held = self.proxies.get(name)
+            if held is not None:
+                return held
+            return await self._adopt_one(name)
 
     async def on_catalog(self, observed: Catalog) -> None:
         """Keep what a reconnected Upstream advertises, unless the Upstream is no longer there.
@@ -511,7 +617,13 @@ class _Served:
         self._retiring = asyncio.create_task(self._retire())
 
     async def _retire(self) -> None:
-        """Stop holding an Upstream whose file is gone. Idempotent (#62)."""
+        """Stop holding an Upstream whose file is gone. Idempotent (#62).
+
+        Waits for the launch first, so nothing is started after retirement (#67): the launch
+        checks ``retired`` right before its own ``start()`` and skips it, but only once it
+        has reached that check.
+        """
+        await self._launched.wait()
         if self.retired:
             return
         self.retired = True
@@ -552,6 +664,164 @@ async def _bounded_rescan(
         return False
 
 
+class _ProxyRoute:
+    """Resolves ``/{upstream}`` and ``/{upstream}/{proxy}`` to their owner at request time.
+
+    Routes are fixed at build; the Upstreams and Proxies behind them are not. Mounting one of
+    these per shape, instead of one Mount per Proxy, is what lets an Upstream or Proxy added
+    while the Daemon runs be served without a restart (#67): the owner and the Proxy are found
+    fresh on every request instead of once when the app was built.
+    """
+
+    def __init__(self, upstreams: _Upstreams, *, default: bool) -> None:
+        self._upstreams = upstreams
+        self._default = default
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        params: dict[str, str] = scope["path_params"]
+        name = params["upstream"]
+        proxy_name = DEFAULT_PROXY_NAME if self._default else params["proxy"]
+        owner = await self._upstreams.lookup(name)
+        if owner is None:
+            await _not_found(f"no Upstream named {name!r}", scope, receive, send)
+            return
+        await owner.ready()
+        if owner.retired:
+            await _not_found(f"no Upstream named {name!r}", scope, receive, send)
+            return
+        proxy = await owner.proxy(proxy_name)
+        if proxy is None:
+            await _not_found(f"no Proxy {name}/{proxy_name}", scope, receive, send)
+            return
+        await proxy(scope, receive, send)
+
+
+async def _not_found(message: str, scope: Scope, receive: Receive, send: Send) -> None:
+    response = JSONResponse({"error": message}, status_code=404)
+    await response(scope, receive, send)
+
+
+class _Upstreams:
+    """Every Upstream the Daemon holds, by name, found at build and on demand (#67).
+
+    Backs the parameterised routes ``_ProxyRoute`` resolves through, and what ``Management``
+    reads the live state from. An Upstream added while the Daemon runs is found the same way
+    one held already is re-read: its directory's ``upstream.toml`` appearing is what
+    ``lookup``, ``refresh``, and ``reload`` all look for, under the lock, before adding it. A
+    removed and re-added name replaces its retired owner with a fresh one: a fresh connection,
+    a first scan, not Drift against what the old owner last saw.
+    """
+
+    def __init__(  # noqa: PLR0913, PLR0917  # every one of these is state an owner needs
+        self,
+        config_dir: Path,
+        state_dir: Path,
+        secrets: Secrets,
+        clock: Clock | None,
+        calls: CallLog,
+        held: dict[str, _Served],
+    ) -> None:
+        self._config_dir, self._state_dir = config_dir, state_dir
+        self._secrets, self._clock, self._calls = secrets, clock, calls
+        self._lock = asyncio.Lock()
+        self._held = held
+
+    def held(self) -> Mapping[str, _Served]:
+        """What is held now, retired owners included: what ``Management`` filters."""
+        return self._held
+
+    async def lookup(self, name: str) -> _Served | None:
+        """The Upstream called ``name``, adopting it now if its directory appeared since.
+
+        The route's fallback so a request never depends on a discovery pass having run: a
+        held, live owner is refreshed and returned; otherwise the file is looked for and, if
+        there, added, replacing a retired owner of the same name with a fresh one. A retired
+        owner with no file for its name is left in place, unlisted (#67).
+        """
+        owner = self._held.get(name)
+        if owner is not None and not owner.retired:
+            await owner.refresh()
+            if not owner.retired:
+                return owner
+        async with self._lock:
+            owner = self._held.get(name)  # another request may have replaced it meanwhile
+            if owner is None or owner.retired:
+                if not (upstream_dir(self._config_dir, name) / UPSTREAM_FILE).is_file():
+                    return None
+                if owner is not None:
+                    await owner.stop()  # idempotent: its connection and Proxies are stopped
+                return await self._add(name)
+            return owner
+
+    async def _add(self, name: str) -> _Served | None:
+        """Build, hold, and launch a fresh owner for ``name``, or say why it cannot be read."""
+        settings = load_settings(self._config_dir)
+        try:
+            upstream = load_upstream(self._config_dir, name, settings.lifecycle)
+        except ConfigError as exc:
+            log.warning("Upstream %s was found but cannot be read: %s", name, exc)
+            return None
+        owner = _Served(
+            self._config_dir,
+            self._state_dir,
+            upstream,
+            settings.caps,
+            self._secrets,
+            self._clock,
+            self._calls,
+        )
+        self._held[name] = owner
+        owner.launch()
+        return owner
+
+    async def _discover(self) -> None:
+        """Add an owner for every Upstream directory not already held live (#67)."""
+        upstreams_dir = self._config_dir / UPSTREAMS_DIR
+        if not upstreams_dir.is_dir():
+            return
+        for path in sorted(upstreams_dir.iterdir()):
+            if not (path / UPSTREAM_FILE).is_file():
+                continue
+            name = path.name
+            owner = self._held.get(name)
+            if owner is not None and not owner.retired:
+                continue
+            async with self._lock:
+                owner = self._held.get(name)
+                if owner is not None and not owner.retired:
+                    continue
+                if owner is not None:
+                    await owner.stop()
+                await self._add(name)
+
+    async def refresh(self) -> None:
+        """Discover, then refresh every held owner: what ``Management.live()`` calls."""
+        await self._discover()
+        for owner in list(self._held.values()):
+            await owner.refresh()
+
+    async def reload(self) -> None:
+        """Discover, then reload every held owner: what ``daemon reload`` calls."""
+        await self._discover()
+        for owner in list(self._held.values()):
+            await owner.reload()
+
+    async def start(self) -> None:
+        """Launch every owner held at build, and wait for every launch: the Daemon's lifespan.
+
+        Awaiting the launch task itself, not just ``ready()``, is what lets an exception at
+        Daemon start still propagate as it did before #67.
+        """
+        for owner in self._held.values():
+            owner.launch()
+        await asyncio.gather(*(owner.launched() for owner in self._held.values()))
+
+    async def stop(self) -> None:
+        """Stop every held owner, in order: the Daemon's lifespan again."""
+        for owner in self._held.values():
+            await owner.stop()
+
+
 @dataclass(frozen=True)
 class DaemonApp:
     """Every ASGI app the Daemon serves: the main one, and one per Proxy port override.
@@ -580,25 +850,26 @@ def build_app(
     request to any of them.
     """
     running_clock = clock or SystemClock()
-    upstreams = load_upstreams(config_dir)
+    loaded = load_upstreams(config_dir)  # raises on a broken file, so the build still fails
     settings = load_settings(config_dir)
     configure_app_log(state_dir, settings.log.level, settings.log.max_bytes)
     calls = CallLog(RotatingFile(call_log_file(state_dir), settings.log.max_bytes))
     secrets = secrets_for(config_dir)
-    served = {
+    held = {
         upstream.name: _Served(
             config_dir, state_dir, upstream, settings.caps, secrets, clock, calls
         )
-        for upstream in upstreams
+        for upstream in loaded
     }
     proxies = {
         (name, proxy_name): proxy
-        for name, owner in served.items()
+        for name, owner in held.items()
         for proxy_name, proxy in owner.proxies.items()
     }
+    upstreams = _Upstreams(config_dir, state_dir, secrets, clock, calls, held)
     stop = asyncio.Event()
     management = Management(
-        served=served,
+        upstreams=upstreams,
         calls=calls,
         state_dir=state_dir,
         secrets=secrets,
@@ -607,35 +878,20 @@ def build_app(
     )
     routes: list[BaseRoute] = management.routes()
     routes += [
-        Mount(f"/{name}/{proxy_name}", app=proxy) for (name, proxy_name), proxy in proxies.items()
-    ]
-    routes += [
-        Mount(f"/{name}", app=proxy)
-        for (name, proxy_name), proxy in proxies.items()
-        if proxy_name == DEFAULT_PROXY_NAME
+        Mount("/{upstream}/{proxy}", app=_ProxyRoute(upstreams, default=False)),
+        Mount("/{upstream}", app=_ProxyRoute(upstreams, default=True)),
     ]
 
     @contextlib.asynccontextmanager
     async def lifespan(_app: Starlette) -> AsyncGenerator[None]:
-        reached = await asyncio.gather(
-            *(
-                _bounded_rescan(state_dir, secrets, upstream, running_clock)
-                for upstream in upstreams
-            )
-        )
-        for upstream, scanned in zip(upstreams, reached, strict=True):
-            if not scanned:
-                # its first connect looks instead (#57)
-                served[upstream.name].connection.unscanned()
+        await upstreams.start()
         async with contextlib.AsyncExitStack() as stack:
             stack.push_async_callback(management.close)
-            for owner in served.values():
-                await owner.start()
-                stack.push_async_callback(owner.stop)
+            stack.push_async_callback(upstreams.stop)
             yield
 
     main = Starlette(routes=routes, lifespan=lifespan, middleware=_middleware(token))
-    ports = _proxy_ports(config_dir, upstreams)
+    ports = _proxy_ports(config_dir, loaded)
     extra = {port: _authed(proxies[key], token) for key, port in ports.items()}
     return DaemonApp(main=main, extra=extra, stop=stop)
 
