@@ -382,6 +382,34 @@ async def test_an_after_hook_returning_none_leaves_an_upstream_error_as_is(
     assert "boom" in error_text(result)
 
 
+async def test_a_virtual_tool_returning_an_error_result_reaches_its_after_hook_as_one(
+    config_dir: ConfigDir,
+) -> None:
+    server, _ = tracker()
+    await synced(config_dir, server)
+    user_code(
+        config_dir,
+        """
+        from mcpshape import ToolResult
+
+        @tool
+        def refuse(reason: str) -> str:
+            \"\"\"Always refuses.\"\"\"
+            return ToolResult(content=[{"type": "text", "text": reason}], is_error=True)
+
+        @hook.after("refuse")
+        def soften(call, result):
+            result.text = f"is_error={result.is_error}: {result.text}"
+            return result
+        """,
+    )
+
+    async with running_daemon(config_dir) as daemon, daemon.client("/issues/mcp") as client:
+        result = await client.call_tool("refuse", {"reason": "no"}, raise_on_error=False)
+
+    assert error_text(result) == "is_error=True: no"
+
+
 async def test_a_short_circuited_result_reaches_the_after_hook_as_a_success(
     config_dir: ConfigDir,
 ) -> None:
@@ -1082,6 +1110,11 @@ async def test_editing_a_helper_alone_changes_both_proxies_on_the_next_request(
             await client.call_tool("create_issue", {"title": "C"})
         async with daemon.client("/issues/review/mcp") as client:
             await client.call_tool("create_issue", {"title": "D"})
+
+        (config_dir.path / "upstreams" / "issues" / "helpers.py").unlink()
+        async with daemon.client("/issues/mcp") as client:
+            gone = await client.call_tool("create_issue", {"title": "E"}, raise_on_error=False)
+        assert re.search(r"Proxy issues/default is unhealthy: .*helpers", error_text(gone))
 
     assert received == [
         ("create_issue", {"title": "A", "labels": ["v1"]}),

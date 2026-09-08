@@ -59,7 +59,8 @@ data for Client Profiles. Checked 2026-09-06/07 against primary documentation.
 - Codex CLI: `~/.codex/config.toml`, `[mcp_servers.<name>]`.
 - Goose: YAML `extensions:` block. Cline: `cline_mcp_settings.json`.
   Continue: `config.yaml`. OpenCode: `opencode.json`.
-- Checked 2026-09-08, primary docs, for ticket #23:
+- Checked 2026-09-08 for ticket #23; the first two are primary-doc facts, the last two are
+  mcpshape's own decisions, recorded here so the Profiles and the scan agree:
   - Claude Code's `local` scope nests per-project servers in the same `~/.claude.json` as the
     `user` scope, under `projects.<absolute project dir>.mcpServers`, one map per project
     directory, sibling to the top-level `mcpServers` the `user` scope writes.

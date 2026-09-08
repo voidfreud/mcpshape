@@ -56,6 +56,7 @@ import json
 import logging
 import re
 import sys
+import threading
 import traceback
 from collections.abc import Callable
 from contextlib import contextmanager
@@ -488,6 +489,11 @@ def tool(
 MODULE_PREFIX = "mcpshape_user."
 """User files are imported as ``mcpshape_user.<upstream>_<proxy>``, replaced on every load."""
 
+_loading_lock = threading.Lock()
+"""One load at a time, process-wide: a load edits ``sys.path``, ``sys.modules``, and
+``sys.dont_write_bytecode`` for its duration, and a second thread (``doctor`` under the test
+runner, next to a running Daemon) must not see them half-edited."""
+
 
 def load_user_code(path: Path, label: str) -> UserCode:
     """Import the Proxy ``label``'s Python file at ``path``; nothing there means no user code.
@@ -519,19 +525,20 @@ def load_user_code(path: Path, label: str) -> UserCode:
     token = _loading.set(code)
     sys.modules[name] = module
     upstream_dir = str(path.parent)
-    _drop_stale_helpers(path.parent.parent.resolve())
-    sys.path.insert(0, upstream_dir)
-    dont_write_bytecode, sys.dont_write_bytecode = sys.dont_write_bytecode, True
-    try:
-        spec.loader.exec_module(module)
-    except Exception as exc:
-        sys.modules.pop(name, None)
-        formatted = "".join(traceback.format_exception(exc))
-        raise UserCodeError(_summary(path, exc), formatted) from exc
-    finally:
-        sys.path.remove(upstream_dir)
-        sys.dont_write_bytecode = dont_write_bytecode
-        _loading.reset(token)
+    with _loading_lock:
+        _drop_stale_helpers(path.parent.parent.resolve())
+        sys.path.insert(0, upstream_dir)
+        dont_write_bytecode, sys.dont_write_bytecode = sys.dont_write_bytecode, True
+        try:
+            spec.loader.exec_module(module)
+        except Exception as exc:
+            sys.modules.pop(name, None)
+            formatted = "".join(traceback.format_exception(exc))
+            raise UserCodeError(_summary(path, exc), formatted) from exc
+        finally:
+            sys.path.remove(upstream_dir)
+            sys.dont_write_bytecode = dont_write_bytecode
+            _loading.reset(token)
     return code
 
 

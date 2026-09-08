@@ -177,7 +177,7 @@ class _Link:
             msg = "the Upstream did not answer a ping"
             raise UpstreamTargetError(msg)
 
-    def died(self, exc: BaseException) -> bool:
+    def is_dead(self, exc: BaseException) -> bool:
         """Whether ``exc`` means this open connection is dead, not something the Upstream said.
 
         An error the Upstream itself answered leaves the connection standing: a JSON-RPC error
@@ -250,14 +250,15 @@ class UpstreamConnection:
             raise ToolError(str(exc), log_level=logging.WARNING) from exc
         return self._link.client
 
-    async def died(self, exc: BaseException) -> str | None:
+    async def gone(self, exc: BaseException) -> str | None:
         """The Upstream's message when ``exc`` means the open connection is dead, else nothing.
 
         A call is what finds a lazy Upstream gone, since nothing pings one; telling the
         lifecycle here is what moves it to ``unavailable`` at once and starts the backoff,
-        instead of leaving the transport's own words to reach the model.
+        instead of leaving the transport's own words to reach the model. Only what the
+        forward to the Upstream raised is judged here: a Hook's own exception never is.
         """
-        if not self._link.died(exc):
+        if not self._link.is_dead(exc):
             return None
         await self._connection.lost(str(exc) or type(exc).__name__)
         return self._lifecycle.unavailable_message
@@ -320,7 +321,21 @@ async def _concealing(
         yield
     except Exception as exc:  # noqa: BLE001  # whatever it was, its text must not leak
         message = secrets.concealed(str(exc) or type(exc).__name__, transport)
-        raise UpstreamTargetError(tokens.concealed(message) if tokens else message) from None
+        raise _refusal_kind(exc)(tokens.concealed(message) if tokens else message) from None
+
+
+def _refusal_kind(exc: BaseException) -> type[UpstreamTargetError]:
+    """The type ``_concealing`` re-raises as: the refusal's own where one caused the failure.
+
+    A ``LoginNeededError`` is raised inside the SDK's auth flow and comes out wrapped in the
+    client's own connect error, so it is looked for down the cause chain, not only on top.
+    """
+    seen: BaseException | None = exc
+    while seen is not None:
+        if isinstance(seen, LoginNeededError):
+            return LoginNeededError
+        seen = seen.__cause__ or seen.__context__
+    return UpstreamTargetError
 
 
 async def _catalog_of(client: Client[Any]) -> Catalog:
@@ -426,7 +441,7 @@ class _Handle:
 
     async def _failure(self, exc: MCPError) -> Exception:
         """What ``exc`` becomes: the Upstream's message when it is dead, else what it said."""
-        message = await self._connection.died(exc)
+        message = await self._connection.gone(exc)
         if message is None:
             return UpstreamError(exc.error.message)
         return ToolError(message, log_level=logging.WARNING)
@@ -466,26 +481,49 @@ class _Runtime:
         if self.failure is not None:
             msg = f"Proxy {self.label} is unhealthy: {self.failure}"
             raise error(msg, log_level=logging.WARNING)
-        with hooks.bound(self.handle):
+
+        async def forwarding(call: Call) -> R:
             try:
-                return await hooks.run_call(self.code, call, forward, of, cap, check)
+                return await forward(call)
             except FastMCPError:
                 raise
             except Exception as exc:
-                away = await self.connection.died(exc)
-                reason = away or str(exc) or type(exc).__name__
-                raise error(reason, log_level=logging.WARNING) from exc
+                away = await self.connection.gone(exc)
+                if away is None:
+                    raise
+                raise error(away, log_level=logging.WARNING) from exc
+
+        with hooks.bound(self.handle):
+            try:
+                return await hooks.run_call(self.code, call, forwarding, of, cap, check)
+            except FastMCPError:
+                raise
+            except Exception as exc:
+                raise error(str(exc) or type(exc).__name__, log_level=logging.WARNING) from exc
 
 
-def _capped_output(ceiling: int | None) -> Callable[[hooks.ToolResult], hooks.ToolResult] | None:
-    """What ``_Runtime.run`` cuts a tool's answer with, or ``None`` before a Cap is known."""
+def _capped_output(
+    ceiling: int | None, schema: dict[str, Any] | None
+) -> Callable[[hooks.ToolResult], hooks.ToolResult] | None:
+    """What ``_Runtime.run`` cuts a tool's answer with, or ``None`` before a Cap is known.
+
+    The Cap ceilings the text the model reads. Structured content is the machine-readable
+    answer a Client checks against the tool's output schema, so it stays whole where the
+    schema is its own: cut JSON would fit no schema, and the Client would refuse the whole
+    call. Only where the schema wraps one string is the structured content that text again,
+    and then it follows the cut.
+    """
     if ceiling is None:
         return None
 
     def apply(result: hooks.ToolResult) -> hooks.ToolResult:
         cut = cut_output(result.text, ceiling)
-        if cut != result.text:
-            result.text = cut
+        if cut == result.text:
+            return result
+        structured = result.structured
+        result.text = cut
+        if not _wraps_string(schema):
+            result.structured = structured
         return result
 
     return apply
@@ -520,7 +558,7 @@ class _CuratedTool(ProxyTool):
             forward,
             hooks.ToolResult.of,
             ToolError,
-            _capped_output(self._output_cap),
+            _capped_output(self._output_cap, self.output_schema),
             _schema_check(self._origin, self.output_schema),
         )
         if result.is_error:
@@ -635,9 +673,9 @@ class _VirtualTool(FunctionTool):
         run_body = super().run
 
         async def forward(call: Call) -> hooks.ToolResult:
-            # A Virtual Tool's body raising is an exception here, never an is_error result: it
-            # has no Upstream result to carry one, so it propagates and skips the after Hooks
-            # like any other raise, unlike a Catalog tool's Upstream error.
+            # A Virtual Tool's body raising is an exception here, which propagates and skips
+            # the after Hooks like any other raise. A body that returns a ToolResult marked
+            # is_error instead hands the after Hooks an error result, as an Upstream does.
             try:
                 raw = await run_body(call.args)
             except FastMCPError:
@@ -645,7 +683,9 @@ class _VirtualTool(FunctionTool):
             except Exception:
                 log.warning("Virtual Tool %s raised", self.name, exc_info=True)
                 raise
-            return _tool_result_of(raw.content, raw.structured_content)
+            result = _tool_result_of(raw.content, raw.structured_content)
+            result.is_error = raw.is_error
+            return result
 
         call = Call("tool", self.name, dict(arguments))
         result = await self._runtime.run(
@@ -653,14 +693,20 @@ class _VirtualTool(FunctionTool):
             forward,
             hooks.ToolResult.of,
             ToolError,
-            _capped_output(self._output_cap),
+            _capped_output(self._output_cap, self.output_schema),
             _schema_check(self.name, self.output_schema),
         )
+        if result.is_error:
+            raise ToolError(result.text or "the Virtual Tool reported an error")
         return _to_tool_result(result, self.output_schema)
 
     def convert_result(self, raw_value: Any) -> ToolResult:  # noqa: ANN401  # whatever the user returned
+        """A ``ToolResult`` the body built keeps its ``is_error``: FastMCP's own carries one,
+        so the mark survives the edge and the ``after`` Hooks see it, as for a Catalog tool."""
         if isinstance(raw_value, hooks.ToolResult):
-            return _to_tool_result(raw_value, self.output_schema)
+            converted = _to_tool_result(raw_value, self.output_schema)
+            converted.is_error = raw_value.is_error
+            return converted
         return super().convert_result(raw_value)
 
 
@@ -684,14 +730,25 @@ WRAPPED = "x-fastmcp-wrap-result"
 """FastMCP's mark on the output schema of a tool whose one value it wraps as ``result``."""
 
 
+def _wrapped_property(schema: dict[str, Any] | None) -> dict[str, Any] | None:
+    """The schema of the one value a wrapping output schema holds, or ``None`` for any other."""
+    if not schema or WRAPPED not in schema:
+        return None
+    properties = cast("dict[str, dict[str, Any]]", schema.get("properties") or {})
+    return properties.get("result") or {}
+
+
+def _wraps_string(schema: dict[str, Any] | None) -> bool:
+    wrapped = _wrapped_property(schema)
+    return wrapped is not None and wrapped.get("type") == "string"
+
+
 def _structured(result: hooks.ToolResult, schema: dict[str, Any] | None) -> dict[str, Any] | None:
     """The structured content to send: the user's, else what the output schema lets us derive."""
     if result.structured is not None or not schema:
         return result.structured
     text = result.text
-    if WRAPPED in schema:
-        properties = cast("dict[str, dict[str, Any]]", schema.get("properties") or {})
-        wrapped = properties.get("result") or {}
+    if (wrapped := _wrapped_property(schema)) is not None:
         return {"result": text if wrapped.get("type") == "string" else _loaded(text, text)}
     loaded = _loaded(text, None)
     return cast("dict[str, Any]", loaded) if isinstance(loaded, dict) else None
@@ -736,9 +793,7 @@ def _schema_check(
 
 def _schema_expectation(schema: dict[str, Any]) -> str:
     """What the schema wants, in the glossary's words, for the tool error message."""
-    if WRAPPED in schema:
-        properties = cast("dict[str, dict[str, Any]]", schema.get("properties") or {})
-        wrapped = properties.get("result") or {}
+    if (wrapped := _wrapped_property(schema)) is not None:
         return f"a single {wrapped.get('type', 'value')} value"
     required = cast("list[str]", schema.get("required") or [])
     return f"a JSON object with {', '.join(required)}" if required else "a JSON object"
@@ -960,12 +1015,18 @@ class OAuthError(Exception):
     """A login with the provider could not be completed. Names endpoints, never a token."""
 
 
-def login_message(upstream: str) -> str:
-    """Why an OAuth Upstream could not be reached, and the one command that fixes it."""
-    return (
-        f"the Upstream {upstream} has no usable OAuth token, so nothing was sent; "
-        f"log in with: mcpshape upstream sync {upstream}"
-    )
+class LoginNeededError(UpstreamTargetError):
+    """An OAuth Upstream cannot be reached until the user logs in again, from the CLI.
+
+    Its own type, so ``upstream sync`` can tell this failure, the one a new login fixes,
+    from every other reason a scan can fail; ``_concealing`` keeps the type.
+    """
+
+    def __init__(self, upstream: str) -> None:
+        super().__init__(
+            f"the Upstream {upstream} has no usable OAuth token, so nothing was sent; "
+            f"log in with: mcpshape upstream sync {upstream}"
+        )
 
 
 class _TokenStorage(TokenStorage):
@@ -1055,7 +1116,7 @@ def _stored_auth(remote: HttpTransport | SseTransport, tokens: Tokens | None) ->
         msg = "an OAuth Upstream is reached from where no stored login can be read"
         raise UpstreamTargetError(msg)
     if not tokens.stored():
-        raise UpstreamTargetError(login_message(tokens.upstream))
+        raise LoginNeededError(tokens.upstream)
     redirect, callback = _refusing(tokens.upstream)
     return _provider(remote, tokens, NO_REDIRECT, redirect, callback)
 
@@ -1064,10 +1125,10 @@ def _refusing(upstream: str) -> tuple[_Redirect, _Callback]:
     """Handlers that say what to run instead of opening a browser nobody is sitting at."""
 
     async def redirect(_url: str) -> None:
-        raise UpstreamTargetError(login_message(upstream))
+        raise LoginNeededError(upstream)
 
     async def callback() -> AuthorizationCodeResult:
-        raise UpstreamTargetError(login_message(upstream))
+        raise LoginNeededError(upstream)
 
     return redirect, callback
 

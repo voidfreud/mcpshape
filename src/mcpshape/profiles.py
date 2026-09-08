@@ -370,6 +370,12 @@ CODEX_CLI = Profile(
     notes=("Recommends that the first 512 characters of instructions be self-contained.",),
 )
 
+YAML_NOTE = (
+    "YAML: mcpshape carries no YAML dependency for a listing, so config.yaml is reported as "
+    "found and unread, by name."
+)
+"""What upstream scan says of a YAML Client's file, the same for every one (#23)."""
+
 GOOSE = Profile(
     slug="goose",
     name="Goose",
@@ -381,12 +387,7 @@ GOOSE = Profile(
     http_fields={"type": "streamable_http", "enabled": True},
     name_field="name",
     limits=Limits(tool_timeout_seconds=300, source=DOC),
-    notes=(
-        (
-            "YAML: mcpshape carries no YAML dependency for a listing, so config.yaml is "
-            "reported as found and unread, by name."
-        ),
-    ),
+    notes=(YAML_NOTE,),
 )
 
 CLINE = Profile(
@@ -411,11 +412,11 @@ CONTINUE = Profile(
     name_field="name",
     http_fields={"type": "streamable-http"},
     notes=(
+        YAML_NOTE,
         (
-            "YAML: mcpshape carries no YAML dependency for a listing, so config.yaml is "
-            "reported as found and unread, by name. Its list-shaped mcpServers is also the "
-            "only reason discovery.py's list entry shape exists; it stays unreachable until a "
-            "list-shaped Client with a JSON or TOML file exists."
+            "Its list-shaped mcpServers is the only reason discovery.py's list entry shape "
+            "exists; it stays unreachable until a list-shaped Client with a JSON or TOML file "
+            "exists."
         ),
     ),
 )

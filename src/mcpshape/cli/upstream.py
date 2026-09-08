@@ -11,7 +11,7 @@ import typer
 
 from mcpshape import catalog, config
 from mcpshape import tokens as token_store
-from mcpshape.adapters.fastmcp import login, login_message, scan
+from mcpshape.adapters.fastmcp import LoginNeededError, login, scan
 from mcpshape.cli import scan as scanning
 from mcpshape.cli.common import (
     HELP_OPTIONS,
@@ -221,7 +221,7 @@ def scanned(
     try:
         return _scan(config_dir, upstream, tokens)
     except Exception as exc:  # noqa: BLE001  # however the Upstream failed, the user gets the why
-        if login_message(upstream.name) not in str(exc):
+        if not isinstance(exc, LoginNeededError):
             fail(f"cannot scan {upstream.name}: {exc}")
         console.print(f"[yellow]![/] {upstream.name}: {exc}")
     tokens.forget()
