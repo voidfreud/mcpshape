@@ -117,7 +117,12 @@ if marked(GROWN):
         return a - b
 
 
+STDERR_LINE = "child: starting up"
+"""What the child writes to stderr as it starts, for the app log to show (#42)."""
+
+
 def main() -> None:
+    print(STDERR_LINE, file=sys.stderr, flush=True)  # noqa: T201  # the point is stderr
     if spawns := os.environ.get(SPAWNS):
         with Path(spawns).open("a") as log:
             log.write(f"{os.getpid()}\n")

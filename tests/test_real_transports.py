@@ -15,6 +15,7 @@ import os
 import signal
 from typing import TYPE_CHECKING
 
+from fastmcp import Client
 from mcp_types import TextContent
 
 from tests.support import child_upstream
@@ -23,6 +24,7 @@ from tests.support.seam import (
     restartable_upstream,
     run_cli,
     running_daemon,
+    serving_daemon,
     serving_upstream,
     until,
 )
@@ -225,6 +227,42 @@ async def test_a_connect_given_up_on_leaves_no_child_process_behind(
         )
 
 
+async def test_what_a_child_writes_to_stderr_reaches_the_app_log_under_its_name(
+    config_dir: ConfigDir,
+) -> None:
+    """#42: one line per line, tagged with the Upstream's name, and ``daemon logs`` shows it."""
+    config_dir.add_stdio_upstream(
+        "child", child_upstream.command(), child_upstream.args(), env=child_upstream.env()
+    )
+
+    async with serving_daemon(config_dir) as url:
+        async with Client(f"{url}/child/mcp") as client:
+            assert (await client.call_tool("add", {"a": 1, "b": 1})).data == 2
+        app_log = config_dir.state / "log" / "daemon.log"
+        await until(
+            lambda: child_upstream.STDERR_LINE in app_log.read_text(),
+            "the child's stderr line in the app log",
+        )
+        shown = await asyncio.to_thread(run_cli, config_dir, "daemon", "logs")
+
+    assert f"mcpshape.upstream: child: {child_upstream.STDERR_LINE}" in app_log.read_text()
+    assert child_upstream.STDERR_LINE in shown.stdout
+
+
+async def test_upstream_sync_scans_an_stdio_upstream_under_the_runner(
+    config_dir: ConfigDir,
+) -> None:
+    """#42: the child's stderr no longer needs the runner's streams to have a file descriptor."""
+    config_dir.add_stdio_upstream(
+        "child", child_upstream.command(), child_upstream.args(), env=child_upstream.env()
+    )
+
+    scanned = await cli(config_dir, "upstream", "sync", "child")
+
+    assert "Scanned" in scanned.output
+    assert "4 tools" in scanned.output
+
+
 async def test_a_reconnect_looks_again_over_the_connection_it_already_has(
     config_dir: ConfigDir, tmp_path: Path
 ) -> None:
@@ -258,9 +296,8 @@ async def test_a_reconnect_looks_again_over_the_connection_it_already_has(
 
         assert len(child_upstream.spawned(spawns)) == 3, "the rescan opened a second connection"
 
-    pending = drift_file(config_dir, "child")
-    assert pending is not None
-    assert sorted(pending["tools"]) == ["add", "die", "env_value", "pid", "subtract"]
+    review = await cli(config_dir, "upstream", "sync", "child")
+    assert "+ tool subtract" in review.output
 
 
 async def test_an_stdio_upstream_that_dies_mid_call_is_answered_with_the_message(
@@ -375,6 +412,10 @@ async def test_a_lazy_url_upstream_that_dies_while_connected_is_noticed_by_the_n
             assert message in error_text(failed)
             assert await daemon.upstream_state("calc") == "unavailable"
             assert "connection dead" in await upstream_error(await daemon.status(), "calc")
+            app_log = (config_dir.state / "log" / "daemon.log").read_text()
+            assert "Upstream calc is unavailable (a call found the connection dead" in app_log
+            assert "Upstream calc let its dead connection go: " in app_log
+            assert "did not close cleanly" not in app_log, "a dead close was news (#52)"
 
             await served.revive()
             await clock.advance(PAST_THE_BACKOFF)

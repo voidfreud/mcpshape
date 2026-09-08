@@ -6,7 +6,6 @@ These tests talk to FastMCP directly, on purpose. Everything else goes through t
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
 import os
 import threading
@@ -500,6 +499,28 @@ async def test_a_borrowed_client_reports_a_failed_or_unknown_call_as_an_error_re
 # --- what real Upstream transports rely on ---------------------------------------------------
 
 
+async def test_a_stdio_transport_hands_its_child_the_log_file_as_stderr() -> None:
+    """Why an stdio Upstream's stderr can reach the app log (#42).
+
+    ``log_file`` goes to the SDK as the child's ``stderr``, which needs a real file
+    descriptor: the writing end of a pipe is one, and what the child writes comes out of the
+    other end once the Daemon's own copy of the writing end is closed.
+    """
+    reading, writing = os.pipe()
+    with os.fdopen(writing, "w") as errlog:
+        transport = StdioTransport(
+            command=child_upstream.command(),
+            args=child_upstream.args(),
+            env=child_upstream.env(),
+            keep_alive=False,
+            log_file=errlog,
+        )
+        async with Client(transport) as client:
+            assert (await client.call_tool("add", {"a": 1, "b": 1})).data == 2
+    with os.fdopen(reading) as lines:
+        assert child_upstream.STDERR_LINE in lines.read()
+
+
 async def test_a_stdio_transport_ends_its_child_process_only_when_keep_alive_is_off() -> None:
     """Why mcpshape spawns every stdio Upstream with ``keep_alive=False``.
 
@@ -755,7 +776,7 @@ async def test_a_dead_transport_raises_connection_closed_and_an_upstream_error_d
     async with restartable_upstream() as served:
         client: ProxyClient[Any] = ProxyClient(StreamableHttpTransport(served.url))
         dead: MCPError | None = None
-        with contextlib.suppress(Exception):  # what closing a dead client raises
+        with pytest.raises(Exception):  # noqa: B017, PT011, PT012  # closing a dead client raises its failure (#52)
             async with client:
                 async with client:
                     assert not (await client.call_tool_mcp("add", {"a": 1, "b": 1})).is_error

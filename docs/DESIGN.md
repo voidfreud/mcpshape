@@ -179,6 +179,13 @@ Claude Code is the first and best-integrated Profile, never a special case in th
   on a reconnect; and a login from the CLI is followed by `POST /api/upstreams/<name>/connect`
   when a Daemon answers, so an `unavailable` Upstream tries again now instead of waiting out
   its backoff.
+- Settled in #52, #42, and #51: letting go of a connection a call found dead logs one line
+  naming the Upstream and the reason, never a traceback; what an stdio Upstream's child
+  writes to stderr goes to the app log line by line under the Upstream's name, so `daemon
+  logs` shows it, through a pipe the Daemon reads and never the Daemon's own stderr; and
+  `upstream show` says which scopes the stored login was granted, with `upstream sync` and
+  `show` saying once when the browser flow, which asks for what the provider advertises,
+  was granted other scopes than the file's `scopes`.
 
 ### Client Profiles
 - One Profile per supported Client: config file path and format, transports accepted, whether

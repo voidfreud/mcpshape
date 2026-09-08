@@ -27,12 +27,14 @@ import copy
 import importlib
 import json
 import logging
+import os
+import threading
 import time
 import webbrowser
-from contextlib import AsyncExitStack, asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager, contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, TextIO, cast
 
 import httpx2
 import jsonschema
@@ -81,7 +83,7 @@ from mcpshape.model import HttpTransport, MemoryTransport, SseTransport, StdioTr
 from mcpshape.proxy import ArgumentMap, Exposed, cut_output
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, Awaitable, Callable, Sequence
+    from collections.abc import AsyncGenerator, Awaitable, Callable, Generator, Sequence
     from contextlib import AbstractAsyncContextManager
 
     from fastmcp.client.transports import ClientTransport
@@ -100,6 +102,8 @@ if TYPE_CHECKING:
     from mcpshape.tokens import Tokens
 
 log = logging.getLogger("mcpshape.adapter")
+child_log = logging.getLogger("mcpshape.upstream")
+"""Where what an stdio Upstream's child writes to stderr goes, one line per line (#42)."""
 
 MCP_PATH = "/mcp"
 
@@ -136,8 +140,9 @@ class _Link:
     a Daemon restart.
     """
 
-    def __init__(self, transport: Transport, secrets: Secrets, tokens: Tokens | None) -> None:
-        self.transport = transport
+    def __init__(self, upstream: Upstream, secrets: Secrets, tokens: Tokens | None) -> None:
+        self.upstream = upstream
+        self.transport = upstream.transport
         self.secrets = secrets
         self.tokens = tokens
         self._open: AsyncExitStack | None = None
@@ -161,10 +166,11 @@ class _Link:
         self._open = stack
         try:
             async with _concealing(self.transport, self.secrets, self.tokens):
-                target = _target(self.transport, self.secrets, self.tokens)
-                client: ProxyClient[Any] = ProxyClient(target)
-                stack.push_async_callback(client.close)
-                self._client = await stack.enter_async_context(client)
+                with _child_stderr(self.upstream, self.secrets) as errlog:
+                    target = _target(self.transport, self.secrets, self.tokens, errlog)
+                    client: ProxyClient[Any] = ProxyClient(target)
+                    stack.push_async_callback(client.close)
+                    self._client = await stack.enter_async_context(client)
         except BaseException:
             with contextlib.suppress(Exception):  # what a client that never connected raises
                 await self.close()  # on closing is the connect failure again, already reported
@@ -213,7 +219,7 @@ class UpstreamConnection:
         on_catalog: Callable[[Catalog], Awaitable[None]] | None = None,
         tokens: Tokens | None = None,
     ) -> None:
-        self._link = _Link(upstream.transport, secrets, tokens)
+        self._link = _Link(upstream, secrets, tokens)
         self._on_catalog = on_catalog
         self._lifecycle = upstream.lifecycle
         self._connection = Connection(
@@ -254,7 +260,7 @@ class UpstreamConnection:
         if self._connection.status().state in CONNECTED:
             await self._connection.acquire()
             return await self._over_open_client()
-        return await scan(self._link.transport, self._link.secrets, self._link.tokens)
+        return await scan(self._link.upstream, self._link.secrets, self._link.tokens)
 
     def retry(self) -> None:
         """Try to connect again now: a login just stored what the last attempt lacked (#16)."""
@@ -327,17 +333,17 @@ def proxy_app(
     return ProxyApp(name=name, asgi=app, lifespan=lifespan, serve=serve, fail=runtime.fail)
 
 
-async def scan(transport: Transport, secrets: Secrets, tokens: Tokens | None = None) -> Catalog:
-    """Everything the Upstream behind ``transport`` advertises right now.
+async def scan(upstream: Upstream, secrets: Secrets, tokens: Tokens | None = None) -> Catalog:
+    """Everything ``upstream`` advertises right now.
 
     This opens a connection of its own. An Upstream the Daemon is already connected to is
     looked at over that connection instead, by ``UpstreamConnection``.
     """
-    async with (
-        _concealing(transport, secrets, tokens),
-        Client(_target(transport, secrets, tokens)) as client,
-    ):
-        return await _catalog_of(client)
+    transport = upstream.transport
+    async with _concealing(transport, secrets, tokens):
+        with _child_stderr(upstream, secrets) as errlog:
+            async with Client(_target(transport, secrets, tokens, errlog)) as client:
+                return await _catalog_of(client)
 
 
 @asynccontextmanager
@@ -1039,13 +1045,16 @@ def _renamed[C: BaseModel](component: C, origin: str, exposed: str, key: str, va
 
 
 def _target(
-    transport: Transport, secrets: Secrets, tokens: Tokens | None = None
+    transport: Transport,
+    secrets: Secrets,
+    tokens: Tokens | None = None,
+    errlog: TextIO | None = None,
 ) -> ClientTransport | FastMCP[Any]:
     """How FastMCP reaches this Upstream, with every ``${VAR}`` in it resolved.
 
     An stdio Upstream is a child process of the Daemon: ``keep_alive`` is off, because when
     the connection is let go the process goes with it (the Upstream's lifecycle decides that,
-    not FastMCP).
+    not FastMCP), and ``errlog`` is where its stderr goes (``_child_stderr``).
 
     An Upstream reached by URL that says ``auth = "oauth"`` carries the stored login, and
     nothing here ever opens a browser: the Daemon refuses instead, naming the command that
@@ -1058,11 +1067,56 @@ def _target(
                 args=list(stdio.args),
                 env=dict(stdio.env) or None,
                 keep_alive=False,
+                log_file=errlog,
             )
         case HttpTransport() | SseTransport() as remote:
             return _remote_target(remote, _stored_auth(remote, tokens))
         case MemoryTransport() as memory:
             return _import_server(memory.module, memory.attribute)
+
+
+STDERR_LINE_BYTES = 8192
+"""The most of one stderr line a relayed log line carries; a child that writes no newline is
+logged in pieces of this size rather than buffered without end."""
+
+
+@contextmanager
+def _child_stderr(upstream: Upstream, secrets: Secrets) -> Generator[TextIO | None]:
+    """A pipe for an stdio child's stderr, read into the app log under its name (#42).
+
+    The SDK hands a child the stream it is given as its stderr, which needs a real file
+    descriptor: this is the writing end of a pipe, and a thread reads the other end line by
+    line into ``child_log``, every resolved ``${VAR}`` written back as the reference, until
+    the end of the file. The block runs for the connect, after which the Daemon's own copy of
+    the writing end is closed, so the end comes when the child, and anything the child
+    started with its stderr, exits, and not before. Nothing but an stdio Upstream gets one.
+    In the CLI's process nothing handles the app log, so what a scan's child says is dropped.
+    """
+    transport = upstream.transport
+    if not isinstance(transport, StdioTransport):
+        yield None
+        return
+    reading, writing = os.pipe()
+    try:
+        threading.Thread(
+            target=_relay_stderr,
+            args=(upstream.name, transport, secrets, reading),
+            name=f"stderr:{upstream.name}",
+            daemon=True,
+        ).start()
+    except BaseException:
+        os.close(reading)
+        os.close(writing)
+        raise
+    with os.fdopen(writing, "w", encoding="utf-8") as errlog:
+        yield errlog
+
+
+def _relay_stderr(name: str, transport: StdioTransport, secrets: Secrets, descriptor: int) -> None:
+    with os.fdopen(descriptor, encoding="utf-8", errors="replace") as lines:
+        while line := lines.readline(STDERR_LINE_BYTES):
+            if text := line.rstrip():
+                child_log.info("%s: %s", name, secrets.concealed(text, transport))
 
 
 def _import_server(module: str, attribute: str) -> FastMCP[Any]:
@@ -1165,6 +1219,21 @@ class _TokenStorage(TokenStorage):
         document = self._tokens.read() or {}
         document[self.CLIENT] = client_info.model_dump(mode="json", exclude_none=True)
         self._tokens.write(document)
+
+
+def granted_scopes(tokens: Tokens) -> list[str] | None:
+    """The scopes the stored token set was granted, or nothing when the provider did not say
+    or no token set is stored.
+
+    The provider's word (``scope`` in the token answer), not what was asked for, which the
+    SDK's browser flow overwrites with what discovery found (#51). A provider that answers
+    without ``scope`` granted what was asked (RFC 6749, 5.1). Never a token value.
+    """
+    document = tokens.read() or {}
+    stored: Any = document.get(_TokenStorage.TOKENS)
+    if stored is None:
+        return None
+    return str(OAuthToken.model_validate(stored).scope or "").split() or None
 
 
 def logged_in(tokens: Tokens) -> bool:

@@ -72,6 +72,11 @@ class Issuer:
     token_ttl: int = 3600
     refresh_accepted: bool = True
     device_offered: bool = True
+    scopes_supported: list[str] = field(default_factory=list[str])
+    """What the authorization server advertises; the SDK asks for these over the client's."""
+    names_scope: bool = True
+    """Whether a token answer carries ``scope``; RFC 6749 lets a provider leave it out when
+    it granted what was asked."""
     device_interval: int = 0
     """Seconds between polls the provider asks for; zero keeps the test quick."""
 
@@ -150,7 +155,7 @@ class Issuer:
             "token_type": "Bearer",
             "expires_in": self.token_ttl,
             "refresh_token": refresh,
-            "scope": scope,
+            **({"scope": scope} if self.names_scope else {}),
         }
 
 
@@ -194,6 +199,8 @@ class Provider:
         }
         if self.issuer.device_offered:
             document["device_authorization_endpoint"] = f"{self.base}/device"
+        if self.issuer.scopes_supported:
+            document["scopes_supported"] = self.issuer.scopes_supported
         return JSONResponse(document)
 
     async def _register(self, request: Request) -> Response:
