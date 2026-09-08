@@ -97,6 +97,22 @@ async def test_a_proxy_removed_is_let_go_on_its_own_next_request(config_dir: Con
         ]
 
 
+async def test_a_proxy_removed_is_let_go_on_daemon_reload(config_dir: ConfigDir) -> None:
+    config_dir.add_memory_upstream("calc", calculator())
+    config_dir.add_proxy("calc", "review")
+
+    async with running_daemon(config_dir) as daemon:
+        async with daemon.client("/calc/review/mcp") as client:
+            assert [tool.name for tool in await client.list_tools()] == ["add"]
+
+        (config_dir.path / "upstreams" / "calc" / "review.toml").unlink()
+
+        code, answer = await daemon.api("POST", RELOAD_PATH)
+        assert code == 200
+        calc = next(u for u in answer["upstreams"] if u["name"] == "calc")
+        assert [proxy["name"] for proxy in calc["proxies"]] == ["default"]
+
+
 async def test_a_proxy_removed_and_re_added_under_its_name_is_a_new_one(
     config_dir: ConfigDir,
 ) -> None:

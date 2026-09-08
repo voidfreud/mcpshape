@@ -210,6 +210,8 @@ class _Proxy:
         self.detail: str | None = None
         self.listener_problem: str | None = None
         """Why the port this Proxy's file asks for is not listened on, while it is not (#70)."""
+        self._port: int | None = None
+        self._gone = False
         self.app: ProxyApp = proxy_app(upstream, name, _nothing(), self._connection, calls)
 
     @property
@@ -236,12 +238,15 @@ class _Proxy:
         request; a file that cannot be read is left to ``refresh``, which reports it.
         """
         try:
-            port = load_proxy(self._config_dir, self._upstream.name, self._name).port
+            self._port = load_proxy(self._config_dir, self._upstream.name, self._name).port
         except ConfigError:
             return
-        self._listeners.want(self._key, port, self)
+        self._listeners.want(self._key, self._port, self)
 
     async def stop(self) -> None:
+        """Let the app go. A stopped Proxy is gone: a request that still reaches it, on a
+        port listener not yet closed, is answered not found naming it (#68)."""
+        self._gone = True
         self._listeners.forget(self._key)
         self.listener_problem = None
         if self._held is not None:
@@ -290,6 +295,8 @@ class _Proxy:
             upstream, global_caps = self._owner.upstream, self._owner.global_caps
             stamp = (*(_stamp(path) for path in self._sources), *self._helper_stamps())
             if stamp == self._stamp:
+                if self.listener_problem is not None:  # a look is a retry of the port (#70)
+                    self._listeners.want(self._key, self._port, self)
                 return
             self._stamp = stamp
             try:
@@ -316,7 +323,8 @@ class _Proxy:
                 self.app.fail(str(exc))
                 return
             self.health, self.detail = "ok", None
-            self._listeners.want(self._key, proxy.port, self)
+            self._port = proxy.port
+            self._listeners.want(self._key, self._port, self)
             if server_name(upstream, self._name, exposed) == self.app.name:
                 self.app.serve(exposed)
                 return
@@ -360,6 +368,9 @@ class _Proxy:
                     {"error": f"no Upstream named {self._owner.upstream.name!r}"}, status_code=404
                 )
                 await answer(scope, receive, send)
+                return
+            if self._gone:
+                await _not_found(f"no Proxy {self._label}", scope, receive, send)
                 return
             await self.refresh()
         await self.app.asgi(scope, receive, send)
@@ -930,6 +941,7 @@ class _Listener:
     """One listener on one port, serving one Proxy, until its own ``stop``."""
 
     key: _Key
+    proxy: _Proxy
     task: asyncio.Task[None]
     stop: asyncio.Event
 
@@ -950,7 +962,11 @@ class Listeners:
     closes one no longer asked for, and answers a bind that fails by telling the Proxy why, so
     it reports itself unhealthy with the reason while its path is served as before. The next
     look at the file, or ``daemon reload``, asks again, which is the retry. Two Proxies asking
-    for one port get it in name order: the first listens, the second is told who has it.
+    for one port get it in name order: the first listens, the second is told who has it. A
+    listener is the Proxy's, not its name's: a Proxy let go and a new one under the same name
+    and port is a listener closed and another opened. The loop wakes when what is asked for
+    changes and when a listener ends on its own, which is logged and, while its port is still
+    asked for, tried again.
     """
 
     def __init__(self, token: str | None) -> None:
@@ -978,27 +994,35 @@ class Listeners:
         try:
             while not stop.is_set():
                 await self._reconcile(host, running)
-                await _either(self._changed, stop)
+                ended = [listener.task for listener in running.values()]
+                await _either((self._changed, stop), ended)
                 self._changed.clear()
         finally:
             for listener in running.values():
                 await listener.close()
 
     async def _reconcile(self, host: str, running: dict[int, _Listener]) -> None:
+        for port, listener in list(running.items()):
+            if listener.task.done():
+                del running[port]
+                _reap(listener, port)
         wanted = self._by_port()
         for port, listener in list(running.items()):
-            if port not in wanted or wanted[port][0] != listener.key:
+            if port not in wanted or wanted[port][1] is not listener.proxy:
                 await listener.close()
                 del running[port]
                 log.info("Proxy %s/%s: no longer listening on port %d", *listener.key, port)
+        wanted = self._by_port()  # asked again: every close above was awaited
         for port, (key, proxy) in wanted.items():
             if port in running:
                 continue
             try:
                 sock = _bound(host, port)
             except OSError as exc:
-                proxy.listener_problem = f"port {port} cannot be bound: {exc.strerror or exc}"
-                log.warning("Proxy %s/%s: %s", *key, proxy.listener_problem)
+                problem = f"port {port} cannot be bound: {exc.strerror or exc}"
+                if problem != proxy.listener_problem:
+                    log.warning("Proxy %s/%s: %s", *key, problem)
+                proxy.listener_problem = problem
                 continue
             proxy.listener_problem = None
             own_stop = asyncio.Event()
@@ -1010,9 +1034,10 @@ class Listeners:
                     own_stop,
                     lifespan="off",
                     sockets=[sock],
+                    signals=False,
                 )
             )
-            running[port] = _Listener(key, task, own_stop)
+            running[port] = _Listener(key, proxy, task, own_stop)
             log.info("Proxy %s/%s: listening on port %d", *key, port)
 
     def _by_port(self) -> dict[int, tuple[_Key, _Proxy]]:
@@ -1041,11 +1066,24 @@ def _bound(host: str, port: int) -> socket.socket:
     return sock
 
 
-async def _either(*events: asyncio.Event) -> None:
-    """Wait until any one of ``events`` is set."""
+def _reap(listener: _Listener, port: int) -> None:
+    """Say how a listener that ended on its own ended; nothing here cancels one."""
+    if listener.task.cancelled():
+        return
+    if (failure := listener.task.exception()) is not None:
+        log.warning("Proxy %s/%s: the listener on port %d died: %s", *listener.key, port, failure)
+        return
+    log.info("Proxy %s/%s: the listener on port %d ended", *listener.key, port)
+
+
+async def _either(events: tuple[asyncio.Event, ...], tasks: list[asyncio.Task[None]]) -> None:
+    """Wait until any one of ``events`` is set or any one of ``tasks`` is done.
+
+    The tasks are watched, never cancelled: only the waits on the events are this function's.
+    """
     waits = [asyncio.ensure_future(event.wait()) for event in events]
     try:
-        await asyncio.wait(waits, return_when=asyncio.FIRST_COMPLETED)
+        await asyncio.wait([*waits, *tasks], return_when=asyncio.FIRST_COMPLETED)
     finally:
         for wait in waits:
             wait.cancel()
@@ -1129,6 +1167,7 @@ async def serve(  # noqa: PLR0913  # a listener is what, where, for whom, until 
     *,
     lifespan: Literal["on", "off"] = "on",
     sockets: list[socket.socket] | None = None,
+    signals: bool = True,
 ) -> None:
     """Serve ``app`` on ``host``:``port`` until ``stop`` is set or the process is signalled.
 
@@ -1136,7 +1175,10 @@ async def serve(  # noqa: PLR0913  # a listener is what, where, for whom, until 
     cancelling the task would leave it open. ``lifespan="off"`` is for a Proxy's port
     override: the Proxy's own lifespan is already run once, by the main app. ``sockets``,
     when given, are already bound, so a port that cannot be had is known before anything is
-    served (#70).
+    served (#70). ``signals=False`` is for a port override too: uvicorn takes the process's
+    SIGINT and SIGTERM handlers for every server it serves and puts back, when that server
+    ends, whatever it found, so a listener that comes and goes would leave the handlers on a
+    server that is gone; the main server alone owns them, and its end is what stops the rest.
     """
     import uvicorn  # noqa: PLC0415  # only the running Daemon needs a server
 
@@ -1150,7 +1192,10 @@ async def serve(  # noqa: PLR0913  # a listener is what, where, for whom, until 
 
     stopper = asyncio.create_task(stop_when_asked())
     try:
-        await server.serve(sockets=sockets)
+        if signals:
+            await server.serve(sockets=sockets)
+        else:
+            await server._serve(sockets)  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]  # serve() without its signal handlers
     finally:
         stopper.cancel()
         with contextlib.suppress(asyncio.CancelledError):
@@ -1159,11 +1204,19 @@ async def serve(  # noqa: PLR0913  # a listener is what, where, for whom, until 
 
 async def serve_all(daemon: DaemonApp, host: str, port: int) -> None:
     """Serve the main app on ``host``:``port``, and every Proxy port override alongside it,
-    started, moved, and closed as the Proxy files change (#70)."""
-    await asyncio.gather(
-        serve(daemon.main, host, port, daemon.stop),
-        daemon.listeners.serve(host, daemon.stop),
-    )
+    started, moved, and closed as the Proxy files change (#70).
+
+    The main server ends on ``daemon down`` or a signal; either way its end sets ``stop``,
+    so the listeners close with it and this returns.
+    """
+
+    async def main() -> None:
+        try:
+            await serve(daemon.main, host, port, daemon.stop)
+        finally:
+            daemon.stop.set()
+
+    await asyncio.gather(main(), daemon.listeners.serve(host, daemon.stop))
 
 
 def run(config_dir: Path, state_dir: Path) -> None:

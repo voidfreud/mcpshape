@@ -323,7 +323,9 @@ mcpshape doctor
   import internal modules to assert on their state. Exceptions: the stdio shim (real subprocess),
   real Upstream transports (`tests/test_real_transports.py`: a child process and a loopback
   server behind the Daemon, since only those show one child shared by every Proxy and session),
-  autostart unit writers (golden files), the Adapter contract tests,
+  autostart unit writers (golden files), the Daemon under a signal (`tests/test_daemon_ports.py`:
+  a real process, since a signal cannot be sent to the test process itself), the Adapter
+  contract tests,
   `tests/test_config_roundtrip.py` (the tomlkit round-trip property, at the config module),
   `tests/test_overrides_property.py` (the Override application property, at the proxy module), and
   `tests/test_boundaries.py`, which reads source files to enforce the import rule below, and
