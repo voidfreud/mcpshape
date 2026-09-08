@@ -13,43 +13,69 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  conventional:
+  rules:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: read
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Branch name, title, and every commit follow the rules; a code change names its ticket
+      - name: Branch, title, body, and tickets follow CONTRIBUTING.md
         env:
           TITLE: ${{ github.event.pull_request.title }}
           BRANCH: ${{ github.head_ref }}
           BODY: ${{ github.event.pull_request.body }}
+          AUTHOR: ${{ github.event.pull_request.user.login }}
           BASE: ${{ github.event.pull_request.base.sha }}
           HEAD: ${{ github.event.pull_request.head.sha }}
+          REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
         run: |
-          pattern='^(build|chore|ci|docs|feat|fix|perf|refactor|revert|style|test)(\([a-z0-9._/-]+\))?!?: [^ ].*$'
+          export LC_ALL=C.UTF-8
+          types='build|chore|ci|docs|feat|fix|perf|refactor|revert|style|test'
+          body=$(printf '%s' "$BODY" | tr -d '\r')
           fail=0
-          if ! printf '%s\n' "$BRANCH" | grep -Eq '^(build|chore|ci|docs|feat|fix|perf|refactor|revert|style|test)/[a-z0-9._-]+$'; then
-            echo "::error::branch is not named <type>/<slug>: $BRANCH"; fail=1
+          if ! printf '%s\n' "$BRANCH" | grep -Eq "^($types)/[a-z0-9-]{1,40}$"; then
+            echo "::error::branch is not <type>/<slug> (lowercase, digits, hyphens, at most 40): $BRANCH"; fail=1
           fi
-          if ! printf '%s\n' "$TITLE" | grep -Eq "$pattern"; then
-            echo "::error::pull request title is not a Conventional Commit: $TITLE"; fail=1
+          if ! printf '%s\n' "$TITLE" | grep -Eq "^($types): [^ .](.*[^. ])?$"; then
+            echo "::error::title is not 'type: subject' without a trailing period: $TITLE"; fail=1
           fi
-          while IFS= read -r line; do
-            sha=${line%% *}; subject=${line#* }
-            if [ "$(git rev-list --parents -n 1 "$sha" | wc -w)" -gt 2 ]; then
-              echo "::error::$sha is a merge commit; rebase the branch instead"; fail=1
+          if [ "${#TITLE}" -gt 72 ]; then
+            echo "::error::title is ${#TITLE} characters; at most 72"; fail=1
+          fi
+          expected='## Summary,## Changes,## Tests,## Review'
+          found=$(printf '%s\n' "$body" | grep -E '^## (Summary|Changes|Tests|Review)$' | paste -sd, -)
+          if [ "$found" != "$expected" ]; then
+            echo "::error::body sections are not the template's, in order: expected '$expected', found '$found'"; fail=1
+          fi
+          files=$(git diff --name-only "$(git merge-base "$BASE" "$HEAD")" "$HEAD")
+          code=$(printf '%s\n' "$files" | grep -Ec '^(src|tests)/' || true)
+          rulefiles=$(printf '%s\n' "$files" | grep -Ec '^(CONTRIBUTING\.md|CLAUDE\.md|\.github/)' || true)
+          closes=$(printf '%s\n' "$body" | grep -Eo '^Closes #[0-9]+' | grep -Eo '[0-9]+' || true)
+          if [ "$code" -gt 0 ] && [ -z "$closes" ]; then
+            echo "::error::src/ or tests/ changed but the body has no 'Closes #<n>' line"; fail=1
+          fi
+          if [ "$code" -gt 0 ] && [ "$rulefiles" -gt 0 ]; then
+            echo "::error::rule files (CONTRIBUTING.md, CLAUDE.md, .github/) and code never change in one pull request"; fail=1
+          fi
+          for n in $closes; do
+            if ! json=$(gh api "repos/$REPO/issues/$n" 2>/dev/null); then
+              echo "::error::Closes #$n: no such issue"; fail=1; continue
             fi
-            if ! printf '%s\n' "$subject" | grep -Eq "$pattern"; then
-              echo "::error::$sha is not a Conventional Commit: $subject"; fail=1
-            fi
-          done < <(git log --format='%H %s' "$BASE..$HEAD")
-          if git diff --name-only "$(git merge-base "$BASE" "$HEAD")" "$HEAD" | grep -Eq '^(src|tests)/' \
-             && ! printf '%s\n' "$BODY" | grep -Eiq '\bcloses #[0-9]+'; then
-            echo "::error::the pull request changes src/ or tests/ but its body has no 'Closes #<n>' line"; fail=1
-          fi
+            state=$(jq -r .state <<<"$json")
+            labels=$(jq -r '[.labels[].name] | join(",")' <<<"$json")
+            assignees=$(jq -r '[.assignees[].login] | join(",")' <<<"$json")
+            children=$(jq -r '.sub_issues_summary.total // 0' <<<"$json")
+            [ "$state" = open ] || { echo "::error::Closes #$n: not open"; fail=1; }
+            case ",$labels," in *,ready,*) ;; *) echo "::error::Closes #$n: not labelled ready (labels: $labels)"; fail=1;; esac
+            case ",$assignees," in *",$AUTHOR,"*) ;; *) echo "::error::Closes #$n: not assigned to $AUTHOR (assignees: $assignees)"; fail=1;; esac
+            [ "$children" = 0 ] || { echo "::error::Closes #$n: a parent ($children sub-issues) is closed by its last sub-issue, not by a merge"; fail=1; }
+          done
           exit $fail
   test:
     strategy:
@@ -63,10 +89,12 @@ jobs:
       - uses: astral-sh/setup-uv@v6
         with:
           python-version: "3.12"
+      - run: uv lock --check
       - run: uv sync --locked
       - run: uv run ruff check .
       - run: uv run ruff format --check .
       - run: uv run pyright
+      - run: uv run vulture src tests --min-confidence 80
       - run: uv run pytest
         env:
           HYPOTHESIS_PROFILE: ci

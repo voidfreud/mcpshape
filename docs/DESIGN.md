@@ -318,26 +318,8 @@ mcpshape doctor
 - uv, ruff (strict), pyright strict, pytest with in-memory FastMCP Upstreams, Hypothesis for
   config round-trips and Override application over generated Catalogs. A benchmark script for
   proxy overhead instead of a stress-test suite. GitHub Actions on macOS and Linux. Semver. MIT.
-- Every commit message, pull request title, and merge subject is a Conventional Commit,
-  `type: subject`, the subject in the glossary's words. CI checks a pull request's title and
-  every commit on its branch, and the ruleset requires that check; the repository's default
-  merge subject is the pull request title, so a merge carries a checked subject.
-- Protected `main`: pull requests only, one per wave (one issue, or a group of issues, with
-  their review commits; a wave that changes only rules or docs has no ticket), merged with a
-  merge commit once CI is green. The merge closes the wave's tickets, and only the merge: CI
-  refuses a pull request that changes `src/` or `tests/` without a `Closes` line, so no ticket
-  is left to be closed by hand. The ruleset refuses anything else; nothing is ever committed on
-  `main`. How a branch is kept, and how a pull request is titled, written, and merged, is in
-  `docs/agents/issue-tracker.md`.
-- A wave's branch is brought up to date by rebasing onto `main`, never by merging `main` in;
-  CI refuses a branch that holds a merge commit.
-- A wave is reviewed on its branch before its pull request opens, on two axes: standards,
-  against this brief and the glossary, and spec, against the ticket. The findings are applied
-  in review commits on the same branch, and the session landing the wave reads the riskiest
-  file itself, whoever wrote it. A finding is never deferred to a later pull request.
-- A session files every follow-up it observes while landing a wave, as a child ticket of the
-  spec with labels and blocked-by edges, before the wave's pull request merges. Nothing is
-  left for the user to remember.
+- How work lands, from ticket to merge, is `CONTRIBUTING.md`: tickets, branches, review,
+  pull requests, and what CI and the ruleset enforce. Nothing here restates it.
 - Tests drive the system through one seam: a temp config directory, the Daemon app in-process,
   in-memory Upstreams, a FastMCP Client over ASGI, and the CLI via Typer's runner. Tests never
   import internal modules to assert on their state. Exceptions: the stdio shim (real subprocess),

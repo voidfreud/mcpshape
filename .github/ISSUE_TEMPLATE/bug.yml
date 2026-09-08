@@ -1,0 +1,20 @@
+name: Bug
+description: Something is wrong.
+labels: ["bug", "decision"]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What
+      description: What happens, and what should happen instead, in the words of CONTEXT.md.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: Checkboxes a reviewer can tick.
+      value: |
+        - [ ]
+    validations:
+      required: true
