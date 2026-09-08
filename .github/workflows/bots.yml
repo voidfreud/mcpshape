@@ -1,0 +1,49 @@
+name: Bots
+
+on:
+  pull_request_target:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  auto-merge:
+    if: github.event_name == 'pull_request_target' && github.event.pull_request.user.login == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    env:
+      BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+    steps:
+      - uses: dependabot/fetch-metadata@v3
+        id: update
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: A minor or patch update merges by squash once its checks are green
+        if: env.BOT_TOKEN != '' && (steps.update.outputs.update-type == 'version-update:semver-minor' || steps.update.outputs.update-type == 'version-update:semver-patch')
+        run: gh pr merge --auto --squash "$PR_URL"
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.BOT_TOKEN }}
+  rebase:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    env:
+      BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+    steps:
+      - name: Every open Dependabot pull request is asked to rebase, so its checks rerun on the new main
+        if: env.BOT_TOKEN != ''
+        env:
+          GH_TOKEN: ${{ secrets.BOT_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          for n in $(gh pr list --repo "$REPO" --state open --json number,headRefName --jq '.[] | select(.headRefName | startswith("dependabot/")) | .number'); do
+            gh pr comment "$n" --repo "$REPO" --body "@dependabot rebase"
+          done
