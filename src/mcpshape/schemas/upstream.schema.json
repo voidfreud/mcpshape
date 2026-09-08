@@ -197,6 +197,20 @@
           "description": "Seconds between pings of a warm Upstream, so it is never falsely reported up.",
           "title": "Ping Interval"
         },
+        "backoff_cap": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The longest wait after a failed connect before another is tried, in seconds; the wait doubles from one second up to this. A warm Upstream's keeper tries again when it has passed; a lazy Upstream's calls are answered without trying until it has.",
+          "title": "Backoff Cap"
+        },
         "unavailable_message": {
           "anyOf": [
             {

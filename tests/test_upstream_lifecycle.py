@@ -27,6 +27,8 @@ from tests.support.seam import (
 from tests.support.upstreams import slow_server
 from tests.test_catalog_drift import cli, drift_file, grow, notes
 from tests.test_proxy_seam import calculator
+from tests.test_upstream_files import daemon_log
+from tests.test_upstreams_added import Connects, counting_calculator
 
 if TYPE_CHECKING:
     import pytest
@@ -415,19 +417,18 @@ async def seconds_in_state(daemon: RunningDaemon, name: str) -> float:
     return float((await daemon.upstream(name))["seconds"])
 
 
-async def test_retries_back_off_exponentially_until_the_upstream_returns(
+async def test_a_warm_upstream_retries_with_a_backoff_that_doubles_to_its_ceiling(
     config_dir: ConfigDir,
 ) -> None:
-    """Retries come after 1 s, then 2 s, then 4 s: a retry restarts the clock on the state."""
+    """#64: warm means keep it up. Retries come after 1 s, then 2 s, then 4 s, and stay at
+    ``backoff_cap`` from there; a retry restarts the clock on the state."""
     clock = FakeClock()
-    config_dir.add_memory_upstream("calc", calculator())
+    config_dir.add_memory_upstream("calc", calculator(), lifecycle={"warm": True, "backoff_cap": 4})
     await cli(config_dir, "upstream", "sync", "calc")
     config_dir.break_upstream("calc")
 
-    async with running_daemon(config_dir, clock) as daemon, daemon.client("/calc/mcp") as client:
-        failed = await client.call_tool("add", {"a": 1, "b": 1}, raise_on_error=False)
-        assert failed.is_error
-        assert await daemon.upstream_state("calc") == "unavailable"
+    async with running_daemon(config_dir, clock) as daemon:
+        assert await daemon.awaiting_state("calc", "unavailable") == "unavailable"
 
         await clock.advance(1.0)  # the first retry, which fails again
         assert await daemon.upstream_state("calc") == "unavailable"
@@ -435,11 +436,197 @@ async def test_retries_back_off_exponentially_until_the_upstream_returns(
         assert await seconds_in_state(daemon, "calc") == 1.5
         await clock.advance(0.6)  # past 2 s: the second retry ran and failed
         assert await seconds_in_state(daemon, "calc") < 0.5
+        await clock.advance(4.0)  # the third retry, after 4 s
+        assert await seconds_in_state(daemon, "calc") < 0.5
+        await clock.advance(3.9)  # the ceiling: still 4 s, not 8
+        assert await seconds_in_state(daemon, "calc") == 3.9
+        await clock.advance(0.2)
+        assert await seconds_in_state(daemon, "calc") < 0.5
 
         config_dir.restore_upstream("calc")
-        await clock.advance(4.0)  # the third retry, which succeeds
+        await clock.advance(4.0)  # the next retry, which succeeds, with nobody calling
         assert await daemon.awaiting_state("calc", *CONNECTED) in CONNECTED
-        assert (await client.call_tool("add", {"a": 1, "b": 1})).data == 2
+
+
+async def test_a_lazy_upstream_never_retries_on_its_own_and_the_next_call_tries_again(
+    config_dir: ConfigDir,
+) -> None:
+    """#64: lazy means connect when asked, at failure as at start. Nothing is spent on an
+    Upstream nobody is calling; a call within the backoff is answered at once, one after it
+    tries again."""
+    clock = FakeClock()
+    connects = Connects()
+    config_dir.add_memory_upstream("calc", counting_calculator(connects))
+    await cli(config_dir, "upstream", "sync", "calc")
+    config_dir.break_upstream("calc")
+
+    async with running_daemon(config_dir, clock) as daemon, daemon.client("/calc/mcp") as client:
+        failed = await client.call_tool("add", {"a": 1, "b": 1}, raise_on_error=False)
+        assert failed.is_error
+        assert await daemon.upstream_state("calc") == "unavailable"
+        opened = connects.count
+
+        await clock.advance(600.0)  # ten minutes: not one retry
+        assert await daemon.upstream_state("calc") == "unavailable"
+        assert await seconds_in_state(daemon, "calc") == 600.0
+        assert connects.count == opened
+
+        config_dir.restore_upstream("calc")
+        await clock.advance(600.0)  # the Upstream is back, and still nothing looks
+        assert await daemon.upstream_state("calc") == "unavailable"
+        assert connects.count == opened
+
+        assert (await client.call_tool("add", {"a": 1, "b": 1})).data == 2  # the call looks
+        assert await daemon.upstream_state("calc") in CONNECTED
+        assert connects.count == opened + 1
+
+
+async def test_a_call_within_the_backoff_is_answered_at_once_and_one_after_it_tries_again(
+    config_dir: ConfigDir,
+) -> None:
+    """A failed attempt restarts the clock on the state; one answered at once does not."""
+    clock = FakeClock()
+    config_dir.add_memory_upstream("calc", calculator())
+    await cli(config_dir, "upstream", "sync", "calc")
+    config_dir.break_upstream("calc")
+
+    async with running_daemon(config_dir, clock) as daemon, daemon.client("/calc/mcp") as client:
+        assert (await client.call_tool("add", {"a": 1, "b": 1}, raise_on_error=False)).is_error
+        assert await daemon.upstream_state("calc") == "unavailable"
+
+        await clock.advance(0.5)  # within the first backoff of 1 s
+        assert (await client.call_tool("add", {"a": 1, "b": 1}, raise_on_error=False)).is_error
+        assert await seconds_in_state(daemon, "calc") == 0.5, "answered at once, nothing tried"
+
+        await clock.advance(0.6)  # past it
+        assert (await client.call_tool("add", {"a": 1, "b": 1}, raise_on_error=False)).is_error
+        assert await seconds_in_state(daemon, "calc") < 0.5, "tried again, and failed again"
+
+
+async def test_the_log_says_it_once_per_reason_and_once_per_doubling(
+    config_dir: ConfigDir,
+) -> None:
+    """#64: not one line per attempt. Three failed connects at 1 s, 2 s, and 4 s, then three
+    more at the ceiling of 4 s, are three lines, not six; a failure for another reason at the
+    same wait is one more; connecting again is exactly one more."""
+    clock = FakeClock()
+    config_dir.add_memory_upstream(
+        "calc", calculator(), lifecycle={"warm": True, "backoff_cap": 4, "connect_timeout": 1}
+    )
+    await cli(config_dir, "upstream", "sync", "calc")
+    config_dir.break_upstream("calc")
+
+    def unavailable_lines() -> list[str]:
+        return [line for line in daemon_log(config_dir).splitlines() if "is unavailable" in line]
+
+    async with running_daemon(config_dir, clock) as daemon:
+        assert await daemon.awaiting_state("calc", "unavailable") == "unavailable"
+        for delay in (1.0, 2.0, 4.0, 4.0, 4.0):
+            await clock.advance(delay + 0.1)
+        assert await seconds_in_state(daemon, "calc") < 0.5
+
+        unavailable = unavailable_lines()
+        assert len(unavailable) == 3, unavailable
+        assert "retrying in 1s" in unavailable[0]
+        assert "retrying in 2s" in unavailable[1]
+        assert "retrying in 4s" in unavailable[2]
+
+        # the same wait, another reason: an Upstream that hangs instead of one that is gone
+        config_dir.restore_upstream("calc", slow_server(asyncio.Event()))
+        await clock.advance(4.1)  # the retry, which hangs
+        await clock.advance(1.1)  # past connect_timeout: it fails for the new reason
+        assert await daemon.upstream_state("calc") == "unavailable"
+        unavailable = unavailable_lines()
+        assert len(unavailable) == 4, unavailable
+        assert "connect timed out" in unavailable[3]
+
+        connected_before = daemon_log(config_dir).count("is connected")
+        config_dir.restore_upstream("calc", calculator())
+        await clock.advance(4.1)
+        assert await daemon.awaiting_state("calc", *CONNECTED) in CONNECTED
+        assert daemon_log(config_dir).count("is connected") == connected_before + 1
+
+
+async def test_status_says_when_the_next_attempt_is(config_dir: ConfigDir) -> None:
+    """#64: what a given-up state would have told the user, status says without one."""
+    clock = FakeClock()
+    config_dir.add_memory_upstream("warm", calculator(), lifecycle={"warm": True, "backoff_cap": 4})
+    config_dir.add_memory_upstream("lazy", calculator())
+    await cli(config_dir, "upstream", "sync")
+    config_dir.break_upstream("warm")
+    config_dir.break_upstream("lazy")
+
+    async with running_daemon(config_dir, clock) as daemon:
+        assert await daemon.awaiting_state("warm", "unavailable") == "unavailable"
+        async with daemon.client("/lazy/mcp") as client:
+            assert (await client.call_tool("add", {"a": 1, "b": 1}, raise_on_error=False)).is_error
+
+        await clock.advance(0.25)
+        warm, lazy = await daemon.upstream("warm"), await daemon.upstream("lazy")
+        assert warm["warm"] is True
+        assert warm["retry_in"] == 0.75
+        assert lazy["warm"] is False
+        assert lazy["retry_in"] is None
+
+
+async def test_daemon_status_names_the_next_attempt_and_upstream_connect(
+    config_dir: ConfigDir,
+) -> None:
+    clock = FakeClock()  # nothing moves, so the warm Upstream stays in its first backoff
+    config_dir.add_memory_upstream("warm", calculator(), lifecycle={"warm": True})
+    config_dir.add_memory_upstream("lazy", calculator())
+    await cli(config_dir, "upstream", "sync")
+    config_dir.break_upstream("warm")
+    config_dir.break_upstream("lazy")
+
+    async with serving_daemon(config_dir, clock) as url:
+        await awaiting_state_at(url, "warm", "unavailable")
+        async with Client(f"{url}/lazy/mcp") as client:
+            assert (await client.call_tool("add", {"a": 1, "b": 1}, raise_on_error=False)).is_error
+        await awaiting_state_at(url, "lazy", "unavailable")
+
+        status = await asyncio.to_thread(run_cli, config_dir, "daemon", "status")
+        assert status.exit_code == 0, status.output
+        assert "warm: retrying in" in status.stdout
+        assert "mcpshape upstream connect warm" in status.stdout
+        assert "lazy: the next call tries again" in status.stdout
+        assert "mcpshape upstream connect lazy" in status.stdout
+
+        listed = await asyncio.to_thread(run_cli, config_dir, "ls")
+        assert "retry in" in listed.stdout
+        assert "next call" in listed.stdout
+
+        tried = await asyncio.to_thread(run_cli, config_dir, "upstream", "connect", "lazy")
+        assert tried.exit_code == 0, tried.output
+        assert "Upstream lazy is connecting" in tried.stdout
+
+        unknown = await asyncio.to_thread(run_cli, config_dir, "upstream", "connect", "nothing")
+        assert unknown.exit_code != 0
+        assert "no Upstream named 'nothing'" in unknown.output
+
+
+async def test_upstream_connect_connects_a_cold_upstream_too(config_dir: ConfigDir) -> None:
+    """A lazy Upstream nobody has called is the usual state; ``connect`` connects it (#64)."""
+    config_dir.add_memory_upstream("calc", calculator())
+
+    async with serving_daemon(config_dir) as url:
+        await awaiting_state_at(url, "calc", "cold")
+
+        tried = await asyncio.to_thread(run_cli, config_dir, "upstream", "connect", "calc")
+        assert tried.exit_code == 0, tried.output
+        assert "Upstream calc is connecting" in tried.stdout
+
+        assert await awaiting_state_at(url, "calc", *CONNECTED) in CONNECTED
+
+
+def test_upstream_connect_says_so_when_the_daemon_is_not_running(config_dir: ConfigDir) -> None:
+    config_dir.add_memory_upstream("calc", calculator())
+    (config_dir.path / "config.toml").write_text(f"version = 1\n[daemon]\nport = {free_port()}\n")
+
+    result = run_cli(config_dir, "upstream", "connect", "calc")
+
+    assert result.exit_code == 0, result.output
+    assert "Daemon not running" in result.output
 
 
 async def test_a_reconnect_after_the_backoff_rescans_the_catalog(config_dir: ConfigDir) -> None:
@@ -457,12 +644,13 @@ async def test_a_reconnect_after_the_backoff_rescans_the_catalog(config_dir: Con
         config_dir.restore_upstream("notes")
         await clock.advance(PAST_THE_BACKOFF)
 
-        assert await daemon.awaiting_state("notes", *CONNECTED) in CONNECTED
+        # a lazy Upstream is reconnected by the next call, not on its own (#64)
+        assert (await client.call_tool("add_note", {"text": "hi"})).data == "hi"
+        assert await daemon.upstream_state("notes") in CONNECTED
         await until(
             lambda: drift_file(config_dir, "notes") is not None,
             "the rescan a reconnect triggers",
         )
-        assert (await client.call_tool("add_note", {"text": "hi"})).data == "hi"
 
     review = await cli(config_dir, "upstream", "sync", "notes")
     assert "+ tool delete_note" in review.output

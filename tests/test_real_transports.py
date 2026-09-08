@@ -332,8 +332,9 @@ async def test_an_stdio_upstream_that_dies_mid_call_is_answered_with_the_message
         assert message in error_text(again)
 
         await clock.advance(PAST_THE_BACKOFF)
-        assert await daemon.awaiting_state("child", *CONNECTED) in CONNECTED
+        # a lazy Upstream is reconnected by the next call, not on its own (#64)
         assert (await client.call_tool("add", {"a": 1, "b": 1})).data == 2
+        assert await daemon.upstream_state("child") in CONNECTED
 
     assert len(child_upstream.spawned(spawns)) == 3, "the scan, the call, and the child after it"
 
@@ -419,8 +420,9 @@ async def test_a_lazy_url_upstream_that_dies_while_connected_is_noticed_by_the_n
 
             await served.revive()
             await clock.advance(PAST_THE_BACKOFF)
-            assert await daemon.awaiting_state("calc", *CONNECTED) in CONNECTED
+            # a lazy Upstream is reconnected by the next call, not on its own (#64)
             assert (await client.call_tool("add", {"a": 1, "b": 1})).data == 2
+            assert await daemon.upstream_state("calc") in CONNECTED
 
 
 async def test_a_warm_url_upstream_that_dies_is_found_by_its_ping_and_comes_back(

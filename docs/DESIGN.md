@@ -70,7 +70,17 @@ Claude Code is the first and best-integrated Profile, never a special case in th
   through every Upstream outage; only individual calls fail while the Upstream is away.
 - `initialize` and `tools/list` are answered from the stored Catalog instantly.
 - Connect failures within the connect timeout return a tool error with a configurable message.
-- Auto-reconnect with capped exponential backoff.
+- Settled in #64, replacing "auto-reconnect with capped exponential backoff": an Upstream
+  that cannot be connected to costs nothing nobody asked for, and the Daemon never gives up
+  on one. After a failed connect the backoff doubles from a second to the Upstream's
+  `backoff_cap` (a lifecycle setting, default 30 minutes); a call within it is answered with
+  the `unavailable_message` at once, and a call after it is what tries again. A warm Upstream
+  is also retried by the keeper when the backoff runs out, since warm means keep it up; a lazy
+  one never on its own, since lazy means connect when asked, at failure as at start. The app
+  log says it once per reason and once per doubling, not once per attempt. `ls`,
+  `daemon status`, and `/api/status` say when the next attempt is, and `daemon status` names
+  `upstream connect`, which tries now whatever the backoff says. An edit to the Upstream file
+  reconnects as #46 says.
 - A call that fails because the open connection is dead, not because the Upstream answered
   an error, moves the Upstream to `unavailable` at once and is answered with the same
   configurable message; the backoff and reconnect follow as after a failed connect (settled
@@ -266,7 +276,7 @@ Claude Code is the first and best-integrated Profile, never a special case in th
 ```
 mcpshape add <upstream> --stdio '...' | --url ...   convenience for upstream add + default Proxy
 mcpshape ls                                          convenience for upstream ls + proxy ls
-mcpshape upstream   add | env | ls | show | sync | rm | scan
+mcpshape upstream   add | env | ls | show | sync | connect | rm | scan
 mcpshape proxy      new | ls | show | rm | install | export
 mcpshape tool       hide | show | rename | describe | trim | cap
 mcpshape daemon     up | down | status | logs | reload | install | uninstall

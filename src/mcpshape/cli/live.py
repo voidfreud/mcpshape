@@ -117,8 +117,15 @@ def connect_upstream(config_dir: Path, name: str) -> bool:
     What a login from the CLI is followed by; ``False`` when no Daemon answered, which is
     not an error: a Daemon reads the stored login when it starts.
     """
+    return connect_now(config_dir, name) is not None
+
+
+def connect_now(config_dir: Path, name: str) -> str | None:
+    """``upstream connect``: the connection's state right after a running Daemon was told to
+    try now, or nothing when no Daemon answered (#64)."""
     daemon = load_settings(config_dir).daemon
-    return _read(daemon, f"{UPSTREAMS_PATH}/{name}/connect", "POST", ConnectAnswer) is not None
+    answer = _read(daemon, f"{UPSTREAMS_PATH}/{name}/connect", "POST", ConnectAnswer)
+    return None if answer is None else answer.state
 
 
 def _query(path: str, **params: int) -> str:

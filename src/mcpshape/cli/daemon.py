@@ -25,7 +25,7 @@ from mcpshape.cli.common import (
     reporting_errors,
     state,
 )
-from mcpshape.cli.listing import health_text, state_text
+from mcpshape.cli.listing import health_text, next_attempt, state_text
 from mcpshape.cli.live import (
     Live,
     how_long,
@@ -391,6 +391,11 @@ def _notes(live: Live) -> list[str]:
             )
         if upstream.error:
             notes.append(f"{upstream.name}: {upstream.error}")
+        if upstream.state == "unavailable" and upstream.supervised:
+            notes.append(
+                f"{upstream.name}: {next_attempt(upstream)}; "
+                f"run mcpshape upstream connect {upstream.name} to try now"
+            )
         if not upstream.supervised:
             notes.append(
                 f"{upstream.name}: the keeper stopped supervising; "

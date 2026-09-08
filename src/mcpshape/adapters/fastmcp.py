@@ -275,6 +275,10 @@ class UpstreamConnection:
         """Try to connect again now: a login just stored what the last attempt lacked (#16)."""
         self._connection.retry()
 
+    def connect_now(self) -> None:
+        """Connect now from wherever it is, whatever the backoff says: ``upstream connect``."""
+        self._connection.connect_now()
+
     async def reload(self) -> None:
         """Supervise this Upstream again when the keeper gave up: ``daemon reload`` (#50)."""
         await self._connection.reload()

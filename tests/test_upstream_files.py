@@ -255,17 +255,18 @@ async def test_a_removed_upstream_is_noticed_by_the_reconnect_that_would_have_re
     The Upstream is removed by hand, as an ``rm -rf`` would, so nothing signals the Daemon:
     the reconnect that comes out of the backoff is what finds the Upstream file gone, drops
     what its rescan saw rather than writing a state directory back, and retires the Upstream.
+    The Upstream is warm, since only a warm one reconnects with nobody calling (#64), and is
+    broken before the Daemon starts, so its first connect is the failure the backoff follows.
     """
     clock = FakeClock()
     server = notes()
-    config_dir.add_memory_upstream("notes", server)
+    config_dir.add_memory_upstream("notes", server, lifecycle={"warm": True})
     await cli(config_dir, "upstream", "sync", "notes")
     state_dir = config_dir.state / "upstreams" / "notes"
+    config_dir.break_upstream("notes")
 
-    async with running_daemon(config_dir, clock) as daemon, daemon.client("/notes/mcp") as client:
-        config_dir.break_upstream("notes")
-        assert (await client.call_tool("add_note", {"text": "hi"}, raise_on_error=False)).is_error
-        assert await daemon.upstream_state("notes") == "unavailable"
+    async with running_daemon(config_dir, clock) as daemon:
+        assert await daemon.awaiting_state("notes", "unavailable") == "unavailable"
 
         shutil.rmtree(config_dir.path / "upstreams" / "notes")
         shutil.rmtree(state_dir)
@@ -282,4 +283,10 @@ async def test_a_removed_upstream_is_noticed_by_the_reconnect_that_would_have_re
         await until_unlisted(daemon, "notes")
         assert not state_dir.exists()
 
-    assert "Traceback" not in daemon_log(config_dir)
+    # the start-up scan of a broken Upstream logs its traceback as it always has; the
+    # retirement that follows the reconnect's rescan must not
+    _, retiring, after_retiring = daemon_log(config_dir).partition(
+        "dropping what its reconnect saw"
+    )
+    assert retiring, "the retirement was never logged"
+    assert "Traceback" not in after_retiring

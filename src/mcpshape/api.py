@@ -20,8 +20,9 @@ Routes, all behind the bearer token when one is configured:
 - ``POST /api/upstreams/<name>/sync``: scan now and record the Drift. Accepting it edits
   Proxy files, so it stays the CLI's: ``upstream sync --accept``.
 - ``GET`` and ``POST /api/upstreams/<name>/oauth``: the login's state, and starting one.
-- ``POST /api/upstreams/<name>/connect``: connect now instead of waiting out the backoff;
-  answers the connection's state. What a login from the CLI is followed by (#58).
+- ``POST /api/upstreams/<name>/connect``: connect now, from cold or from the backoff;
+  answers the connection's state. What ``upstream connect`` posts to (#64), and what a login
+  from the CLI is followed by (#58).
 - ``GET /api/calls?upstream=&proxy=&limit=``: the latest calls, oldest first.
 - ``GET /api/logs?lines=``: the app log's tail.
 """
@@ -109,6 +110,10 @@ class UpstreamState(BaseModel):
     error: str | None = None
     supervised: bool = True
     """False once the keeper gave up on this Upstream, until a reload starts one (#50)."""
+    warm: bool = False
+    retry_in: float | None = None
+    """Seconds until a warm Upstream's keeper tries to connect again, while it is
+    ``unavailable``; nothing for a lazy one, whose next call is what tries again (#64)."""
     missing_command: str | None = None
     """The stdio command nothing on the Daemon's PATH is, when there is one (#48)."""
     proxies: list[ProxyState] = Field(default_factory=list[ProxyState])
@@ -387,6 +392,8 @@ class Management:
             seconds=round(status.seconds, 3),
             error=status.error,
             supervised=status.supervised,
+            warm=status.warm,
+            retry_in=None if status.retry_in is None else round(status.retry_in, 3),
             missing_command=self._missing_command(served.upstream),
             proxies=[await proxy.state() for proxy in list(served.proxies.values())],
         )
@@ -537,8 +544,8 @@ class Management:
         return await self._for_upstream(request, self._connect_of)
 
     async def _connect_of(self, served: ServedLike) -> JSONResponse:
-        """Have an ``unavailable`` Upstream try again now, and say where it stands."""
-        served.connection.retry()
+        """Have the Upstream connect now, cold or ``unavailable``, and say where it stands."""
+        served.connection.connect_now()
         return _answer(ConnectAnswer(state=served.connection.status().state))
 
     async def _calls(self, request: Request) -> JSONResponse:
