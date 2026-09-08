@@ -5,12 +5,13 @@ from __future__ import annotations
 import asyncio
 import shlex
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Annotated
+from typing import TYPE_CHECKING, Annotated, Literal
 
 import typer
 
 from mcpshape import catalog, config
-from mcpshape.adapters.fastmcp import scan
+from mcpshape import tokens as token_store
+from mcpshape.adapters.fastmcp import LoginNeededError, login, scan
 from mcpshape.cli import scan as scanning
 from mcpshape.cli.common import (
     HELP_OPTIONS,
@@ -49,29 +50,49 @@ UrlOpt = Annotated[
     str | None, typer.Option("--url", metavar="URL", help="Connect to this Streamable HTTP server.")
 ]
 SseOpt = Annotated[bool, typer.Option("--sse", help="With --url: the server speaks legacy SSE.")]
+OAuthOpt = Annotated[
+    bool,
+    typer.Option("--oauth", help="With --url: log in with the server's OAuth provider now."),
+]
+DeviceOpt = Annotated[
+    bool,
+    typer.Option(
+        "--device",
+        help="With OAuth: pair by device code instead of a browser, for a headless machine.",
+    ),
+]
 YesOpt = Annotated[bool, typer.Option("-y", "--yes", help="Do not ask for confirmation.")]
 AcceptOpt = Annotated[
     bool, typer.Option("--accept", help="Make what the Upstream advertises now the Catalog.")
 ]
 
 
-def transport_from_options(stdio: str | None, url: str | None, *, sse: bool) -> Transport:
+def transport_from_options(
+    stdio: str | None, url: str | None, *, sse: bool, oauth: bool = False, device: bool = False
+) -> Transport:
     if (stdio is None) == (url is None):
         fail("give exactly one of --stdio or --url")
+    if device and not oauth:
+        fail("--device only applies to --oauth")
     if stdio is not None:
         if sse:
             fail("--sse only applies to --url")
+        if oauth:
+            fail("--oauth only applies to --url")
         command, *args = shlex.split(stdio)
         if not command:
             fail("--stdio needs a command")
         return StdioTransport(transport="stdio", command=command, args=args)
     assert url is not None  # noqa: S101  # the check above guarantees it
+    auth: Literal["oauth"] | None = "oauth" if oauth else None
     if sse:
-        return SseTransport(transport="sse", url=url)
-    return HttpTransport(transport="http", url=url)
+        return SseTransport(transport="sse", url=url, auth=auth)
+    return HttpTransport(transport="http", url=url, auth=auth)
 
 
-def add_upstream(ctx: typer.Context, name: str, transport: Transport) -> None:
+def add_upstream(
+    ctx: typer.Context, name: str, transport: Transport, *, device: bool = False
+) -> None:
     config_dir = state(ctx).config_dir
     with reporting_errors():
         upstream = config.add_upstream(config_dir, check_name(name, "Upstream"), transport)
@@ -79,22 +100,48 @@ def add_upstream(ctx: typer.Context, name: str, transport: Transport) -> None:
         f"Added Upstream [bold]{upstream.name}[/bold] with its default Proxy at "
         f"{proxy_url(config_dir, upstream.name, 'default')}"
     )
+    if oauth_upstream(upstream.transport):
+        log_in(config_dir, state(ctx).state_dir, upstream, device=device)
+
+
+def oauth_upstream(transport: Transport) -> bool:
+    """Whether this Upstream is one the user logs in to with an OAuth provider."""
+    return isinstance(transport, HttpTransport | SseTransport) and transport.auth == "oauth"
+
+
+def log_in(config_dir: Path, state_dir: Path, upstream: Upstream, *, device: bool) -> None:
+    """Run the login the Upstream needs, printing what the user must do, never a token."""
+    try:
+        asyncio.run(
+            login(
+                upstream.transport,
+                config.secrets_for(config_dir),
+                token_store.Tokens(state_dir, upstream.name),
+                console.print,
+                device=device,
+            )
+        )
+    except Exception as exc:  # noqa: BLE001  # however the provider refused, the user gets the why
+        fail(f"cannot log in to {upstream.name}: {exc}")
 
 
 @app.command(
     "add",
     epilog=example("upstream add github --stdio 'npx -y @modelcontextprotocol/server-github'"),
 )
-def add(
+def add(  # noqa: PLR0913  # one option per way of naming and authorizing an Upstream
     ctx: typer.Context,
     name: NameArg,
     stdio: StdioOpt = None,
     url: UrlOpt = None,
     *,
     sse: SseOpt = False,
+    oauth: OAuthOpt = False,
+    device: DeviceOpt = False,
 ) -> None:
     """Add an Upstream and its default Proxy."""
-    add_upstream(ctx, name, transport_from_options(stdio, url, sse=sse))
+    transport = transport_from_options(stdio, url, sse=sse, oauth=oauth, device=device)
+    add_upstream(ctx, name, transport, device=device)
 
 
 @app.command("ls", epilog=example("upstream ls"))
@@ -119,6 +166,19 @@ def show(ctx: typer.Context, name: NameArg) -> None:
     console.print(f"[bold]{path}[/bold]")
     console.print(toml_file(path))
     print_upstreams(config_dir, [upstream], read_live(config_dir))
+    console.print(login_line(state(ctx).state_dir, upstream))
+
+
+def login_line(state_dir: Path, upstream: Upstream) -> str:
+    """How the Upstream is authorized, and whether a login is stored. Never a value."""
+    if not oauth_upstream(upstream.transport):
+        return "Auth: none"
+    if token_store.Tokens(state_dir, upstream.name).stored():
+        return "Auth: OAuth, logged in (the token is encrypted in the state directory)"
+    return (
+        f"Auth: OAuth, not logged in. Log in with: "
+        f"[bold]mcpshape upstream sync {upstream.name}[/bold]"
+    )
 
 
 @app.command("sync", epilog=example("upstream sync github --accept"))
@@ -129,6 +189,7 @@ def sync(
     ] = None,
     *,
     accept: AcceptOpt = False,
+    device: DeviceOpt = False,
 ) -> None:
     """Scan an Upstream into its Catalog, show the Drift since, and accept it on request."""
     config_dir, state_dir = state(ctx).config_dir, state(ctx).state_dir
@@ -140,15 +201,45 @@ def sync(
             console.print("No Upstreams yet. Add one with [bold]mcpshape add[/bold].")
             return
         for upstream in upstreams:
-            sync_one(config_dir, state_dir, upstream, accept=accept)
+            sync_one(config_dir, state_dir, upstream, accept=accept, device=device)
             state(ctx).reviewed.add(upstream.name)
 
 
-def sync_one(config_dir: Path, state_dir: Path, upstream: Upstream, *, accept: bool) -> None:
+def scanned(
+    config_dir: Path, state_dir: Path, upstream: Upstream, *, device: bool
+) -> catalog.Catalog:
+    """What the Upstream advertises now, logging it in first when that is what it is missing.
+
+    An OAuth Upstream with no stored login is logged in before the scan; one whose stored
+    login has stopped working is logged in again, since ``sync`` is the command every
+    unavailable OAuth Upstream is told to run. Only that failure costs the stored login: an
+    Upstream that cannot be reached for any other reason keeps a token that may still work.
+    """
+    tokens = token_store.Tokens(state_dir, upstream.name)
+    if oauth_upstream(upstream.transport) and not tokens.stored():
+        log_in(config_dir, state_dir, upstream, device=device)
     try:
-        observed = asyncio.run(scan(upstream.transport, config.secrets_for(config_dir)))
+        return _scan(config_dir, upstream, tokens)
+    except Exception as exc:  # noqa: BLE001  # however the Upstream failed, the user gets the why
+        if not isinstance(exc, LoginNeededError):
+            fail(f"cannot scan {upstream.name}: {exc}")
+        console.print(f"[yellow]![/] {upstream.name}: {exc}")
+    tokens.forget()
+    log_in(config_dir, state_dir, upstream, device=device)
+    try:
+        return _scan(config_dir, upstream, tokens)
     except Exception as exc:  # noqa: BLE001  # however the Upstream failed, the user gets the why
         fail(f"cannot scan {upstream.name}: {exc}")
+
+
+def _scan(config_dir: Path, upstream: Upstream, tokens: token_store.Tokens) -> catalog.Catalog:
+    return asyncio.run(scan(upstream.transport, config.secrets_for(config_dir), tokens))
+
+
+def sync_one(
+    config_dir: Path, state_dir: Path, upstream: Upstream, *, accept: bool, device: bool = False
+) -> None:
+    observed = scanned(config_dir, state_dir, upstream, device=device)
     result = (
         catalog.accept_scan(state_dir, upstream.name, observed)
         if accept
@@ -238,6 +329,7 @@ def rm(ctx: typer.Context, name: NameArg, *, yes: YesOpt = False) -> None:
         confirm_or_abort(f"Remove Upstream {name} and its Proxies ({proxies})?", yes=yes)
         config.remove_upstream(config_dir, name)
         catalog.forget(state_dir, name)
+        token_store.forget(state_dir, name)
     console.print(f"Removed Upstream [bold]{name}[/bold]")
 
 

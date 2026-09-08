@@ -59,6 +59,23 @@ data for Client Profiles. Checked 2026-09-06/07 against primary documentation.
 - Codex CLI: `~/.codex/config.toml`, `[mcp_servers.<name>]`.
 - Goose: YAML `extensions:` block. Cline: `cline_mcp_settings.json`.
   Continue: `config.yaml`. OpenCode: `opencode.json`.
+- Checked 2026-09-08 for ticket #23; the first two are primary-doc facts, the last two are
+  mcpshape's own decisions, recorded here so the Profiles and the scan agree:
+  - Claude Code's `local` scope nests per-project servers in the same `~/.claude.json` as the
+    `user` scope, under `projects.<absolute project dir>.mcpServers`, one map per project
+    directory, sibling to the top-level `mcpServers` the `user` scope writes.
+    (code.claude.com/docs/en/mcp)
+  - Claude Desktop for Linux exists as a beta (`code.claude.com/docs/en/desktop-linux`,
+    apt-installed on Ubuntu/Debian), but no primary source (that page, the install and MCP
+    help-center articles, or the enterprise-configuration article) documents a config file
+    path for `claude_desktop_config.json` on Linux; only macOS's path is documented. Not added
+    to the Claude Desktop Profile.
+  - Goose and Continue stay YAML-only: mcpshape carries no YAML dependency for a listing, so
+    their files are reported as found and unread, by name (decision recorded in each Profile's
+    `notes`).
+  - `discovery.py`'s `list` entry shape (`Profile.entry_shape = "list"`) is unreachable from
+    `upstream scan`: the only list-shaped Client, Continue, is YAML and so is never parsed.
+    Left as-is; it becomes reachable the day a JSON- or TOML-shaped list Client is added.
 
 ### Config file shapes (checked 2026-09-07, primary docs)
 What `proxy install` has to write. Where nothing is listed here, no primary source was found
@@ -147,6 +164,26 @@ and the Profile writes the common `mcpServers` + `{"type": "http", "url": ...}` 
   is served by `read()`. `ProxyPrompt.render` returns a `PromptResult` of `Message`s. A
   `call_tool_mcp` on the borrowed client answers a failing or unknown tool with an `isError`
   result carrying the message, not by raising.
+- What a sync Hook or Virtual Tool rests on (checked 2026-09-08, 4.0.3 with anyio 4.15.1).
+  `FunctionTool.from_function(run_in_thread=...)` defaults to `True`, so a sync body runs in a
+  worker thread and only `run_in_thread=False` runs it inline on the event loop's thread.
+  FastMCP dispatches it through `fastmcp.utilities.async_utils.call_sync_fn_in_threadpool`,
+  which is `anyio.to_thread.run_sync`; anyio 4 copies the caller's context into the worker
+  thread, so a `ContextVar` set around the call is readable there. `asyncio.to_thread`, which
+  mcpshape runs sync Hooks with, copies the context the same way. A thread reached either way
+  has no running loop of its own, which is how the `upstream` handle tells a worker thread
+  from the loop; it hands the coroutine to the loop `bound` captured with
+  `asyncio.run_coroutine_threadsafe` and blocks on the result, and whatever the coroutine
+  raises is raised again in the thread.
+- What the Client does when structured content does not fit the output schema it was
+  advertised (checked 2026-09-08, 4.0.3 with `mcp` 2.x). `ClientSession._validate_tool_result`
+  (`mcp/client/session.py`) validates with `jsonschema` and raises
+  `RuntimeError(f"Invalid structured content returned by tool {name}: {error}")`, `error` being
+  the `jsonschema` validation failure, for structured content of the wrong shape; missing
+  structured content on a tool with an output schema is the separate, already-pinned
+  `"...did not return structured content"` `RuntimeError`. Both are the Client's own check,
+  ahead of the caller ever seeing the result, which is why a Hook's mismatched result has to be
+  turned into a tool error before it reaches the Client (#25).
 - What an stdio Upstream's child process gets (checked 2026-09-08, 4.0.3 with `mcp` 2.x). The
   SDK spawns it with `get_default_environment() | transport.env`, and that default is only
   HOME, LOGNAME, PATH, SHELL, TERM and USER. Nothing else of the Daemon's environment reaches
@@ -165,3 +202,57 @@ and the Profile writes the common `mcpServers` + `{"type": "http", "url": ...}` 
   `CliRunner`, whose stdout and stderr have no `fileno`, fails with `Client failed to connect:
   fileno` (checked 2026-09-08). A stdio Upstream is therefore scanned through the Daemon in
   tests, not through Typer's runner.
+- What an OAuth Upstream rests on (checked 2026-09-08, 4.0.3 with `mcp` 2.1.1). Sources:
+  `fastmcp/client/auth/oauth.py`, `mcp/client/auth/oauth2.py`, `mcp/client/auth/utils.py`,
+  `mcp/shared/auth.py`; pinned in `tests/test_fastmcp_contract.py`.
+  - `fastmcp.client.auth.OAuth` always opens a browser (`webbrowser.open` in its own
+    `redirect_handler`) and always runs a loopback uvicorn callback server; neither handler is
+    a constructor parameter, and its `token_storage` is an `AsyncKeyValue`, not the SDK's
+    `TokenStorage`. mcpshape therefore builds `mcp.client.auth.OAuthClientProvider` itself,
+    which does take `redirect_handler`, `callback_handler`, and a `TokenStorage`.
+  - `TokenStorage` is a four-method async protocol: `get_tokens`, `set_tokens`,
+    `get_client_info`, `set_client_info`, over `OAuthToken` and `OAuthClientInformationFull`.
+    Both are pydantic models that round-trip through `model_dump(mode="json")`; a plain
+    `model_dump()` leaves `AnyUrl` objects `json.dumps` refuses.
+  - A `ClientTransport` given an `auth=` that is not FastMCP's own `OAuth` passes it to httpx
+    as it stands: it is neither bound to the URL nor handed the transport's client factory.
+  - `OAuthClientProvider._initialize` loads the stored token set but leaves
+    `token_expiry_time` unset, so a token stored long ago would be sent once and rejected.
+    mcpshape stores the moment a token dies and sets the expiry on load, as FastMCP's own
+    `OAuth` does.
+  - A refresh that fails raises nothing: the provider logs it, clears the token set, and falls
+    through to the full authorization flow, which reaches the redirect handler. That is why an
+    expired, non-refreshable token surfaces through a handler that refuses, not an exception.
+  - Discovery starts from a 401 only, and in this order: the `WWW-Authenticate`
+    `resource_metadata` URL, `/.well-known/oauth-protected-resource<path>`, then the root one;
+    then the authorization server's `/.well-known/oauth-authorization-server`, with
+    `openid-configuration` as the fallback. The metadata `issuer` must equal the discovered
+    authorization server URL as a plain string.
+  - Scope selection overwrites what the client asked for: the `WWW-Authenticate` scope, else
+    the protected resource's `scopes_supported`, else the authorization server's. An
+    Upstream's own `scopes` therefore only decide what the browser flow asks for where the
+    provider advertises nothing, and device-code pairing, which mcpshape drives itself, uses
+    them as written.
+  - There is no device-code grant in FastMCP 4.0.3 or `mcp` 2.1.1, and no `FileTokenStorage`:
+    the default store is in memory and warns. mcpshape speaks RFC 8628 to the provider itself,
+    with the `httpx2` FastMCP already ships.
+  - `fastmcp.client.oauth_callback.create_oauth_callback_server` serves `/callback` on a given
+    port and fills an `OAuthCallbackResult` with the code, state, and `iss`, then sets the
+    event it was handed; the event is only ever `.set()`, so an `asyncio.Event` does.
+- What a call over a dead connection raises (checked 2026-09-08, 4.0.3 with `mcp` 2.x). A
+  `call_tool_mcp`, `read_resource` or `get_prompt` on a session whose other end is gone raises
+  `MCPError` with `mcp_types.CONNECTION_CLOSED` (-32000), whatever the transport: a Streamable
+  HTTP server that stopped answering, an stdio child that exited. The SDK uses the same code
+  for its own "SSE stream ended without a response". An error the Upstream itself answered is
+  something else: a failing or unknown tool is an `isError` result, and a missing resource or
+  prompt is an `MCPError` carrying that error's own JSON-RPC code (`INVALID_PARAMS` for a
+  resource FastMCP does not have). After a `CONNECTION_CLOSED` the client reports
+  `is_connected()` false, and closing it raises whatever the transport failed with, so the
+  caller has to swallow that. A new client on the same URL reaches an Upstream that came back;
+  the dead one cannot be reused (it fails with `nesting counter should be 0`).
+- Killing a FastMCP HTTP server in-process while a legacy-era client still has a session open
+  leaves every later FastMCP HTTP server in that process unable to serve the legacy era: each
+  new connect ends with `SSE stream ended without a response`, from another process too, while
+  a modern-era `Client` and an in-memory `ProxyClient` still work (checked 2026-09-08, 4.0.3).
+  mcpshape's Upstream client is a `ProxyClient`, which is legacy-era, so a test that kills an
+  HTTP Upstream serves it from a child process instead of in-process uvicorn.

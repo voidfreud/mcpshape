@@ -1,4 +1,4 @@
-"""``mcpshape daemon``: up, down, status, logs, install, uninstall."""
+"""``mcpshape daemon``: up, down, status, logs, reload, install, uninstall."""
 
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ from mcpshape.cli.common import (
     state,
 )
 from mcpshape.cli.listing import health_text, state_text
-from mcpshape.cli.live import Live, how_long, read_live, stop_daemon
+from mcpshape.cli.live import Live, how_long, read_live, reload_daemon, stop_daemon
 from mcpshape.config import load_settings
 from mcpshape.paths import daemon_lock_file, daemon_log_file, log_dir
 
@@ -34,7 +34,7 @@ if TYPE_CHECKING:
 
 
 app = typer.Typer(
-    help="Operate the Daemon: up, down, status, logs, install, uninstall.",
+    help="Operate the Daemon: up, down, status, logs, reload, install, uninstall.",
     epilog=example("daemon up"),
     context_settings=HELP_OPTIONS,
     no_args_is_help=True,
@@ -138,6 +138,28 @@ def status(ctx: typer.Context) -> None:
         console.print("Start it with: [bold]mcpshape daemon up[/bold]")
         return
     console.print(f"Daemon running at [bold]{live.url}[/bold]")
+    if live.state is None or not live.state.upstreams:
+        console.print("It is serving no Upstreams. Add one with [bold]mcpshape add[/bold].")
+        return
+    console.print(_table(live))
+    for note in _notes(live):
+        console.print(f"  [yellow]![/] {escape(note)}")
+
+
+@app.command("reload", epilog=example("daemon reload"))
+def reload(ctx: typer.Context) -> None:
+    """Make the running Daemon re-read every Proxy's files now, and show what came of it.
+
+    A Proxy re-reads a changed file on the next request anyway; this forces the matter for
+    every Proxy at once and reports each one's health.
+    """
+    with reporting_errors():
+        live = reload_daemon(state(ctx).config_dir)
+    if not live.running:
+        console.print(f"Daemon not running at {live.url}")
+        console.print("Nothing to reload: the Daemon reads every file when it starts.")
+        return
+    console.print(f"Reloaded every Proxy of the Daemon at [bold]{live.url}[/bold]")
     if live.state is None or not live.state.upstreams:
         console.print("It is serving no Upstreams. Add one with [bold]mcpshape add[/bold].")
         return

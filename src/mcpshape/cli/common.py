@@ -16,6 +16,8 @@ from mcpshape.model import CapError
 from mcpshape.names import InvalidNameError
 from mcpshape.profiles import Profile, UnknownClientError, profile
 from mcpshape.proxy import OverrideError
+from mcpshape.secrets import SecretError
+from mcpshape.tokens import TokenError
 
 if TYPE_CHECKING:
     from collections.abc import Generator
@@ -62,10 +64,22 @@ def fail(message: str) -> NoReturn:
 
 @contextlib.contextmanager
 def reporting_errors() -> Generator[None]:
-    """Turn config, Catalog, Override, Cap, and name errors into one red line and exit code 1."""
+    """Turn config, Catalog, Override, Cap, name, secret, and token errors into one red line.
+
+    Every one of these names a file, a key, or a variable and never a value, so the message is
+    safe to print as it stands.
+    """
     try:
         yield
-    except (ConfigError, CatalogError, InvalidNameError, OverrideError, CapError) as exc:
+    except (
+        ConfigError,
+        CatalogError,
+        InvalidNameError,
+        OverrideError,
+        CapError,
+        SecretError,
+        TokenError,
+    ) as exc:
         fail(str(exc))
 
 

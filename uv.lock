@@ -718,7 +718,10 @@ name = "mcpshape"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "cryptography" },
     { name = "fastmcp" },
+    { name = "httpx2" },
+    { name = "jsonschema" },
     { name = "pydantic" },
     { name = "starlette" },
     { name = "tomlkit" },
@@ -736,7 +739,10 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "cryptography", specifier = ">=50" },
     { name = "fastmcp", specifier = ">=4,<5" },
+    { name = "httpx2", specifier = ">=2" },
+    { name = "jsonschema", specifier = ">=4" },
     { name = "pydantic", specifier = ">=2.13.5" },
     { name = "starlette", specifier = ">=1.0" },
     { name = "tomlkit", specifier = ">=0.15.1" },

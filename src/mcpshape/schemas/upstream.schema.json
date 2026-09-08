@@ -84,13 +84,35 @@
     "HttpUpstreamFile": {
       "additionalProperties": false,
       "properties": {
+        "url": {
+          "title": "Url",
+          "type": "string"
+        },
+        "auth": {
+          "anyOf": [
+            {
+              "const": "oauth",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "How the Upstream is authorized. \"oauth\" logs in through the provider once, from the CLI, and keeps the token encrypted in the state directory; unset sends no credentials.",
+          "title": "Auth"
+        },
+        "scopes": {
+          "description": "OAuth scopes to ask the provider for. Empty leaves the choice to the provider and what the Upstream's metadata advertises.",
+          "items": {
+            "type": "string"
+          },
+          "title": "Scopes",
+          "type": "array"
+        },
         "transport": {
           "const": "http",
           "title": "Transport",
-          "type": "string"
-        },
-        "url": {
-          "title": "Url",
           "type": "string"
         },
         "version": {
@@ -109,8 +131,8 @@
         }
       },
       "required": [
-        "transport",
         "url",
+        "transport",
         "version"
       ],
       "title": "HttpUpstreamFile",
@@ -193,54 +215,40 @@
       "title": "LifecycleOverrides",
       "type": "object"
     },
-    "MemoryUpstreamFile": {
-      "additionalProperties": false,
-      "properties": {
-        "transport": {
-          "const": "memory",
-          "title": "Transport",
-          "type": "string"
-        },
-        "target": {
-          "pattern": "^[A-Za-z_][\\w.]*:[A-Za-z_]\\w*$",
-          "title": "Target",
-          "type": "string"
-        },
-        "version": {
-          "const": 1,
-          "description": "Format version of this file.",
-          "title": "Version",
-          "type": "integer"
-        },
-        "lifecycle": {
-          "$ref": "#/$defs/LifecycleOverrides",
-          "description": "This Upstream's lifecycle settings, over the defaults in config.toml."
-        },
-        "caps": {
-          "$ref": "#/$defs/CapOverrides",
-          "description": "This Upstream's Caps, over the global master Caps in config.toml."
-        }
-      },
-      "required": [
-        "transport",
-        "target",
-        "version"
-      ],
-      "title": "MemoryUpstreamFile",
-      "type": "object"
-    },
     "SseUpstreamFile": {
       "additionalProperties": false,
       "properties": {
+        "url": {
+          "title": "Url",
+          "type": "string"
+        },
+        "auth": {
+          "anyOf": [
+            {
+              "const": "oauth",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "How the Upstream is authorized. \"oauth\" logs in through the provider once, from the CLI, and keeps the token encrypted in the state directory; unset sends no credentials.",
+          "title": "Auth"
+        },
+        "scopes": {
+          "description": "OAuth scopes to ask the provider for. Empty leaves the choice to the provider and what the Upstream's metadata advertises.",
+          "items": {
+            "type": "string"
+          },
+          "title": "Scopes",
+          "type": "array"
+        },
         "transport": {
           "const": "sse",
           "title": "Transport",
           "type": "string"
         },
-        "url": {
-          "title": "Url",
-          "type": "string"
-        },
         "version": {
           "const": 1,
           "description": "Format version of this file.",
@@ -257,8 +265,8 @@
         }
       },
       "required": [
-        "transport",
         "url",
+        "transport",
         "version"
       ],
       "title": "SseUpstreamFile",
@@ -318,7 +326,6 @@
   "discriminator": {
     "mapping": {
       "http": "#/$defs/HttpUpstreamFile",
-      "memory": "#/$defs/MemoryUpstreamFile",
       "sse": "#/$defs/SseUpstreamFile",
       "stdio": "#/$defs/StdioUpstreamFile"
     },
@@ -333,9 +340,6 @@
     },
     {
       "$ref": "#/$defs/SseUpstreamFile"
-    },
-    {
-      "$ref": "#/$defs/MemoryUpstreamFile"
     }
   ]
 }

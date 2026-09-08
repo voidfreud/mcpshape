@@ -22,14 +22,26 @@ A user drops ``<proxy>.py`` next to ``<proxy>.toml`` and writes::
             await upstream.call("close_issue", id=id)
         return "done"
 
+    @tool                                   # a plain function: no await, the call blocks
+    def count_open() -> str:
+        \"\"\"How many issues are open.\"\"\"
+        return upstream.read("issues://open").text
+
 A ``before`` Hook may change ``call.args`` or return a result, which short-circuits the
-Upstream. An ``after`` Hook receives the result, short-circuited or not, and returns the one
-to send; an error the Upstream reports skips the ``after`` Hooks and reaches the Client as it
-is. Raising anywhere becomes an error to the Client carrying the exception's message. A
-Virtual Tool's exposed name is its identity, so Hooks keyed by it run around it too.
+Upstream. An ``after`` Hook runs on a tool's result whether it is a success or an error the
+Upstream reported (``result.is_error``), short-circuited or not, and returns the one to send:
+a rewritten error, a success (set ``result.is_error = False``), or ``None`` to leave it as is.
+Raising anywhere becomes an error to the Client carrying the exception's message. A resource
+read or prompt get has no error result on the wire, only an exception, which still skips its
+``after`` Hooks. A Virtual Tool's exposed name is its identity, so Hooks keyed by it run around
+it too.
 ``upstream`` reaches the Proxy's own Upstream under Catalog names, and nothing else; what it
-calls does not run the Hooks. Hooks run in the Daemon process with no sandbox: a function
-that blocks forever or calls ``sys.exit`` is not guarded against.
+calls does not run the Hooks. An ``async`` function awaits ``call``, ``read``, and ``get``; a
+plain one runs in a worker thread, as FastMCP runs a sync tool, and calls them without
+``await``, blocking there until the Upstream answers.
+Hooks run in the Daemon process with no sandbox. An ``async`` function that blocks forever
+stalls the Daemon; a plain one stalls only its own call, since it holds a worker thread and
+nothing else. ``sys.exit`` anywhere in user code is not guarded against.
 
 Results are mcpshape's own small types over MCP's wire shapes, never FastMCP's (ADR 0001).
 The adapter converts at its edge. This module knows no FastMCP.
@@ -37,24 +49,26 @@ The adapter converts at its edge. This module knows no FastMCP.
 
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import inspect
 import json
 import logging
 import re
 import sys
+import threading
 import traceback
 from collections.abc import Callable
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Protocol, cast, overload
 
 from mcpshape.catalog import Item
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Generator
-    from pathlib import Path
+    from collections.abc import Awaitable, Coroutine, Generator
 
 log = logging.getLogger("mcpshape.hooks")
 
@@ -102,10 +116,15 @@ class ToolResult:
     derives it from the text where the schema allows: a schema wrapping one value takes the
     text (or the JSON it parses as), and an object schema takes the text when it is a JSON
     object. Anything else is the user's to match.
+
+    ``is_error`` says whether the Upstream reported this as an error; an ``after`` Hook sees it
+    on the result it is handed and may flip it in either direction (setting ``.text`` leaves it
+    as it is: a Hook that wants a success sets ``is_error = False`` itself).
     """
 
     content: list[dict[str, Any]] = field(default_factory=list[dict[str, Any]])
     structured: dict[str, Any] | None = None
+    is_error: bool = False
 
     @property
     def text(self) -> str:
@@ -119,7 +138,8 @@ class ToolResult:
 
     @classmethod
     def of(cls, value: object) -> ToolResult:
-        """``value`` as a tool result: a string is text, a dict is structured, blocks stay."""
+        """``value`` as a successful tool result: a string is text, a dict is structured, blocks
+        stay, and a ``ToolResult`` passes through unchanged, ``is_error`` included."""
         match value:
             case ToolResult():
                 return value
@@ -258,7 +278,15 @@ class UpstreamHandle(Protocol):
     async def get(self, name: str, args: dict[str, Any]) -> PromptResult: ...
 
 
-_bound: ContextVar[UpstreamHandle | None] = ContextVar("mcpshape_upstream", default=None)
+@dataclass(frozen=True)
+class _Bound:
+    """The handle user code reaches, and the loop a worker thread hands its coroutines to."""
+
+    handle: UpstreamHandle
+    loop: asyncio.AbstractEventLoop
+
+
+_bound: ContextVar[_Bound | None] = ContextVar("mcpshape_upstream", default=None)
 
 
 class _Upstream:
@@ -266,40 +294,75 @@ class _Upstream:
 
     Names are Catalog names. Calls, reads, and gets go straight to the Upstream, past every
     Hook. An error the Upstream reports raises ``UpstreamError``.
+
+    Each of the three answers whichever way the caller can take it, which is why the return
+    type says both: an ``async`` function, running on the Daemon's loop, gets the coroutine
+    and awaits it; a plain function, running in a worker thread, gets the result itself,
+    having blocked until the Upstream answered. So neither spelling ever hands a sync caller
+    an un-awaited coroutine.
     """
 
-    async def call(
+    def call(
         self, name: str, args: dict[str, Any] | None = None, /, **kwargs: object
-    ) -> ToolResult:
+    ) -> ToolResult | Awaitable[ToolResult]:
         """Call the Upstream tool ``name`` with ``args``, as a dict, as keywords, or both."""
-        return await _handle().call(name, {**(args or {}), **kwargs})
+        reach = _reach()
+        return reach(reach.handle.call(name, {**(args or {}), **kwargs}))
 
-    async def read(self, uri: str) -> ResourceResult:
+    def read(self, uri: str) -> ResourceResult | Awaitable[ResourceResult]:
         """Read the Upstream resource at ``uri``."""
-        return await _handle().read(uri)
+        reach = _reach()
+        return reach(reach.handle.read(uri))
 
-    async def get(
+    def get(
         self, name: str, args: dict[str, Any] | None = None, /, **kwargs: object
-    ) -> PromptResult:
+    ) -> PromptResult | Awaitable[PromptResult]:
         """Get the Upstream prompt ``name`` with ``args``, as a dict, as keywords, or both."""
-        return await _handle().get(name, {**(args or {}), **kwargs})
+        reach = _reach()
+        return reach(reach.handle.get(name, {**(args or {}), **kwargs}))
 
 
 upstream = _Upstream()
 
 
-def _handle() -> UpstreamHandle:
-    handle = _bound.get()
-    if handle is None:
+class _Reach:
+    """How the coroutine the handle returns gets run, from wherever user code is calling.
+
+    A running loop in this thread means the caller is an ``async`` function on the Daemon's
+    loop: the coroutine is handed back for it to await. No running loop means a worker
+    thread, so the coroutine goes to the loop ``bound`` captured and the thread blocks on the
+    result: the loop stays free to run the Upstream call, so the two never wait on each
+    other. Whatever the coroutine raises, ``UpstreamError`` included, is raised here.
+    """
+
+    def __init__(self, handle: UpstreamHandle, loop: asyncio.AbstractEventLoop) -> None:
+        self.handle = handle
+        self._loop = loop
+
+    def __call__[R](self, coro: Coroutine[Any, Any, R]) -> R | Awaitable[R]:
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run_coroutine_threadsafe(coro, self._loop).result()
+        return coro
+
+
+def _reach() -> _Reach:
+    current = _bound.get()
+    if current is None:
         msg = "upstream can only be used from inside a Hook or a Virtual Tool while it runs"
         raise RuntimeError(msg)
-    return handle
+    return _Reach(current.handle, current.loop)
 
 
 @contextmanager
 def bound(handle: UpstreamHandle) -> Generator[None]:
-    """Make ``upstream`` reach ``handle`` for the user code run inside."""
-    token = _bound.set(handle)
+    """Make ``upstream`` reach ``handle`` for the user code run inside.
+
+    The running loop is captured with it: that is the one a worker thread submits to, since a
+    thread has no loop of its own to find.
+    """
+    token = _bound.set(_Bound(handle, asyncio.get_running_loop()))
     try:
         yield
     finally:
@@ -426,13 +489,29 @@ def tool(
 MODULE_PREFIX = "mcpshape_user."
 """User files are imported as ``mcpshape_user.<upstream>_<proxy>``, replaced on every load."""
 
+_loading_lock = threading.Lock()
+"""One load at a time, process-wide: a load edits ``sys.path``, ``sys.modules``, and
+``sys.dont_write_bytecode`` for its duration, and a second thread (``doctor`` under the test
+runner, next to a running Daemon) must not see them half-edited."""
+
 
 def load_user_code(path: Path, label: str) -> UserCode:
     """Import the Proxy ``label``'s Python file at ``path``; nothing there means no user code.
 
+    While the file loads, its Upstream's directory is importable, so ``import helpers`` finds
+    ``upstreams/<name>/helpers.py``: the directory goes on the front of ``sys.path`` for the
+    duration and comes off again after, in a ``finally``. A helper is dropped from
+    ``sys.modules`` first, so it is re-imported fresh on every load: every Proxy of the
+    Upstream re-reads its files when a helper changes, and a helper of one Upstream is never
+    seen by another Upstream's Proxy, since the module cache never keeps the wrong one bound
+    to a name two Upstreams both use. Bytecode caching is off for the duration too, so a
+    helper edited twice within the same second, which its cached ``.pyc`` would otherwise
+    consider unchanged, is still read fresh.
+
     Raises ``UserCodeError`` when the file cannot be loaded, for whatever reason: a syntax
-    error, an import that fails, an exception at module level. The Daemon never crashes on
-    user code, and ``doctor`` reports the same message.
+    error, an import that fails, an exception at module level, including one raised while
+    importing a helper. The Daemon never crashes on user code, and ``doctor`` reports the
+    same message.
     """
     if not path.is_file():
         return UserCode()
@@ -445,15 +524,45 @@ def load_user_code(path: Path, label: str) -> UserCode:
     code = UserCode()
     token = _loading.set(code)
     sys.modules[name] = module
-    try:
-        spec.loader.exec_module(module)
-    except Exception as exc:
-        sys.modules.pop(name, None)
-        formatted = "".join(traceback.format_exception(exc))
-        raise UserCodeError(_summary(path, exc), formatted) from exc
-    finally:
-        _loading.reset(token)
+    upstream_dir = str(path.parent)
+    with _loading_lock:
+        _drop_stale_helpers(path.parent.parent.resolve())
+        sys.path.insert(0, upstream_dir)
+        dont_write_bytecode, sys.dont_write_bytecode = sys.dont_write_bytecode, True
+        try:
+            spec.loader.exec_module(module)
+        except Exception as exc:
+            sys.modules.pop(name, None)
+            formatted = "".join(traceback.format_exception(exc))
+            raise UserCodeError(_summary(path, exc), formatted) from exc
+        finally:
+            sys.path.remove(upstream_dir)
+            sys.dont_write_bytecode = dont_write_bytecode
+            _loading.reset(token)
     return code
+
+
+def _drop_stale_helpers(upstreams_dir: Path) -> None:
+    """Forget every module already imported from under ``upstreams_dir``.
+
+    Import caches by module name, so a ``helpers`` module one Upstream's Proxy imported would
+    otherwise be handed straight back to another Upstream's Proxy, or to this same Proxy on a
+    later load after the file on disk changed. Dropping it here is what makes the next
+    ``import helpers`` read the file fresh, from whichever Upstream's directory is on
+    ``sys.path`` for this load.
+    """
+    for mod_name, module in list(sys.modules.items()):
+        if mod_name.startswith(MODULE_PREFIX):
+            continue
+        file = getattr(module, "__file__", None)
+        if not file:
+            continue
+        try:
+            resolved = Path(file).resolve()
+        except OSError:
+            continue
+        if upstreams_dir in resolved.parents:
+            del sys.modules[mod_name]
 
 
 def _summary(path: Path, exc: BaseException) -> str:
@@ -470,26 +579,32 @@ def _summary(path: Path, exc: BaseException) -> str:
 # --- the chain a call runs through -----------------------------------------------------------
 
 
-async def run_call[R](
+async def run_call[R](  # noqa: PLR0913, PLR0917  # every one of these is state the chain needs
     code: UserCode,
     call: Call,
     forward: Callable[[Call], Awaitable[R]],
     of: Callable[[object], R],
     cap: Callable[[R], R] | None = None,
+    check: Callable[[R, str], None] | None = None,
 ) -> R:
     """Run ``call`` through its Hooks: before, the Upstream unless short-circuited, after, Cap.
 
     ``forward`` reaches the Upstream with the arguments as the ``before`` Hooks left them;
     ``of`` turns whatever a Hook returns into the result type. ``cap`` is where the tool output
     Cap slots in: it runs last, on whatever the Hooks leave, short-circuited or not, so what a
-    Client receives never exceeds it either way. A Hook that raises is logged and its exception
-    re-raised for the adapter to turn into the Client's error.
+    Client receives never exceeds it either way. ``check``, when given, runs right after each
+    Hook that returned a value, ``before`` or ``after``, on the result and that Hook's name
+    (its ``__name__``, or ``repr`` when it has none); whatever it raises propagates like a Hook
+    raising. A Hook that raises is logged and its exception re-raised for the adapter to turn
+    into the Client's error.
     """
     result: R | None = None
     for fn in code.hooks("before", call):
         answer = await _invoke(fn, call, call)
         if answer is not None:
             result = of(answer)
+            if check is not None:
+                check(result, _hook_name(fn))
             break
     if result is None:
         result = await forward(call)
@@ -497,16 +612,33 @@ async def run_call[R](
         answer = await _invoke(fn, call, call, result)
         if answer is not None:
             result = of(answer)
+            if check is not None:
+                check(result, _hook_name(fn))
     return cap(result) if cap is not None else result
 
 
 async def _invoke(fn: Callable[..., Any], call: Call, *args: object) -> object:
-    """Call the Hook, sync or async, logging what it raises before letting it through."""
+    """Call the Hook, sync or async, logging what it raises before letting it through.
+
+    An ``async`` Hook is awaited on the Daemon's loop. A plain one goes to a worker thread,
+    as FastMCP runs a sync tool, so blocking there stalls only this call; ``asyncio.to_thread``
+    copies the current context, which is how ``upstream`` reaches that thread. Whatever it
+    left in ``call.args`` is read here, after the thread returned. A plain Hook handing back
+    an awaitable is still awaited, on the loop.
+    """
     try:
-        answer: object = fn(*args)
-        if inspect.isawaitable(answer):
-            answer = await answer
+        answer: object
+        if inspect.iscoroutinefunction(fn):
+            answer = await fn(*args)
+        else:
+            answer = await asyncio.to_thread(fn, *args)
+            if inspect.isawaitable(answer):
+                answer = await answer
     except Exception:
-        log.warning("Hook %s on %s raised", getattr(fn, "__name__", fn), call, exc_info=True)
+        log.warning("Hook %s on %s raised", _hook_name(fn), call, exc_info=True)
         raise
     return answer
+
+
+def _hook_name(fn: Callable[..., Any]) -> str:
+    return getattr(fn, "__name__", None) or repr(fn)

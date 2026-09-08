@@ -30,24 +30,47 @@ class StdioTransport(_Transport):
     )
 
 
-class HttpTransport(_Transport):
+AUTH_HELP = {
+    "auth": (
+        'How the Upstream is authorized. "oauth" logs in through the provider once, from the '
+        "CLI, and keeps the token encrypted in the state directory; unset sends no "
+        "credentials."
+    ),
+    "scopes": (
+        "OAuth scopes to ask the provider for. Empty leaves the choice to the provider and "
+        "what the Upstream's metadata advertises."
+    ),
+}
+"""One wording per OAuth setting, so the two URL transports never describe the same key
+differently."""
+
+
+class _UrlTransport(_Transport):
+    """What a Streamable HTTP and a legacy SSE Upstream share: a URL and how it is authorized."""
+
+    url: str
+    auth: Literal["oauth"] | None = Field(default=None, description=AUTH_HELP["auth"])
+    scopes: list[str] = Field(default_factory=list[str], description=AUTH_HELP["scopes"])
+
+
+class HttpTransport(_UrlTransport):
     """A Streamable HTTP server reached by URL."""
 
     transport: Literal["http"]
-    url: str
 
 
-class SseTransport(_Transport):
+class SseTransport(_UrlTransport):
     """A legacy SSE server reached by URL."""
 
     transport: Literal["sse"]
-    url: str
 
 
 class MemoryTransport(_Transport):
     """An MCP server living in the Daemon process, as ``module:attribute``.
 
-    Test-only: it lets an in-memory server act as an Upstream with no subprocess or network.
+    The test seam's alone (#18): it lets an in-memory server act as an Upstream with no
+    subprocess or network. The config loader refuses it in a user's file and the shipped
+    schema does not list it; only the seam enables it, in Python.
     """
 
     transport: Literal["memory"]

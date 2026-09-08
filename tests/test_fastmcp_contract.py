@@ -5,13 +5,20 @@ These tests talk to FastMCP directly, on purpose. Everything else goes through t
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
+import json
 import os
+import threading
+from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any, cast
 
 import fastmcp
+import httpx2
 import mcp_types
 import pytest
 from fastmcp import Client, FastMCP
+from fastmcp.client.oauth_callback import OAuthCallbackResult, create_oauth_callback_server
 from fastmcp.client.transports import StdioTransport, StreamableHttpTransport
 from fastmcp.exceptions import ToolError
 from fastmcp.prompts import Message, PromptResult
@@ -26,6 +33,14 @@ from fastmcp.server.providers.proxy import (
 )
 from fastmcp.tools import FunctionTool, Tool
 from fastmcp.tools.base import ToolResult
+from mcp.client.auth import OAuthClientProvider, TokenStorage
+from mcp.shared.auth import (
+    AuthorizationCodeResult,
+    OAuthClientInformationFull,
+    OAuthClientMetadata,
+    OAuthToken,
+)
+from mcp.shared.exceptions import MCPError
 from mcp_types import TextContent, TextResourceContents
 from pydantic import AnyUrl, PrivateAttr
 from starlette.applications import Starlette
@@ -33,7 +48,9 @@ from starlette.routing import Mount
 
 from tests.support import child_upstream
 from tests.support.asgi import asgi_client_factory
-from tests.support.seam import free_port, until
+from tests.support.oauth_provider import serving_provider
+from tests.support.seam import free_port, restartable_upstream, until
+from tests.test_proxy_seam import calculator
 
 if TYPE_CHECKING:
     from fastmcp.server.context import Context
@@ -315,6 +332,86 @@ async def test_a_function_tool_advertises_a_wrapped_output_schema_the_client_che
         with pytest.raises(RuntimeError, match="did not return structured content"):
             await client.call_tool("greet", {"name": "Ann"})
 
+    class WrongShape(Tool):
+        async def run(self, arguments: dict[str, Any]) -> ToolResult:  # noqa: ARG002
+            return ToolResult(
+                content=[TextContent(type="text", text="hi")],
+                structured_content={"oops": "not a string"},
+            )
+
+    misshapen = FastMCP("misshapen")
+    misshapen.add_tool(
+        WrongShape(name="greet", parameters={"type": "object"}, output_schema=schema)
+    )
+    async with Client(misshapen) as client:
+        with pytest.raises(RuntimeError, match="Invalid structured content returned by tool greet"):
+            await client.call_tool("greet", {"name": "Ann"})
+
+
+async def test_a_sync_tool_body_runs_in_a_worker_thread_that_can_see_the_context() -> None:
+    """What a sync Virtual Tool rests on: ``run_in_thread`` and the context in that thread.
+
+    ``run_in_thread`` is what lets a plain function block on the ``upstream`` handle, and the
+    context reaching the thread is what lets the handle be found there at all.
+    """
+    where: ContextVar[str] = ContextVar("where", default="unset")
+    seen: dict[str, Any] = {}
+
+    def note() -> str:
+        """Say where the body ran."""
+        seen["thread"] = threading.get_ident()
+        seen["context"] = where.get()
+        return "noted"
+
+    threaded = FunctionTool.from_function(note)
+    assert threaded.run_in_thread is True, "a sync body runs in a thread unless told otherwise"
+    inline = FunctionTool.from_function(note, run_in_thread=False)
+
+    server = FastMCP("sync")
+    server.add_tool(Tool.from_tool(threaded, name="threaded"))
+    server.add_tool(Tool.from_tool(inline, name="inline"))
+    token = where.set("bound")
+    try:
+        async with Client(server) as client:
+            await client.call_tool("threaded", {})
+            assert seen["thread"] != threading.get_ident(), "the body ran off the loop's thread"
+            assert seen["context"] == "bound", "anyio.to_thread.run_sync copies the context"
+            await client.call_tool("inline", {})
+    finally:
+        where.reset(token)
+    assert seen["thread"] == threading.get_ident(), "run_in_thread=False runs it on the loop"
+
+
+async def test_a_worker_thread_hands_a_coroutine_back_to_the_loop_it_was_given() -> None:
+    """How the ``upstream`` handle answers a sync caller: submit to the loop, block, raise here.
+
+    ``asyncio.to_thread`` copies the context the same way anyio does, so a Hook run this way
+    finds the handle too.
+    """
+    where: ContextVar[str] = ContextVar("where", default="unset")
+
+    async def answer(text: str) -> str:
+        if text == "boom":
+            raise ValueError(text)
+        return text.upper()
+
+    loop = asyncio.get_running_loop()
+
+    def body() -> tuple[str, str]:
+        assert where.get() == "bound", "asyncio.to_thread copies the context"
+        with pytest.raises(RuntimeError):
+            asyncio.get_running_loop()  # no loop in this thread: that is how the handle tells
+        done = asyncio.run_coroutine_threadsafe(answer("hi"), loop).result()
+        with pytest.raises(ValueError, match="boom"):
+            asyncio.run_coroutine_threadsafe(answer("boom"), loop).result()
+        return done, where.get()
+
+    token = where.set("bound")
+    try:
+        assert await asyncio.to_thread(body) == ("HI", "bound")
+    finally:
+        where.reset(token)
+
 
 async def test_a_proxy_template_reads_while_creating_and_a_cached_resource_serves_that() -> None:
     """The chain for a template read runs in ``create_resource``, and hands back a resource
@@ -472,3 +569,191 @@ async def test_closing_a_client_that_never_connected_is_harmless() -> None:
     """The cleanup ``_Link.open`` registers before it connects, so a cancelled connect leaves
     nothing behind."""
     await Client(StreamableHttpTransport("http://127.0.0.1:1/mcp")).close()
+
+
+# --- what OAuth Upstreams rest on --------------------------------------------------------------
+
+
+class _Storage(TokenStorage):
+    """The four methods the SDK's token storage protocol is, over a dict."""
+
+    def __init__(self, token: OAuthToken | None = None, client: object = None) -> None:
+        self.token = token
+        self.client = client
+
+    async def get_tokens(self) -> OAuthToken | None:
+        return self.token
+
+    async def set_tokens(self, tokens: OAuthToken) -> None:
+        self.token = tokens
+
+    async def get_client_info(self) -> OAuthClientInformationFull | None:
+        return cast("OAuthClientInformationFull | None", self.client)
+
+    async def set_client_info(self, client_info: OAuthClientInformationFull) -> None:
+        self.client = client_info
+
+
+def _metadata() -> OAuthClientMetadata:
+    return OAuthClientMetadata(
+        client_name="mcpshape",
+        redirect_uris=[AnyUrl("http://localhost/callback")],
+        grant_types=["authorization_code", "refresh_token"],
+        response_types=["code"],
+    )
+
+
+def _provider(storage: TokenStorage, url: str = "http://contract/mcp") -> OAuthClientProvider:
+    return OAuthClientProvider(
+        server_url=url,
+        client_metadata=_metadata(),
+        storage=storage,
+        redirect_handler=_unreachable_redirect,
+        callback_handler=_unreachable_callback,
+    )
+
+
+REFUSED = "no browser here; log in from the CLI"
+
+
+async def _unreachable_redirect(_url: str) -> None:
+    raise _RefusedError(REFUSED)
+
+
+async def _unreachable_callback() -> AuthorizationCodeResult:
+    raise _RefusedError(REFUSED)
+
+
+class _RefusedError(Exception):
+    """What mcpshape's Daemon-side handlers raise instead of opening a browser."""
+
+
+def test_an_oauth_client_provider_takes_any_object_with_the_four_storage_methods() -> None:
+    """mcpshape's token store is bridged to the SDK at exactly this seam."""
+    storage = _Storage()
+
+    provider = _provider(storage)
+
+    assert provider.context.storage is storage
+
+
+async def test_a_stored_token_is_loaded_without_its_expiry() -> None:
+    """Why mcpshape stores the moment a token dies and sets the expiry itself.
+
+    ``_initialize`` reads the token set back but leaves ``token_expiry_time`` unset, so a
+    token whose ``expires_in`` has long run out would still be sent once.
+    """
+    provider = _provider(_Storage(OAuthToken(access_token="secret", expires_in=1)))
+
+    await provider._initialize()  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001  # the private step is the contract
+
+    assert provider.context.current_tokens is not None
+    assert provider.context.token_expiry_time is None
+    provider.context.update_token_expiry(provider.context.current_tokens)
+    assert provider.context.token_expiry_time is not None
+
+
+def test_a_transport_uses_a_client_provider_it_is_handed_as_it_stands() -> None:
+    """FastMCP binds its own ``OAuth``; anything else is passed to httpx as given."""
+    provider = _provider(_Storage())
+
+    transport = StreamableHttpTransport("http://contract/mcp", auth=provider)
+
+    assert transport.auth is provider
+
+
+def test_an_oauth_token_and_a_client_registration_round_trip_through_json() -> None:
+    """What mcpshape encrypts and reads back is the JSON form of these two models."""
+    token = OAuthToken(access_token="a", refresh_token="r", expires_in=60, scope="read")
+    client = OAuthClientInformationFull(
+        client_id="c",
+        redirect_uris=[AnyUrl("http://localhost/callback")],
+        token_endpoint_auth_method="none",
+    )
+
+    assert OAuthToken.model_validate(json.loads(json.dumps(token.model_dump(mode="json")))) == token
+    again = OAuthClientInformationFull.model_validate(
+        json.loads(json.dumps(client.model_dump(mode="json", exclude_none=True)))
+    )
+    assert again.client_id == "c"
+    assert again.token_endpoint_auth_method == "none"
+
+
+async def test_a_refresh_that_fails_raises_nothing_and_reaches_the_redirect_handler() -> None:
+    """Why an expired, non-refreshable token surfaces through the handler, not an exception.
+
+    The SDK clears the token set on a failed refresh and falls through to the full flow, so a
+    redirect handler that refuses is what turns it into a readable failure.
+    """
+    async with serving_provider(calculator()) as provider:
+        storage = _Storage(
+            OAuthToken(access_token="stale", refresh_token="gone", expires_in=-1),
+            OAuthClientInformationFull(client_id="c", token_endpoint_auth_method="none"),
+        )
+        auth = _provider(storage, provider.mcp_url)
+
+        with pytest.raises(Exception, match=REFUSED):
+            async with Client(StreamableHttpTransport(provider.mcp_url, auth=auth)):
+                pass
+
+
+async def test_the_callback_server_hands_back_the_code_and_state_the_browser_carried() -> None:
+    """The loopback half of the browser login: what mcpshape runs while the browser is out."""
+    port = free_port()
+    result = OAuthCallbackResult()
+    ready = asyncio.Event()
+    server = create_oauth_callback_server(
+        port=port,
+        host="127.0.0.1",
+        server_url="http://contract/mcp",
+        result_container=result,
+        result_ready=cast("Any", ready),
+    )
+    serving = asyncio.create_task(server.serve())
+    try:
+        await until(lambda: server.started, "the callback server to listen")
+        async with httpx2.AsyncClient() as browser:
+            await browser.get(f"http://127.0.0.1:{port}/callback?code=abc&state=xyz")
+        await asyncio.wait_for(ready.wait(), 5)
+    finally:
+        server.should_exit = True
+        await serving
+
+    assert (result.code, result.state, result.error) == ("abc", "xyz", None)
+
+
+async def test_a_dead_transport_raises_connection_closed_and_an_upstream_error_does_not() -> None:
+    """How mcpshape tells an Upstream that is gone from one that answered an error (#22).
+
+    A tool that fails and a tool the Upstream does not have are ``isError`` results, and a
+    resource it does not have is an ``MCPError`` carrying its own JSON-RPC code; none of those
+    says anything about the connection. A transport whose other end is gone raises
+    ``CONNECTION_CLOSED`` instead and leaves the session no longer connected, which is what
+    ``_Link.died`` classifies on. Closing such a client raises too, which is why the state
+    machine lets a dead link go without minding what saying goodbye costs. An Upstream back on
+    the same URL is reached by a new client, which is the reconnect after the backoff.
+    """
+    async with restartable_upstream() as served:
+        client: ProxyClient[Any] = ProxyClient(StreamableHttpTransport(served.url))
+        dead: MCPError | None = None
+        with contextlib.suppress(Exception):  # what closing a dead client raises
+            async with client:
+                async with client:
+                    assert not (await client.call_tool_mcp("add", {"a": 1, "b": 1})).is_error
+                    assert (await client.call_tool_mcp("no_such_tool", {})).is_error
+                    with pytest.raises(MCPError) as unknown:
+                        await client.read_resource("data://nowhere")
+                    assert unknown.value.error.code != mcp_types.CONNECTION_CLOSED
+
+                    await served.kill()
+                    with pytest.raises(MCPError) as gone:
+                        await client.call_tool_mcp("add", {"a": 1, "b": 1})
+                    dead = gone.value
+        assert dead is not None
+        assert dead.error.code == mcp_types.CONNECTION_CLOSED
+        assert not client.is_connected()
+
+        await served.revive()
+        back: ProxyClient[Any] = ProxyClient(StreamableHttpTransport(served.url))
+        async with back, back:
+            assert not (await back.call_tool_mcp("add", {"a": 1, "b": 1})).is_error

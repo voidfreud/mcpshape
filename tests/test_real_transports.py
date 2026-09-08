@@ -19,7 +19,13 @@ from mcp_types import TextContent
 
 from tests.support import child_upstream
 from tests.support.clock import FakeClock
-from tests.support.seam import run_cli, running_daemon, serving_upstream, until
+from tests.support.seam import (
+    restartable_upstream,
+    run_cli,
+    running_daemon,
+    serving_upstream,
+    until,
+)
 from tests.test_catalog_drift import cli, drift_file
 from tests.test_proxy_seam import calculator
 
@@ -254,7 +260,45 @@ async def test_a_reconnect_looks_again_over_the_connection_it_already_has(
 
     pending = drift_file(config_dir, "child")
     assert pending is not None
-    assert sorted(pending["tools"]) == ["add", "env_value", "pid", "subtract"]
+    assert sorted(pending["tools"]) == ["add", "die", "env_value", "pid", "subtract"]
+
+
+async def test_an_stdio_upstream_that_dies_mid_call_is_answered_with_the_message(
+    config_dir: ConfigDir, tmp_path: Path
+) -> None:
+    """#22: a lazy Upstream that dies while connected is noticed by the call, not the ping.
+
+    The child ends itself while answering, so the call that reaches it dies with it. That is
+    what moves the Upstream to ``unavailable`` at once; the backoff and a fresh child follow.
+    """
+    clock = FakeClock()
+    spawns = tmp_path / "spawns"
+    message = "The child is not up; nothing was added."
+    config_dir.add_stdio_upstream(
+        "child",
+        child_upstream.command(),
+        child_upstream.args(),
+        env=child_upstream.env(**{child_upstream.SPAWNS: str(spawns)}),
+        lifecycle={"unavailable_message": message},
+    )
+
+    async with running_daemon(config_dir, clock) as daemon, daemon.client("/child/mcp") as client:
+        assert (await client.call_tool("add", {"a": 2, "b": 3})).data == 5
+
+        dying = await client.call_tool("die", {}, raise_on_error=False)
+        assert dying.is_error
+        assert message in error_text(dying)
+        assert await daemon.upstream_state("child") == "unavailable"
+        assert "connection dead" in await upstream_error(await daemon.status(), "child")
+
+        again = await client.call_tool("add", {"a": 1, "b": 1}, raise_on_error=False)
+        assert message in error_text(again)
+
+        await clock.advance(PAST_THE_BACKOFF)
+        assert await daemon.awaiting_state("child", *CONNECTED) in CONNECTED
+        assert (await client.call_tool("add", {"a": 1, "b": 1})).data == 2
+
+    assert len(child_upstream.spawned(spawns)) == 3, "the scan, the call, and the child after it"
 
 
 # --- reached by URL ----------------------------------------------------------------------------
@@ -307,6 +351,57 @@ async def test_a_url_upstream_that_is_not_there_fails_only_calls(config_dir: Con
         assert result.is_error
         assert message in error_text(result)
         assert await daemon.upstream_state("calc") == "unavailable"
+
+
+async def test_a_lazy_url_upstream_that_dies_while_connected_is_noticed_by_the_next_call(
+    config_dir: ConfigDir,
+) -> None:
+    """#22: nothing pings a lazy Upstream, so the call that finds it gone is what reports it."""
+    clock = FakeClock()
+    message = "The calculator is not up; nothing was added."
+    async with restartable_upstream() as served:
+        config_dir.add_url_upstream("calc", served.url, "http", {"unavailable_message": message})
+        async with (
+            running_daemon(config_dir, clock) as daemon,
+            daemon.client("/calc/mcp") as client,
+        ):
+            assert (await client.call_tool("add", {"a": 2, "b": 3})).data == 5
+            assert await daemon.upstream_state("calc") in CONNECTED
+
+            await served.kill()
+
+            failed = await client.call_tool("add", {"a": 1, "b": 1}, raise_on_error=False)
+            assert failed.is_error
+            assert message in error_text(failed)
+            assert await daemon.upstream_state("calc") == "unavailable"
+            assert "connection dead" in await upstream_error(await daemon.status(), "calc")
+
+            await served.revive()
+            await clock.advance(PAST_THE_BACKOFF)
+            assert await daemon.awaiting_state("calc", *CONNECTED) in CONNECTED
+            assert (await client.call_tool("add", {"a": 1, "b": 1})).data == 2
+
+
+async def test_a_warm_url_upstream_that_dies_is_found_by_its_ping_and_comes_back(
+    config_dir: ConfigDir,
+) -> None:
+    """#22: what a warm Upstream's ping is for, on an Upstream that really goes away."""
+    clock = FakeClock()
+    async with restartable_upstream() as served:
+        config_dir.add_url_upstream("calc", served.url, "http", {"warm": True, "ping_interval": 30})
+        async with running_daemon(config_dir, clock) as daemon:
+            assert await daemon.awaiting_state("calc", "ready") == "ready"
+
+            await served.kill()
+            await clock.advance(31)
+
+            assert await daemon.awaiting_state("calc", "unavailable") == "unavailable"
+            reason = await upstream_error(await daemon.status(), "calc")
+            assert "ping failed" in reason, "the ping is what noticed, not a call"
+
+            await served.revive()
+            await clock.advance(PAST_THE_BACKOFF)
+            assert await daemon.awaiting_state("calc", "ready") == "ready"
 
 
 # --- what doctor says --------------------------------------------------------------------------

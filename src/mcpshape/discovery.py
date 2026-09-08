@@ -4,7 +4,10 @@ Where to look is Client knowledge, so it comes from the Client Profiles (ADR 000
 location a Profile records, the same file names inside the typical directories below, and
 inside any directory the user names. What a found entry means comes from the Profile's
 container and entry shape, and from the entry shapes every Client shares: a command with
-arguments, or a URL with a type.
+arguments, or a URL with a type. A Profile with a ``project_container`` (Claude Code's
+``projects.<dir>.mcpServers``) also nests a map keyed by project directory, walked only for a
+file attributed to that Client; each entry found there carries the project directory it
+belongs to.
 
 JSON and TOML are read. YAML is not: mcpshape has no YAML dependency and does not grow one
 for a listing, so a YAML file is reported as found and unread, by name.
@@ -82,6 +85,10 @@ class Found:
     """Environment variables the entry sets. Their names are carried over as ``${VAR}``
     references; the values stay in the Client's file, since a secret never enters an Upstream
     file."""
+    project: str | None = None
+    """The project directory this entry is scoped to, for a Client whose Profile records a
+    ``project_container``. ``None`` for a Client's own top-level entries and for every entry
+    from a file attributed to nobody."""
 
 
 @dataclass(frozen=True)
@@ -200,28 +207,71 @@ def _as_list(node: Any) -> list[Any]:  # noqa: ANN401  # a parsed config file is
 
 
 def _servers(document: dict[str, Any], candidate: _Candidate) -> list[Found]:
-    """Every entry under the first key path this file keeps servers under."""
+    """Every entry under the first key path this file keeps servers under, plus, for a Client
+    with a ``project_container``, every entry nested under its per-project map."""
     client = candidate.client
     paths = (client.container, *CONTAINERS) if client else CONTAINERS
     shape = client.entry_shape if client else "map"
     flags = _disable_flags(client)
+    found: list[Found] = []
     for container in dict.fromkeys(paths):
-        node = _walk(document, container)
-        found = [
-            Found(
-                name,
-                transport,
-                candidate.path,
-                client.name if client else None,
-                disabled=any(entry.get(flag) is True for flag in flags),
-                env=tuple(sorted(_as_map(entry.get("env")))),
-            )
-            for name, entry in _entries(node, shape)
-            if (transport := _transport(entry, client)) is not None
-        ]
-        if found:
-            return found
-    return []
+        entries = _found_entries(_walk(document, container), candidate, shape, flags)
+        if entries:
+            found = entries
+            break
+    if client is not None and client.project_container is not None:
+        found += _project_servers(document, candidate, client, client.project_container, flags)
+    return found
+
+
+def _found_entries(
+    node: Any,  # noqa: ANN401  # a parsed config file is untyped
+    candidate: _Candidate,
+    shape: Literal["map", "list"],
+    flags: frozenset[str],
+    project: str | None = None,
+) -> list[Found]:
+    """The ``Found`` entries in a container node, each tagged with ``project`` when given."""
+    client = candidate.client
+    return [
+        Found(
+            name,
+            transport,
+            candidate.path,
+            client.name if client else None,
+            disabled=any(entry.get(flag) is True for flag in flags),
+            env=tuple(sorted(_as_map(entry.get("env")))),
+            project=project,
+        )
+        for name, entry in _entries(node, shape)
+        if (transport := _transport(entry, client)) is not None
+    ]
+
+
+def _project_servers(
+    document: dict[str, Any],
+    candidate: _Candidate,
+    client: Profile,
+    project_container: tuple[str, ...],
+    flags: frozenset[str],
+) -> list[Found]:
+    """Every entry nested under this Client's per-project map, one project directory at a time.
+
+    Only reached for a Client whose Profile sets ``project_container``, so only Claude Code's
+    own ``~/.claude.json`` is walked this way today.
+    """
+    projects = _as_map(_walk(document, project_container))
+    return [
+        found
+        for project, value in projects.items()
+        for found in _found_entries(
+            _walk(_as_map(value), client.container),
+            candidate,
+            client.entry_shape,
+            flags,
+            project=project,
+        )
+    ]
 
 
 def _disable_flags(client: Profile | None) -> frozenset[str]:

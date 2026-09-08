@@ -12,6 +12,7 @@ import asyncio
 from typing import TYPE_CHECKING, Any
 
 from fastmcp import FastMCP
+from mcp_types import TextContent
 
 from tests.support.seam import run_cli, running_daemon
 from tests.test_overrides import curate, synced
@@ -235,6 +236,28 @@ async def test_a_tool_output_cap_too_small_for_the_note_still_tells_the_model_ev
         result = await client.call_tool("create_issue", {"title": "Bug"})
 
     assert result.data == " [50 characters cut]"
+
+
+async def test_a_tool_output_cap_leaves_structured_content_whole(config_dir: ConfigDir) -> None:
+    """A Client checks structured content against the output schema; cut JSON fits none."""
+    set_global_caps(config_dir, tool_output=30)
+    server = issues()
+    counts = {"open": 12345678, "closed": 87654321, "stale": 11111111}
+
+    def stats() -> dict[str, int]:
+        """Counts."""
+        return counts
+
+    server.tool(stats)
+    await synced(config_dir, server)
+
+    async with running_daemon(config_dir) as daemon, daemon.client("/issues/mcp") as client:
+        result = await client.call_tool("stats", {})
+
+    assert result.structured_content == counts
+    text = result.content[0]
+    assert isinstance(text, TextContent)
+    assert "characters cut]" in text.text
 
 
 async def test_tool_output_under_its_cap_is_untouched(config_dir: ConfigDir) -> None:

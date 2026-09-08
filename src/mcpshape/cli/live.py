@@ -1,8 +1,9 @@
 """Live state from the Daemon, for the commands that show health.
 
 Every CLI command works with the Daemon down (story 80), so nothing answering is a state to
-report, not an error. This is the only place the CLI speaks HTTP: one loopback GET of
-``/api/status`` at the address ``config.toml`` names, read back through the Daemon's own model.
+report, not an error. This is the only place the CLI speaks HTTP: a loopback GET of
+``/api/status``, or a POST to ``/api/reload`` or ``/api/shutdown``, at the address
+``config.toml`` names, read back through the Daemon's own model.
 """
 
 from __future__ import annotations
@@ -14,7 +15,7 @@ from typing import TYPE_CHECKING
 from pydantic import ValidationError
 
 from mcpshape.config import DaemonSettings, load_settings
-from mcpshape.daemon import SHUTDOWN_PATH, STATUS_PATH, LiveState
+from mcpshape.daemon import RELOAD_PATH, SHUTDOWN_PATH, STATUS_PATH, LiveState
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -66,9 +67,23 @@ def _headers(daemon: DaemonSettings) -> dict[str, str]:
 
 def read_live(config_dir: Path) -> Live:
     """Ask the Daemon what everything is doing. A Daemon that is down is not an error."""
+    return _live_from(config_dir, STATUS_PATH, "GET")
+
+
+def reload_daemon(config_dir: Path) -> Live:
+    """Ask the Daemon to re-read every Proxy's files now, and what came of it (#10).
+
+    A Daemon that is down is not an error either: it reads every file when it starts.
+    """
+    return _live_from(config_dir, RELOAD_PATH, "POST")
+
+
+def _live_from(config_dir: Path, path: str, method: str) -> Live:
     daemon = load_settings(config_dir).daemon
     url = f"http://{daemon.host}:{daemon.port}"
-    request = urllib.request.Request(f"{url}{STATUS_PATH}", headers=_headers(daemon))  # noqa: S310
+    request = urllib.request.Request(  # noqa: S310
+        f"{url}{path}", method=method, headers=_headers(daemon)
+    )
     try:
         with urllib.request.urlopen(request, timeout=TIMEOUT) as answer:  # noqa: S310
             body: bytes = answer.read()
