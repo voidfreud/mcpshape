@@ -1,6 +1,7 @@
 # mcpshape
 
-A local proxy that reshapes what MCP servers expose. See `docs/DESIGN.md`.
+A local proxy that reshapes what MCP servers expose. The user guide is `docs/guide.md`;
+the design brief is `docs/DESIGN.md`.
 
 ## Develop
 
