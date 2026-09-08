@@ -373,13 +373,19 @@ class Connection:
             reason,
             self._backoff(),
         )
-        await self._shut()
+        await self._shut(dead=True)
         self._nudge()
 
-    async def _shut(self) -> None:
+    async def _shut(self, *, dead: bool = False) -> None:
+        """Let the link go. Closing one found ``dead`` raises the failure that killed it again,
+        which is one readable line here, not a traceback (#52): the warning that names the
+        Upstream and the reason is already written. Any other close that fails is news."""
         try:
             await self._link.close()
-        except Exception:  # a dead connection is what we are closing
+        except Exception as exc:
+            if dead:
+                log.info("Upstream %s let its dead connection go: %s", self._name, exc)
+                return
             log.warning("Upstream %s did not close cleanly", self._name, exc_info=True)
 
     def _backoff(self) -> float:
