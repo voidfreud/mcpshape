@@ -29,11 +29,17 @@ from typing import TYPE_CHECKING, Literal
 
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
-from starlette.responses import JSONResponse
-from starlette.routing import Mount
+from starlette.responses import JSONResponse, PlainTextResponse
+from starlette.routing import Match, Mount
 
 from mcpshape import catalog as catalogs
-from mcpshape.adapters.fastmcp import UpstreamConnection, proxy_app, scan, server_name
+from mcpshape.adapters.fastmcp import (
+    MCP_PATH,
+    UpstreamConnection,
+    proxy_app,
+    scan,
+    server_name,
+)
 from mcpshape.api import Management, ProxyState
 from mcpshape.calls import CallLog
 from mcpshape.config import (
@@ -55,6 +61,7 @@ from mcpshape.connection import SystemClock, TimedOutError, bounded
 from mcpshape.hooks import UserCodeError, load_user_code
 from mcpshape.logs import RotatingFile, configure_app_log
 from mcpshape.model import DEFAULT_PROXY_NAME, CapError, CapSettings
+from mcpshape.names import RESERVED
 from mcpshape.paths import call_log_file
 from mcpshape.proxy import Exposed, OverrideError, cap, expose
 from mcpshape.tokens import Tokens
@@ -418,11 +425,11 @@ class _Served:
         self._lock = asyncio.Lock()
         self._retiring: asyncio.Task[None] | None = None
         self._secrets = secrets
-        self._clock = clock
         self._running_clock = clock or SystemClock()
         self._calls = calls
         self._launched = asyncio.Event()
         self._launch: asyncio.Task[None] | None = None
+        self._failure: Exception | None = None
         self.upstream: Upstream = upstream
         self.global_caps: CapSettings = global_caps
         self.upstream_problem: str | None = None
@@ -466,7 +473,8 @@ class _Served:
             if self.retired:  # checked right before starting; a retirement raced the scan
                 return
             await self.start()
-        except Exception:
+        except Exception as exc:
+            self._failure = exc
             log.exception("Upstream %s failed to launch", self._name)
         finally:
             self._launched.set()
@@ -476,9 +484,15 @@ class _Served:
         await self._launched.wait()
 
     async def launched(self) -> None:
-        """Await the launch task itself, so an exception at Daemon start still propagates."""
+        """Wait for the launch, and raise what it failed with: the Daemon's own start.
+
+        A launch that fails at Daemon start fails the Daemon, as it did before #67; one that
+        fails on a request is logged by the launch itself, and its Proxies answer as they can.
+        """
         if self._launch is not None:
             await self._launch
+        if self._failure is not None:
+            raise self._failure
 
     async def start(self) -> None:
         """Start every Proxy, then supervise the connection: what the launch task calls."""
@@ -665,22 +679,26 @@ async def _bounded_rescan(
 
 
 class _ProxyRoute:
-    """Resolves ``/{upstream}`` and ``/{upstream}/{proxy}`` to their owner at request time.
+    """Resolves ``/<upstream>/mcp`` and ``/<upstream>/<proxy>/mcp`` to their owner per request.
 
-    Routes are fixed at build; the Upstreams and Proxies behind them are not. Mounting one of
-    these per shape, instead of one Mount per Proxy, is what lets an Upstream or Proxy added
-    while the Daemon runs be served without a restart (#67): the owner and the Proxy are found
-    fresh on every request instead of once when the app was built.
+    Routes are fixed at build; the Upstreams and Proxies behind them are not. One Mount at
+    ``/{upstream}`` instead of one per Proxy is what lets an Upstream or Proxy added while the
+    Daemon runs be served without a restart (#67): the owner and the Proxy are found fresh on
+    every request. What follows the Upstream's name is either ``/mcp...``, the default Proxy,
+    or ``/<proxy>/mcp...``; ``mcp`` is a reserved name, so the two never collide, and a
+    trailing slash reaches the Proxy app exactly as it did with a Mount of its own. A reserved
+    Upstream name is not an Upstream path at all: ``/api/<unknown>`` stays a plain not found.
     """
 
-    def __init__(self, upstreams: _Upstreams, *, default: bool) -> None:
+    def __init__(self, upstreams: _Upstreams) -> None:
         self._upstreams = upstreams
-        self._default = default
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         params: dict[str, str] = scope["path_params"]
         name = params["upstream"]
-        proxy_name = DEFAULT_PROXY_NAME if self._default else params["proxy"]
+        if name in RESERVED:
+            await PlainTextResponse("Not Found", status_code=404)(scope, receive, send)
+            return
         owner = await self._upstreams.lookup(name)
         if owner is None:
             await _not_found(f"no Upstream named {name!r}", scope, receive, send)
@@ -689,11 +707,35 @@ class _ProxyRoute:
         if owner.retired:
             await _not_found(f"no Upstream named {name!r}", scope, receive, send)
             return
-        proxy = await owner.proxy(proxy_name)
+        first = _route_path(scope).split("/", 2)[1:2]
+        proxy_name = first[0] if first and first[0] not in ("", MCP_SEGMENT) else None
+        proxy = await owner.proxy(proxy_name or DEFAULT_PROXY_NAME)
         if proxy is None:
-            await _not_found(f"no Proxy {name}/{proxy_name}", scope, receive, send)
+            wanted = proxy_name or DEFAULT_PROXY_NAME
+            await _not_found(f"no Proxy {name}/{wanted}", scope, receive, send)
             return
-        await proxy(scope, receive, send)
+        if proxy_name is None:
+            await proxy(scope, receive, send)
+            return
+        mount = Mount(f"/{proxy_name}", app=proxy)
+        match, child = mount.matches(scope)
+        if match == Match.NONE:
+            await PlainTextResponse("Not Found", status_code=404)(scope, receive, send)
+            return
+        await mount.handle({**scope, **child}, receive, send)
+
+
+MCP_SEGMENT = MCP_PATH.strip("/")
+"""The path segment every Proxy app serves under: ``/<upstream>[/<proxy>]/mcp``."""
+
+
+def _route_path(scope: Scope) -> str:
+    """The path left after the Mount that reached here, as Starlette hands it to a child."""
+    path: str = scope["path"]
+    root: str = scope.get("root_path", "")
+    if root and path.startswith(root) and path[len(root) :].startswith("/"):
+        return path[len(root) :]
+    return path
 
 
 async def _not_found(message: str, scope: Scope, receive: Receive, send: Send) -> None:
@@ -878,8 +920,7 @@ def build_app(
     )
     routes: list[BaseRoute] = management.routes()
     routes += [
-        Mount("/{upstream}/{proxy}", app=_ProxyRoute(upstreams, default=False)),
-        Mount("/{upstream}", app=_ProxyRoute(upstreams, default=True)),
+        Mount("/{upstream}", app=_ProxyRoute(upstreams)),
     ]
 
     @contextlib.asynccontextmanager

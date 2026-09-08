@@ -10,18 +10,52 @@ scan.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
+
+from fastmcp import FastMCP
 
 from mcpshape.api import RELOAD_PATH, UPSTREAMS_PATH
-from tests.support.clock import FakeClock
-from tests.support.seam import run_cli, running_daemon
+from tests.support.asgi import asgi_client_factory
+from tests.support.seam import BASE_URL, free_port, run_cli, running_daemon
 from tests.test_catalog_drift import notes
 from tests.test_proxy_seam import calculator
 from tests.test_upstream_files import daemon_log, until_unlisted
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncGenerator
+
     from tests.support.seam import ConfigDir, RunningDaemon
+
+
+class Connects:
+    """How many times an Upstream was connected to: its lifespan is entered once per session.
+
+    The Daemon's start-up scan is one connection of its own; the first call through any Proxy
+    is the next; a second Proxy sharing the connection adds none.
+    """
+
+    def __init__(self) -> None:
+        self.count = 0
+
+
+def counting_calculator(connects: Connects) -> FastMCP[Any]:
+    """``calculator()`` that counts every session opened on it."""
+
+    @contextlib.asynccontextmanager
+    async def lifespan(_server: FastMCP[Any]) -> AsyncGenerator[None]:
+        connects.count += 1
+        yield
+
+    server: FastMCP[Any] = FastMCP("calc", lifespan=lifespan)
+
+    def add(a: int, b: int) -> int:
+        """Add two numbers."""
+        return a + b
+
+    server.tool(add)
+    return server
 
 
 async def until_scanned(daemon: RunningDaemon, name: str, patience: float = 5.0) -> None:
@@ -93,39 +127,32 @@ async def test_an_upstream_added_while_the_daemon_runs_is_found_by_status_and_re
 async def test_a_proxy_added_while_the_daemon_runs_is_served_and_shares_the_connection(
     config_dir: ConfigDir,
 ) -> None:
-    clock = FakeClock()
-    config_dir.add_memory_upstream("calc", calculator())
+    connects = Connects()
+    config_dir.add_memory_upstream("calc", counting_calculator(connects))
 
-    async with running_daemon(config_dir, clock) as daemon:
+    async with running_daemon(config_dir) as daemon:
         async with daemon.client("/calc/mcp") as client:
             assert (await client.call_tool("add", {"a": 2, "b": 3})).data == 5
+        assert connects.count == 2, "the start-up scan, then the first call's connect"
 
         config_dir.add_proxy("calc", "review")
 
-        status = await daemon.status()
-        calc = next(upstream for upstream in status["upstreams"] if upstream["name"] == "calc")
-        assert {proxy["name"] for proxy in calc["proxies"]} == {"default", "review"}
-
-        await clock.advance(1.0)
-
-        # The connection has been open at least a second, since the very first call, before
-        # this Proxy existed: touching it through review is a call on the same connection,
-        # not a fresh one (a fresh connect would have to start this timer over).
-        before = await daemon.upstream("calc")
-        assert before["state"] in ("ready", "idle-pending")
-        assert before["seconds"] >= 1.0
+        calc = await daemon.upstream("calc")
+        assert [proxy["name"] for proxy in calc["proxies"]] == ["default", "review"]
 
         async with daemon.client("/calc/review/mcp") as client:
             assert [tool.name for tool in await client.list_tools()] == ["add"]
             assert (await client.call_tool("add", {"a": 4, "b": 5})).data == 9
 
-        after = await daemon.upstream("calc")
-        assert after["state"] in ("ready", "idle-pending")
-        assert after["error"] is None
+        assert connects.count == 2, "the new Proxy called over the connection already open"
+        assert await daemon.upstream_state("calc") in ("ready", "idle-pending")
 
 
 async def test_a_removed_and_re_added_upstream_is_a_new_one(config_dir: ConfigDir) -> None:
+    """``upstream rm`` signals the Daemon on the configured port; here nothing listens on it,
+    so the Daemon in-process notices the removal on its next look instead."""
     config_dir.add_memory_upstream("notes", notes())
+    (config_dir.path / "config.toml").write_text(f"version = 1\n[daemon]\nport = {free_port()}\n")
     state_dir = config_dir.state / "upstreams" / "notes"
 
     async with running_daemon(config_dir) as daemon:
@@ -168,6 +195,28 @@ async def test_unknown_names_answer_not_found(config_dir: ConfigDir) -> None:
         assert answer == {"error": "no Proxy calc/nothing"}
 
 
+async def test_paths_beside_a_proxy_answer_as_they_did_with_a_mount_per_proxy(
+    config_dir: ConfigDir,
+) -> None:
+    """The one route that resolves at request time is not a new shape of URL: a trailing
+    slash still reaches the Proxy app, and an unknown ``/api`` path is not an Upstream."""
+    config_dir.add_memory_upstream("calc", calculator())
+    config_dir.add_proxy("calc", "review")
+
+    async with (
+        running_daemon(config_dir) as daemon,
+        asgi_client_factory(daemon.app, BASE_URL)() as http,
+    ):
+        default = await http.post(f"{BASE_URL}/calc/mcp/")
+        named = await http.post(f"{BASE_URL}/calc/review/mcp/")
+        assert default.status_code == named.status_code
+        assert default.status_code != 404
+
+        unknown_api = await http.post(f"{BASE_URL}/api/nope")
+        assert unknown_api.status_code == 404
+        assert "Upstream" not in unknown_api.text
+
+
 async def test_an_added_upstream_whose_file_cannot_be_read_is_not_served(
     config_dir: ConfigDir,
 ) -> None:
@@ -185,4 +234,4 @@ async def test_an_added_upstream_whose_file_cannot_be_read_is_not_served(
         status = await daemon.status()
         assert "broken" not in {upstream["name"] for upstream in status["upstreams"]}
 
-    assert "broken" in daemon_log(config_dir)
+    assert "Upstream broken was found but cannot be read" in daemon_log(config_dir)
