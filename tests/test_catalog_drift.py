@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import fcntl
 import json
 from typing import TYPE_CHECKING, Any
 
@@ -474,6 +475,56 @@ def test_upstream_rm_forgets_the_catalog(config_dir: ConfigDir) -> None:
 
     assert result.exit_code == 0, result.output
     assert not (config_dir.state / "upstreams" / "notes").exists()
+
+
+async def test_upstream_rm_against_a_parked_rescan_ends_with_no_state_directory(
+    config_dir: ConfigDir,
+) -> None:
+    """The bug in #49: ``forget`` removed the state directory under a writer holding its lock.
+
+    A reconnect's rescan is parked at the Upstream's ``tools/list`` handler, and the test then
+    takes the Upstream's Catalog lock itself, so opening the gate leaves the rescan blocked on
+    that lock instead of finishing. ``upstream rm`` is started against exactly that, and the
+    lock is released only once both are waiting on it, so whichever of them the kernel hands
+    it to first, the end state is the same: the Upstream is removed and nothing of its state
+    is left behind, with no traceback in the app log.
+
+    The lock file is read straight from the state directory, as ``catalog_file`` and
+    ``drift_file`` read the Catalog and the Drift beside it.
+    """
+    clock = FakeClock()
+    gate = upstreams.Gate()
+    server = notes()
+    config_dir.add_memory_upstream("notes", server, {"idle_timeout": IDLE_TIMEOUT})
+    upstreams.gate_tools_list(server, gate)
+    state_dir = config_dir.state / "upstreams" / "notes"
+
+    async with running_daemon(config_dir, clock) as daemon, daemon.client("/notes/mcp") as client:
+        assert (await client.call_tool("add_note", {"text": "hi"})).data == "hi"  # first connect
+        await clock.advance(PAST_IDLE)
+        await daemon.awaiting_state("notes", "cold")
+
+        gate.shut()
+        waking = asyncio.create_task(client.call_tool("add_note", {"text": "hi"}))
+        await daemon.awaiting_state("notes", "ready", "idle-pending")
+        assert (await waking).data == "hi"
+        await upstreams.until_parked(gate, 1)
+
+        with (state_dir / ".lock").open("a+") as held:
+            fcntl.flock(held.fileno(), fcntl.LOCK_EX)
+            gate.open()
+            # nothing observable says a scan is waiting on a lock, so give it a moment to get there
+            await asyncio.sleep(0.2)
+            removing = asyncio.create_task(
+                asyncio.to_thread(run_cli, config_dir, "upstream", "rm", "notes", "--yes")
+            )
+            await asyncio.sleep(0.2)  # and the same for ``rm``, which wants the very same lock
+            fcntl.flock(held.fileno(), fcntl.LOCK_UN)
+        result = await removing
+
+    assert result.exit_code == 0, result.output
+    assert not state_dir.exists(), sorted(path.name for path in state_dir.iterdir())
+    assert "Traceback" not in (config_dir.state / "log" / "daemon.log").read_text()
 
 
 def test_a_broken_catalog_file_is_reported_not_served(config_dir: ConfigDir) -> None:

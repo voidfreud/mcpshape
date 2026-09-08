@@ -16,6 +16,11 @@ function's whole read-then-write, so one writer finishes before the next one sta
 in this process and across processes alike (macOS and Linux only, matching the rest of
 mcpshape). Readers stay lock-free; ``_write`` writes to a temp file in the same directory and
 ``os.replace``s it over the target, so a reader never sees a torn file either way.
+
+``forget`` holds the same lock while it removes the directory (#49), so an ``upstream rm``
+never pulls the state out from under a writer mid-write. A writer that was waiting for the
+lock all along wakes up holding a lock file that is no longer the one at its path: it gives
+up with ``ForgottenError`` rather than recreating what was just removed.
 """
 
 from __future__ import annotations
@@ -47,6 +52,14 @@ LOCK_FILE = ".lock"
 
 class CatalogError(Exception):
     """A Catalog file could not be read, or there is no Drift to accept."""
+
+
+class ForgottenError(CatalogError):
+    """The Upstream's state was removed while this writer waited for its lock.
+
+    An ``upstream rm`` that won the lock first leaves nothing to write to, so the writer
+    behind it drops what it saw instead of recreating the directory it holds a stale lock on.
+    """
 
 
 class Catalog(BaseModel):
@@ -188,6 +201,22 @@ def _lock_path(state_dir: Path, upstream: str) -> Path:
     return upstream_state_dir(state_dir, upstream) / LOCK_FILE
 
 
+def _still_the_lock(fd: int, lock_path: Path, upstream: str) -> None:
+    """Say the state was forgotten when ``fd`` is no longer the file at ``lock_path``.
+
+    ``forget`` unlinks the lock file while holding it, so a writer that waited behind it wakes
+    up holding a file with no name left. Comparing inodes is what tells that apart from the
+    lock file this writer created itself.
+    """
+    try:
+        named: int | None = lock_path.stat().st_ino
+    except FileNotFoundError:
+        named = None
+    if named != os.fstat(fd).st_ino:
+        msg = f"Upstream {upstream}'s state was removed while waiting for its lock"
+        raise ForgottenError(msg)
+
+
 @contextlib.contextmanager
 def _locked(state_dir: Path, upstream: str) -> Generator[None]:
     """Hold the one lock for ``upstream``'s state directory across a read-then-write.
@@ -196,12 +225,17 @@ def _locked(state_dir: Path, upstream: str) -> Generator[None]:
     CLI), and, unlike POSIX record locks taken through ``fcntl.lockf``, a second lock request
     from the very same process still blocks, which matters for the Daemon's own background
     rescans and its request handling sharing one process.
+
+    Raises ``ForgottenError`` when the wait ended with the state directory gone, removed by a
+    ``forget`` that held this very lock (#49).
     """
     directory = upstream_state_dir(state_dir, upstream)
     directory.mkdir(parents=True, exist_ok=True)
-    with _lock_path(state_dir, upstream).open("a+") as lock_file:
+    lock_path = _lock_path(state_dir, upstream)
+    with lock_path.open("a+") as lock_file:
         fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
         try:
+            _still_the_lock(lock_file.fileno(), lock_path, upstream)
             yield
         finally:
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
@@ -283,10 +317,20 @@ def accept_scan(state_dir: Path, upstream: str, observed: Catalog) -> Scan:
 
 
 def forget(state_dir: Path, upstream: str) -> None:
-    """Drop everything stored about ``upstream``."""
+    """Drop everything stored about ``upstream``, holding its lock while doing it (#49).
+
+    The lock file goes with the rest: the ``flock`` lives on the open descriptor, so unlinking
+    a held lock file is safe, and it is what tells a writer waiting behind this one that there
+    is nothing left to write to. A second ``forget`` racing the first finds the state already
+    gone and says nothing.
+    """
     directory = upstream_state_dir(state_dir, upstream)
     if not directory.is_dir():
         return
-    for path in directory.iterdir():
-        path.unlink()
-    directory.rmdir()
+    try:
+        with _locked(state_dir, upstream):
+            for path in directory.iterdir():
+                path.unlink(missing_ok=True)
+            directory.rmdir()
+    except ForgottenError:
+        return
