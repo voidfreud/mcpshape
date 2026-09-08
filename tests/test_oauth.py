@@ -16,11 +16,13 @@ import time
 from typing import TYPE_CHECKING
 
 import httpx2
+from fastmcp import Client
 from mcp_types import TextContent
 
 from tests.support import oauth_provider
+from tests.support.clock import FakeClock
 from tests.support.oauth_provider import Issuer, serving_provider
-from tests.support.seam import run_cli, running_daemon, until
+from tests.support.seam import run_cli, running_daemon, serving_daemon, until
 from tests.test_catalog_drift import cli
 from tests.test_proxy_seam import calculator
 
@@ -50,13 +52,14 @@ def access_token(provider: Provider) -> str:
     return provider.issuer.issued[-1]
 
 
-def visiting_browser(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Stub the browser: something visits the URL and follows the redirect to the callback."""
+def visiting_browser(monkeypatch: pytest.MonkeyPatch, *, deny: bool = False) -> None:
+    """Stub the browser: something visits the URL and follows the redirect to the callback.
+    ``deny`` is the user refusing at the consent screen."""
 
     def open_url(url: str, *_args: object, **_kwargs: object) -> bool:
         def visit() -> None:
             with httpx2.Client(follow_redirects=True) as browser:
-                browser.get(url)
+                browser.get(url + ("&deny=1" if deny else ""))
 
         threading.Thread(target=visit, daemon=True).start()
         return True
@@ -183,6 +186,72 @@ async def _approve_when_asked(provider: Provider) -> None:
     """Stand in for the user typing the code at the provider on another machine."""
     await until(provider.issuer.awaiting_device, "a device code to approve")
     provider.issuer.approve_device()
+
+
+async def test_a_refused_login_is_not_a_stored_login_to_show_or_sync(
+    config_dir: ConfigDir, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#56: the registration a refused login leaves behind is not a login."""
+    visiting_browser(monkeypatch, deny=True)
+    async with serving_provider(calculator()) as provider:
+        refused = await asyncio.to_thread(
+            run_cli, config_dir, "add", "x", "--url", provider.mcp_url, "--oauth"
+        )
+        assert refused.exit_code == 1
+        assert token_file(config_dir, "x").is_file(), "the registration was not stored"
+
+        shown = run_cli(config_dir, "upstream", "show", "x")
+        assert "OAuth, not logged in" in shown.output
+
+        visiting_browser(monkeypatch)
+        synced = await cli(config_dir, "upstream", "sync", "x")
+
+    assert LOGGED_IN in synced.output
+    assert "1 tool" in synced.output
+    assert "!" not in synced.output, "sync tried a scan before logging in"
+
+
+async def test_a_login_from_the_cli_makes_a_running_daemon_connect_now(
+    config_dir: ConfigDir, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#58: the clock never moves, so only the CLI telling the Daemon gets it out of the
+    backoff its revoked token put it in."""
+    clock = FakeClock()
+    visiting_browser(monkeypatch)
+    async with serving_provider(calculator(), Issuer(token_ttl=1)) as provider:
+        add_oauth_upstream(config_dir, provider)
+        await cli(config_dir, "upstream", "sync", "x")
+        provider.issuer.refresh_accepted = False
+        await asyncio.sleep(1.1)  # the stored token is dead and cannot be renewed
+        provider.issuer.token_ttl = 3600  # what the new login gets lasts
+
+        async with serving_daemon(config_dir, clock) as url, Client(f"{url}/x/mcp") as client:
+            failed = await client.call_tool("add", {"a": 1, "b": 1}, raise_on_error=False)
+            assert failed.is_error
+            await _awaiting_state(url, "x", "unavailable")
+
+            await cli(config_dir, "upstream", "sync", "x")
+
+            await _awaiting_state(url, "x", *CONNECTED)
+            assert (await client.call_tool("add", {"a": 2, "b": 3})).data == 5
+
+
+async def _awaiting_state(url: str, upstream: str, *states: str, patience: float = 5.0) -> None:
+    """Wait until ``/api/status`` at ``url``, read over the socket from a thread so the Daemon
+    serving it keeps running, says ``upstream`` is in one of ``states``."""
+
+    def state() -> str:
+        answer = httpx2.get(f"{url}/api/status").json()
+        return str(next(u["state"] for u in answer["upstreams"] if u["name"] == upstream))
+
+    deadline = time.monotonic() + patience
+    seen = await asyncio.to_thread(state)
+    while seen not in states:
+        if time.monotonic() > deadline:
+            msg = f"Upstream {upstream} stayed {seen!r}, never reached {states}"
+            raise AssertionError(msg)
+        await asyncio.sleep(0.02)
+        seen = await asyncio.to_thread(state)
 
 
 # --- reaching the Upstream afterwards ----------------------------------------------------------

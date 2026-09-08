@@ -172,6 +172,13 @@ Claude Code is the first and best-integrated Profile, never a special case in th
   had nothing to log in with, and makes it connect at once instead of waiting out its backoff.
   A login nobody finishes is given up after the browser flow's own five minutes, so a fresh
   one can start. A connect still never waits on a login.
+- Settled in #56, #57, and #58: a stored login is a token set, which only the Adapter can tell
+  from the registration the SDK writes first, so `upstream show` and `upstream sync` ask the
+  Adapter; an Upstream the start-up scan could not reach is scanned on its first connect,
+  since that is the first look the Daemon gets, while one the scan reached still rescans only
+  on a reconnect; and a login from the CLI is followed by `POST /api/upstreams/<name>/connect`
+  when a Daemon answers, so an `unavailable` Upstream tries again now instead of waiting out
+  its backoff.
 
 ### Client Profiles
 - One Profile per supported Client: config file path and format, transports accepted, whether

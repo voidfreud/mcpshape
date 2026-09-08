@@ -329,6 +329,48 @@ async def test_a_reconnect_after_the_backoff_rescans_the_catalog(config_dir: Con
     assert "+ tool delete_note" in review.output
 
 
+async def test_the_first_connect_rescans_when_the_start_up_scan_reached_nothing(
+    config_dir: ConfigDir,
+) -> None:
+    """#57: an Upstream down when the Daemon starts is looked at on its first connect, since
+    that is the first look the Daemon gets; the clock never moves, so no reconnect can."""
+    clock = FakeClock()
+    server = notes()
+    config_dir.add_memory_upstream("notes", server)
+    await cli(config_dir, "upstream", "sync", "notes")
+    grow(server)
+    config_dir.break_upstream("notes")
+
+    async with running_daemon(config_dir, clock) as daemon, daemon.client("/notes/mcp") as client:
+        assert drift_file(config_dir, "notes") is None, "the start-up scan reached the Upstream"
+        config_dir.restore_upstream("notes")
+
+        assert (await client.call_tool("add_note", {"text": "hi"})).data == "hi"
+        assert await daemon.upstream_state("notes") in CONNECTED
+        await until(
+            lambda: drift_file(config_dir, "notes") is not None,
+            "the rescan the first connect triggers",
+        )
+
+    review = await cli(config_dir, "upstream", "sync", "notes")
+    assert "+ tool delete_note" in review.output
+
+
+async def test_the_first_connect_does_not_rescan_after_a_start_up_scan_that_reached(
+    config_dir: ConfigDir,
+) -> None:
+    """The start-up scan covers the first connect when it reached the Upstream, as before."""
+    clock = FakeClock()
+    server = notes()
+    config_dir.add_memory_upstream("notes", server)
+
+    async with running_daemon(config_dir, clock) as daemon, daemon.client("/notes/mcp") as client:
+        grow(server)  # after the start-up scan, before the first connect
+        assert (await client.call_tool("add_note", {"text": "hi"})).data == "hi"
+        await settle()
+        assert drift_file(config_dir, "notes") is None
+
+
 # --- what the user sees -------------------------------------------------------------------------
 
 

@@ -302,8 +302,9 @@ def _nothing() -> Exposed:
     return Exposed(catalog=_empty(), name=None)
 
 
-async def rescan(state_dir: Path, secrets: Secrets, upstream: Upstream) -> None:
-    """Scan ``upstream`` into its Catalog on a first scan, else record Drift. Never raises.
+async def rescan(state_dir: Path, secrets: Secrets, upstream: Upstream) -> bool:
+    """Scan ``upstream`` into its Catalog on a first scan, else record Drift. Never raises;
+    says whether the Upstream was reached.
 
     This is the Daemon's own start-up scan, which reaches an Upstream nothing is connected to
     yet. A reconnect looks again over the connection it already has (story 11). Recording
@@ -315,6 +316,8 @@ async def rescan(state_dir: Path, secrets: Secrets, upstream: Upstream) -> None:
         await asyncio.to_thread(catalogs.record_scan, state_dir, upstream.name, observed)
     except Exception:  # an Upstream that cannot be reached must not keep the Daemon from starting
         log.warning("Upstream %s could not be scanned", upstream.name, exc_info=True)
+        return False
+    return True
 
 
 async def record_observation(state_dir: Path, name: str, observed: Catalog) -> None:
@@ -324,15 +327,16 @@ async def record_observation(state_dir: Path, name: str, observed: Catalog) -> N
 
 async def _bounded_rescan(
     state_dir: Path, secrets: Secrets, upstream: Upstream, clock: Clock
-) -> None:
+) -> bool:
     """``rescan``, bounded by ``upstream``'s own ``connect_timeout`` on ``clock`` (#20).
 
     An Upstream whose connect hangs must not hold up the Daemon's start, nor any other
     Upstream's: this is awaited concurrently with every other Upstream's bounded rescan, and a
-    scan that times out is logged and skipped, exactly like one that fails outright.
+    scan that times out is logged and skipped, exactly like one that fails outright. Says
+    whether the Upstream was reached.
     """
     try:
-        await bounded(
+        return await bounded(
             rescan(state_dir, secrets, upstream), upstream.lifecycle.connect_timeout, clock
         )
     except TimedOutError:
@@ -341,6 +345,7 @@ async def _bounded_rescan(
             upstream.name,
             upstream.lifecycle.connect_timeout,
         )
+        return False
 
 
 @dataclass(frozen=True)
@@ -423,12 +428,15 @@ def build_app(
 
     @contextlib.asynccontextmanager
     async def lifespan(_app: Starlette) -> AsyncGenerator[None]:
-        await asyncio.gather(
+        reached = await asyncio.gather(
             *(
                 _bounded_rescan(state_dir, secrets, upstream, running_clock)
                 for upstream in upstreams
             )
         )
+        for upstream, scanned in zip(upstreams, reached, strict=True):
+            if not scanned:
+                connections[upstream.name].unscanned()  # its first connect looks instead (#57)
         async with contextlib.AsyncExitStack() as stack:
             stack.push_async_callback(management.close)
             for proxy in proxies.values():

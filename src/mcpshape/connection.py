@@ -203,6 +203,15 @@ class Connection:
             return
         await self._fail(f"a call found the connection dead: {reason}")
 
+    def unscanned(self) -> None:
+        """The Daemon's start-up scan reached nothing, so the first connect looks (#57).
+
+        Every connect after the first is a reconnect, which rescans; the first is not, since
+        the start-up scan covers it. When that scan failed, the first connect is the first
+        look the Daemon gets, so it is made to count as a reconnect.
+        """
+        self._attempted = True
+
     def retry(self) -> None:
         """Try again now instead of waiting out the backoff, when that is where it is.
 

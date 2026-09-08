@@ -11,7 +11,7 @@ import typer
 
 from mcpshape import catalog, config
 from mcpshape import tokens as token_store
-from mcpshape.adapters.fastmcp import LoginNeededError, login, scan
+from mcpshape.adapters.fastmcp import LoginNeededError, logged_in, login, scan
 from mcpshape.cli import scan as scanning
 from mcpshape.cli.common import (
     HELP_OPTIONS,
@@ -23,7 +23,7 @@ from mcpshape.cli.common import (
     state,
 )
 from mcpshape.cli.listing import print_upstreams, proxy_url, toml_file
-from mcpshape.cli.live import read_live
+from mcpshape.cli.live import connect_upstream, read_live
 from mcpshape.model import HttpTransport, SseTransport, StdioTransport, Transport, Upstream
 from mcpshape.names import check_name
 from mcpshape.profiles import clients_needing_reconnect
@@ -110,7 +110,11 @@ def oauth_upstream(transport: Transport) -> bool:
 
 
 def log_in(config_dir: Path, state_dir: Path, upstream: Upstream, *, device: bool) -> None:
-    """Run the login the Upstream needs, printing what the user must do, never a token."""
+    """Run the login the Upstream needs, printing what the user must do, never a token.
+
+    A running Daemon is then told to connect now (#58): the token it lacked is stored, so
+    there is nothing to wait out. A Daemon that is down reads it when it starts.
+    """
     try:
         asyncio.run(
             login(
@@ -123,6 +127,7 @@ def log_in(config_dir: Path, state_dir: Path, upstream: Upstream, *, device: boo
         )
     except Exception as exc:  # noqa: BLE001  # however the provider refused, the user gets the why
         fail(f"cannot log in to {upstream.name}: {exc}")
+    connect_upstream(config_dir, upstream.name)
 
 
 @app.command(
@@ -173,7 +178,7 @@ def login_line(state_dir: Path, upstream: Upstream) -> str:
     """How the Upstream is authorized, and whether a login is stored. Never a value."""
     if not oauth_upstream(upstream.transport):
         return "Auth: none"
-    if token_store.Tokens(state_dir, upstream.name).stored():
+    if logged_in(token_store.Tokens(state_dir, upstream.name)):
         return "Auth: OAuth, logged in (the token is encrypted in the state directory)"
     return (
         f"Auth: OAuth, not logged in. Log in with: "
@@ -216,7 +221,7 @@ def scanned(
     Upstream that cannot be reached for any other reason keeps a token that may still work.
     """
     tokens = token_store.Tokens(state_dir, upstream.name)
-    if oauth_upstream(upstream.transport) and not tokens.stored():
+    if oauth_upstream(upstream.transport) and not logged_in(tokens):
         log_in(config_dir, state_dir, upstream, device=device)
     try:
         return _scan(config_dir, upstream, tokens)

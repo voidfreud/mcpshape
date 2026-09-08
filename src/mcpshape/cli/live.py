@@ -22,16 +22,18 @@ from mcpshape.api import (
     RELOAD_PATH,
     SHUTDOWN_PATH,
     STATUS_PATH,
+    UPSTREAMS_PATH,
     CallsAnswer,
     LiveState,
     LogsAnswer,
+    UpstreamState,
 )
 from mcpshape.config import DaemonSettings, load_settings
 
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from mcpshape.api import ProxyState, UpstreamState
+    from mcpshape.api import ProxyState
     from mcpshape.calls import CallRecord
 
 TIMEOUT = 2.0
@@ -107,6 +109,16 @@ def read_calls(config_dir: Path, limit: int) -> list[CallRecord] | None:
     daemon = load_settings(config_dir).daemon
     answer = _read(daemon, _query(CALLS_PATH, limit=limit), "GET", CallsAnswer)
     return None if answer is None else answer.calls
+
+
+def connect_upstream(config_dir: Path, name: str) -> UpstreamState | None:
+    """Tell a running Daemon to connect ``name`` now instead of waiting out its backoff (#58).
+
+    What a login from the CLI is followed by. A Daemon that is down is not an error: it
+    reads the stored login when it starts.
+    """
+    daemon = load_settings(config_dir).daemon
+    return _read(daemon, f"{UPSTREAMS_PATH}/{name}/connect", "POST", UpstreamState)
 
 
 def _query(path: str, **params: int) -> str:
