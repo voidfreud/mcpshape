@@ -612,8 +612,10 @@ class _VirtualTool(FunctionTool):
     """A Virtual Tool: the user's function, its schema from its signature, run in the chain.
 
     Its exposed name is its identity, so Hooks keyed by that name run around it like around
-    a Catalog tool. Sync functions run inline on the Daemon's loop like every Hook; a
-    blocking one is the user's business, as the design brief says.
+    a Catalog tool. A sync body runs in a worker thread, FastMCP's own default
+    (``run_in_thread``), so it can block on the ``upstream`` handle and stalls only its own
+    call. FastMCP dispatches it through ``anyio.to_thread.run_sync``, which copies the
+    context, so the handle ``_Runtime.run`` bound is visible in that thread.
     """
 
     _runtime: _Runtime = PrivateAttr()
@@ -623,9 +625,7 @@ class _VirtualTool(FunctionTool):
     def build(
         cls, runtime: _Runtime, virtual: VirtualTool, output_cap: int | None = None
     ) -> _VirtualTool:
-        built = cls.from_function(
-            virtual.fn, name=virtual.name, description=virtual.description, run_in_thread=False
-        )
+        built = cls.from_function(virtual.fn, name=virtual.name, description=virtual.description)
         tool = cast("_VirtualTool", built)
         tool._runtime = runtime  # noqa: SLF001  # our own private attribute
         tool._output_cap = output_cap  # noqa: SLF001  # our own private attribute

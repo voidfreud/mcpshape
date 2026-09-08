@@ -12,10 +12,11 @@ import logging
 import re
 import sys
 import textwrap
+import time
 from typing import TYPE_CHECKING, Any
 
 import pytest
-from fastmcp import FastMCP
+from fastmcp import Client, FastMCP
 from mcp_types import TextContent, TextResourceContents
 
 from tests.support.seam import run_cli, running_daemon, serving_daemon
@@ -802,6 +803,113 @@ async def test_a_virtual_tool_colliding_with_an_exposed_tool_marks_the_proxy_unh
     proxy = status["upstreams"][0]["proxies"][0]
     assert proxy["health"] == "unhealthy"
     assert "create_issue" in proxy["detail"]
+
+
+# --- sync user code ----------------------------------------------------------------------------
+
+
+async def test_a_sync_before_hook_calls_the_upstream_and_short_circuits_with_what_it_said(
+    config_dir: ConfigDir,
+) -> None:
+    """A plain function reaches the Upstream: no ``await``, the call blocks until it answers."""
+    server, received = tracker()
+    await synced(config_dir, server)
+    user_code(
+        config_dir,
+        """
+        @hook.before("close_issue")
+        def instead(call):
+            made = upstream.call("create_issue", title=f"closing {call.args['id']}")
+            return f"logged: {made.text}"
+        """,
+    )
+
+    async with running_daemon(config_dir) as daemon, daemon.client("/issues/mcp") as client:
+        result = await client.call_tool("close_issue", {"id": 7})
+
+    assert received == [("create_issue", {"title": "closing 7", "labels": None})]
+    assert text_of(result) == "logged: created closing 7 None"
+
+
+async def test_a_sync_virtual_tool_calls_the_upstream_twice_and_builds_its_answer(
+    config_dir: ConfigDir,
+) -> None:
+    server, received = tracker()
+    await synced(config_dir, server)
+    user_code(
+        config_dir,
+        """
+        @tool
+        def pair(first: int, second: int) -> str:
+            \"\"\"Close two issues.\"\"\"
+            one = upstream.call("close_issue", id=first)
+            two = upstream.call("close_issue", id=second)
+            return f"{one.text} and {two.text}"
+        """,
+    )
+
+    async with running_daemon(config_dir) as daemon, daemon.client("/issues/mcp") as client:
+        result = await client.call_tool("pair", {"first": 1, "second": 2})
+
+    assert received == [("close_issue", {"id": 1}), ("close_issue", {"id": 2})]
+    assert result.data == "closed 1 and closed 2"
+
+
+async def test_a_sync_hook_catches_the_upstreams_error_like_an_async_one(
+    config_dir: ConfigDir,
+) -> None:
+    server, _ = tracker()
+    await synced(config_dir, server)
+    user_code(
+        config_dir,
+        """
+        @hook.before("close_issue")
+        def careful(call):
+            try:
+                upstream.call("explode")
+            except UpstreamError as exc:
+                return f"caught: {exc}"
+            return "nothing happened"
+        """,
+    )
+
+    async with running_daemon(config_dir) as daemon, daemon.client("/issues/mcp") as client:
+        result = await client.call_tool("close_issue", {"id": 1})
+
+    assert text_of(result).startswith("caught: ")
+    assert "boom" in text_of(result)
+
+
+async def test_a_sync_hook_that_blocks_stalls_only_its_own_call(config_dir: ConfigDir) -> None:
+    """The worker thread holds the sleep; the Daemon's loop keeps serving everything else."""
+    server, _ = tracker()
+    await synced(config_dir, server)
+    user_code(
+        config_dir,
+        """
+        import time
+
+        @hook.before("close_issue")
+        def slowly(call):
+            time.sleep(0.5)
+        """,
+    )
+    finished: list[str] = []
+
+    async def call(client: Client[Any], name: str, args: dict[str, Any]) -> None:
+        await client.call_tool(name, args)
+        finished.append(name)
+
+    async with running_daemon(config_dir) as daemon, daemon.client("/issues/mcp") as client:
+        started = time.perf_counter()
+        await asyncio.gather(
+            call(client, "close_issue", {"id": 1}),
+            call(client, "create_issue", {"title": "T"}),
+        )
+        elapsed = time.perf_counter() - started
+
+    assert finished == ["create_issue", "close_issue"]
+    assert elapsed >= 0.5, "the sleeping Hook still ran to the end"
 
 
 # --- load failures -----------------------------------------------------------------------------

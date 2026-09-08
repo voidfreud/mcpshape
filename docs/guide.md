@@ -241,9 +241,9 @@ Hooks and Virtual Tools run inside the Daemon process with no sandbox. Whatever 
 does, the Daemon does: read files, reach the network, import anything on the Python path. Two
 things are not guarded against:
 
-- A plain (sync) function runs in a worker thread, so one that blocks stalls only its own
-  call. An `async` function runs on the Daemon's event loop, so one that blocks, with
-  `time.sleep` or a blocking client, stalls every Proxy until it returns.
+- An `async` function runs on the Daemon's event loop, so one that blocks, with `time.sleep`
+  or a blocking client, stalls every Proxy until it returns. A plain (sync) function runs in
+  a worker thread instead, so one that blocks stalls only its own call.
 - `sys.exit` anywhere in user code, at load or in a Hook, is not caught.
 
 Import errors, syntax errors, and exceptions while the file loads are contained: see below.

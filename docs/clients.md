@@ -163,6 +163,17 @@ and the Profile writes the common `mcpServers` + `{"type": "http", "url": ...}` 
   is served by `read()`. `ProxyPrompt.render` returns a `PromptResult` of `Message`s. A
   `call_tool_mcp` on the borrowed client answers a failing or unknown tool with an `isError`
   result carrying the message, not by raising.
+- What a sync Hook or Virtual Tool rests on (checked 2026-09-08, 4.0.3 with anyio 4.15.1).
+  `FunctionTool.from_function(run_in_thread=...)` defaults to `True`, so a sync body runs in a
+  worker thread and only `run_in_thread=False` runs it inline on the event loop's thread.
+  FastMCP dispatches it through `fastmcp.utilities.async_utils.call_sync_fn_in_threadpool`,
+  which is `anyio.to_thread.run_sync`; anyio 4 copies the caller's context into the worker
+  thread, so a `ContextVar` set around the call is readable there. `asyncio.to_thread`, which
+  mcpshape runs sync Hooks with, copies the context the same way. A thread reached either way
+  has no running loop of its own, which is how the `upstream` handle tells a worker thread
+  from the loop; it hands the coroutine to the loop `bound` captured with
+  `asyncio.run_coroutine_threadsafe` and blocks on the result, and whatever the coroutine
+  raises is raised again in the thread.
 - What the Client does when structured content does not fit the output schema it was
   advertised (checked 2026-09-08, 4.0.3 with `mcp` 2.x). `ClientSession._validate_tool_result`
   (`mcp/client/session.py`) validates with `jsonschema` and raises

@@ -9,6 +9,8 @@ import asyncio
 import contextlib
 import json
 import os
+import threading
+from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any, cast
 
 import fastmcp
@@ -344,6 +346,71 @@ async def test_a_function_tool_advertises_a_wrapped_output_schema_the_client_che
     async with Client(misshapen) as client:
         with pytest.raises(RuntimeError, match="Invalid structured content returned by tool greet"):
             await client.call_tool("greet", {"name": "Ann"})
+
+
+async def test_a_sync_tool_body_runs_in_a_worker_thread_that_can_see_the_context() -> None:
+    """What a sync Virtual Tool rests on: ``run_in_thread`` and the context in that thread.
+
+    ``run_in_thread`` is what lets a plain function block on the ``upstream`` handle, and the
+    context reaching the thread is what lets the handle be found there at all.
+    """
+    where: ContextVar[str] = ContextVar("where", default="unset")
+    seen: dict[str, Any] = {}
+
+    def note() -> str:
+        """Say where the body ran."""
+        seen["thread"] = threading.get_ident()
+        seen["context"] = where.get()
+        return "noted"
+
+    threaded = FunctionTool.from_function(note)
+    assert threaded.run_in_thread is True, "a sync body runs in a thread unless told otherwise"
+    inline = FunctionTool.from_function(note, run_in_thread=False)
+
+    server = FastMCP("sync")
+    server.add_tool(Tool.from_tool(threaded, name="threaded"))
+    server.add_tool(Tool.from_tool(inline, name="inline"))
+    token = where.set("bound")
+    try:
+        async with Client(server) as client:
+            await client.call_tool("threaded", {})
+            assert seen["thread"] != threading.get_ident(), "the body ran off the loop's thread"
+            assert seen["context"] == "bound", "anyio.to_thread.run_sync copies the context"
+            await client.call_tool("inline", {})
+    finally:
+        where.reset(token)
+    assert seen["thread"] == threading.get_ident(), "run_in_thread=False runs it on the loop"
+
+
+async def test_a_worker_thread_hands_a_coroutine_back_to_the_loop_it_was_given() -> None:
+    """How the ``upstream`` handle answers a sync caller: submit to the loop, block, raise here.
+
+    ``asyncio.to_thread`` copies the context the same way anyio does, so a Hook run this way
+    finds the handle too.
+    """
+    where: ContextVar[str] = ContextVar("where", default="unset")
+
+    async def answer(text: str) -> str:
+        if text == "boom":
+            raise ValueError(text)
+        return text.upper()
+
+    loop = asyncio.get_running_loop()
+
+    def body() -> tuple[str, str]:
+        assert where.get() == "bound", "asyncio.to_thread copies the context"
+        with pytest.raises(RuntimeError):
+            asyncio.get_running_loop()  # no loop in this thread: that is how the handle tells
+        done = asyncio.run_coroutine_threadsafe(answer("hi"), loop).result()
+        with pytest.raises(ValueError, match="boom"):
+            asyncio.run_coroutine_threadsafe(answer("boom"), loop).result()
+        return done, where.get()
+
+    token = where.set("bound")
+    try:
+        assert await asyncio.to_thread(body) == ("HI", "bound")
+    finally:
+        where.reset(token)
 
 
 async def test_a_proxy_template_reads_while_creating_and_a_cached_resource_serves_that() -> None:
