@@ -341,7 +341,7 @@ def _nothing() -> Exposed:
     return Exposed(catalog=_empty(), name=None)
 
 
-def _reach(upstream: Upstream) -> tuple[type[object], dict[str, object]]:
+def _reached_by(upstream: Upstream) -> tuple[type[object], dict[str, object]]:
     """How the Upstream is reached: the transport's kind and settings, and nothing else.
 
     The transport an Upstream carries is its whole file as loaded, Caps and lifecycle beside
@@ -367,19 +367,6 @@ async def rescan(state_dir: Path, secrets: Secrets, upstream: Upstream) -> bool:
         log.warning("Upstream %s could not be scanned", upstream.name, exc_info=True)
         return False
     return True
-
-
-async def record_observation(state_dir: Path, name: str, observed: Catalog) -> None:
-    """Keep what a reconnected Upstream advertises: its first Catalog, or the Drift since.
-
-    An ``upstream rm`` can remove the Upstream's state while this scan waits for its lock
-    (#49). There is then nothing left to keep, which is ordinary: one line says so, rather
-    than the traceback the rescan would otherwise log.
-    """
-    try:
-        await asyncio.to_thread(catalogs.record_scan, state_dir, name, observed)
-    except catalogs.ForgottenError:
-        log.info("Upstream %s was removed while its scan waited; dropping what it saw", name)
 
 
 class _Served:
@@ -482,7 +469,10 @@ class _Served:
                 return
             previous = self.upstream
             self._apply(upstream, settings.caps)
-            if _reach(upstream) != _reach(previous) or upstream.lifecycle != previous.lifecycle:
+            if (
+                _reached_by(upstream) != _reached_by(previous)
+                or upstream.lifecycle != previous.lifecycle
+            ):
                 await self.connection.reconfigure(upstream)
 
     def _apply(self, upstream: Upstream, global_caps: CapSettings) -> None:
@@ -499,18 +489,20 @@ class _Served:
 
         ``catalog.py`` cannot tell a removed Upstream from a brand-new one, so a rescan that
         started before an ``upstream rm`` would write the state directory back (#62); only the
-        Daemon, which knows the file, can tell them apart, so the file is read here, before
-        the write and once more after it, since the removal may land in between. Retirement is
-        scheduled rather than awaited: this runs in the connection's own rescan task, which
-        stopping that connection cancels and waits for.
+        Daemon, which knows the Upstream file, can tell them apart, so it is asked about the
+        file under the Catalog lock, right before the write, where an ``rm`` is either done
+        already or still waiting behind the write it will remove. Retirement is scheduled
+        rather than awaited: this runs in the connection's own rescan task, which stopping
+        that connection cancels and waits for.
         """
-        if self.retired or not self._file.is_file():
-            log.info("Upstream %s was removed; dropping what its reconnect saw", self._name)
-            self._retire_soon()
+        if self.retired:
             return
-        await record_observation(self._state_dir, self._name, observed)
-        if not self._file.is_file():
-            await asyncio.to_thread(catalogs.forget, self._state_dir, self._name)
+        try:
+            await asyncio.to_thread(
+                catalogs.record_scan, self._state_dir, self._name, observed, self._file.is_file
+            )
+        except catalogs.ForgottenError:
+            log.info("Upstream %s was removed; dropping what its reconnect saw", self._name)
             self._retire_soon()
 
     def _retire_soon(self) -> None:

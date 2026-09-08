@@ -37,7 +37,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 if TYPE_CHECKING:
-    from collections.abc import Generator
+    from collections.abc import Callable, Generator
 
 Kind = Literal["tool", "resource", "resource_template", "prompt"]
 KINDS: tuple[Kind, ...] = ("tool", "resource", "resource_template", "prompt")
@@ -290,9 +290,27 @@ class Scan:
     """This scan created the Catalog; there was nothing to drift from."""
 
 
-def record_scan(state_dir: Path, upstream: str, observed: Catalog) -> Scan:
-    """Store ``observed`` as the Catalog on a first scan, else record its Drift for review."""
+def record_scan(
+    state_dir: Path,
+    upstream: str,
+    observed: Catalog,
+    still_registered: Callable[[], bool] | None = None,
+) -> Scan:
+    """Store ``observed`` as the Catalog on a first scan, else record its Drift for review.
+
+    This module cannot tell a removed Upstream from a brand-new one, so a caller that can,
+    the Daemon with the Upstream file, says so through ``still_registered``, which is asked
+    under the lock and before anything is written (#62). ``upstream rm`` removes the Upstream
+    file before it takes this lock to forget the state, so an answer of no here means the
+    Upstream is gone for good: whatever taking the lock created is removed again and
+    ``ForgottenError`` is raised, and an answer of yes means any ``rm`` still to come waits
+    behind this write and removes it.
+    """
     with _locked(state_dir, upstream):
+        if still_registered is not None and not still_registered():
+            _remove_state(state_dir, upstream)
+            msg = f"Upstream {upstream} was removed before its scan could be kept"
+            raise ForgottenError(msg)
         stored = load_catalog(state_dir, upstream)
         if stored is None:
             _write(catalog_path(state_dir, upstream), observed)
@@ -330,16 +348,21 @@ def forget(state_dir: Path, upstream: str) -> None:
     The lock file goes with the rest: the ``flock`` lives on the open descriptor, so unlinking
     a held lock file is safe, and it is what tells a writer waiting behind this one that there
     is nothing left to write to. A second ``forget`` racing the first finds the state already
-    gone and says nothing, whether it finds it gone before the lock, under the lock, or while
-    it is still opening a lock file in a directory the other has just removed (#62).
+    gone and says nothing, whether it finds it gone before the lock, under it, or while it is
+    still opening a lock file in a directory the other has just removed (#62).
     """
-    directory = upstream_state_dir(state_dir, upstream)
-    if not directory.is_dir():
+    if not upstream_state_dir(state_dir, upstream).is_dir():
         return
     try:
         with _locked(state_dir, upstream):
-            for path in directory.iterdir():
-                path.unlink(missing_ok=True)
-            directory.rmdir()
+            _remove_state(state_dir, upstream)
     except ForgottenError:
         return
+
+
+def _remove_state(state_dir: Path, upstream: str) -> None:
+    """Everything in the state directory, the held lock file included, then the directory."""
+    directory = upstream_state_dir(state_dir, upstream)
+    for path in directory.iterdir():
+        path.unlink(missing_ok=True)
+    directory.rmdir()
