@@ -51,6 +51,16 @@ Claude Code is the first and best-integrated Profile, never a special case in th
 - Non-loopback bind requires a static bearer token. Anything beyond is a reverse proxy's job.
   The dashboard is meant for a browser on the same machine at `localhost:<port>`; reaching it
   on a headless server is the user's routing, not mcpshape's.
+- Settled in #17, the dashboard's shape: no framework and no build step, plain HTML, CSS, and
+  JavaScript shipped in the package as the schemas are, served at `/` behind the same bearer
+  token as every route; read-only, fed by the management API alone, polling `/api/status`
+  and `/api/calls` on an interval with a refresh button, and asking for a Catalog, its Drift,
+  or a Proxy's exposed set on request (`GET /api/upstreams/<name>/proxies/<proxy>/exposed`,
+  the one route added for it: the exposed set as the Daemon derives it, with what it hides).
+  `[daemon] dashboard = false` leaves `/` unmounted, for a Daemon nobody browses to, read at
+  Daemon start like `host` and `port`. `mcpshape ui` opens the page of a running Daemon and
+  otherwise says so, since the Daemon is what serves it. Editing from the dashboard is a
+  later ticket. Disabled or temporary Upstreams as a file-level fact stay parked.
 - Upstreams are reached over stdio (a child process the Daemon spawns), Streamable HTTP, or
   legacy SSE, with or without OAuth.
 - One Upstream connection, shared by all its Proxies and all Clients. One Proxy serves any
@@ -280,7 +290,7 @@ mcpshape upstream   add | env | ls | show | sync | connect | rm | scan
 mcpshape proxy      new | ls | show | rm | install | export
 mcpshape tool       hide | show | rename | describe | trim | cap
 mcpshape daemon     up | down | status | logs | reload | install | uninstall
-mcpshape ui
+mcpshape ui                                          opens the dashboard of a running Daemon
 mcpshape doctor
 ```
 - Typer + Rich. Every command answers `-h` and `--help` with one example. `serve` is hidden.
@@ -377,8 +387,6 @@ mcpshape doctor
   Virtual Tools.
 - OS keychain for secrets.
 - Windows: "not required at this stage".
-- Dashboard framework choice: separate design session. Constraints: lightweight, nothing the
-  Daemon already does, CLI parity via the management API only.
 
 ## Out of scope
 - Merging Upstreams into one Proxy. Hosting or running Upstreams remotely.

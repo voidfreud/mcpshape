@@ -1,0 +1,130 @@
+/* The dashboard's one stylesheet: plain, readable, and the same on every browser. */
+
+:root {
+  color-scheme: light dark;
+  --ok: #2a7;
+  --bad: #c33;
+  --dim: #888;
+  --line: #8884;
+}
+
+body {
+  margin: 0 auto;
+  max-width: 72rem;
+  padding: 1rem 1.5rem 3rem;
+  font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+body.unreachable header .status {
+  color: var(--bad);
+}
+
+header h1 {
+  margin: 0 0 0.25rem;
+  font-size: 1.5rem;
+}
+
+.note {
+  margin: 0 0 0.5rem;
+  color: var(--dim);
+}
+
+.status {
+  display: flex;
+  gap: 1rem;
+  align-items: center;
+  margin: 0 0 1.5rem;
+}
+
+.status button,
+td button {
+  font: inherit;
+  padding: 0.15rem 0.6rem;
+  margin-right: 0.3rem;
+  cursor: pointer;
+}
+
+h2 {
+  font-size: 1.1rem;
+  margin: 1.5rem 0 0.5rem;
+}
+
+h3 {
+  font-size: 1rem;
+  margin: 1rem 0 0.25rem;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+th,
+td {
+  text-align: left;
+  vertical-align: top;
+  padding: 0.3rem 0.6rem 0.3rem 0;
+  border-bottom: 1px solid var(--line);
+}
+
+th {
+  color: var(--dim);
+  font-weight: 600;
+}
+
+td.name {
+  font-weight: 600;
+}
+
+td.state small,
+td.state.unavailable {
+  color: var(--dim);
+}
+
+td.state.ready,
+td.state.idle-pending,
+td.health.ok,
+td.outcome.ok {
+  color: var(--ok);
+}
+
+td.state.unavailable,
+td.health.unhealthy,
+td.outcome.error,
+td.outcome.unavailable,
+.error {
+  color: var(--bad);
+}
+
+td.answer {
+  max-width: 28rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--dim);
+}
+
+tr.hidden-item td {
+  color: var(--dim);
+}
+
+.filters label {
+  margin-right: 1rem;
+}
+
+.empty {
+  color: var(--dim);
+}
+
+ul {
+  margin: 0.25rem 0 0.5rem;
+  padding-left: 1.2rem;
+}
+
+li small {
+  color: var(--dim);
+}
+
+code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import webbrowser
 from pathlib import Path  # noqa: TC003  # typer resolves annotations at runtime
 from typing import Annotated
 
@@ -9,7 +10,9 @@ import typer
 
 from mcpshape.cli import daemon, doctor, proxy, tool, upstream
 from mcpshape.cli import serve as serving
-from mcpshape.cli.common import HELP_OPTIONS, State, console, drift_notice, example, fail
+from mcpshape.cli.common import HELP_OPTIONS, State, console, drift_notice, example, fail, state
+from mcpshape.cli.live import read_live
+from mcpshape.config import load_settings
 from mcpshape.paths import CONFIG_DIR_ENV, STATE_DIR_ENV, default_config_dir, default_state_dir
 
 app = typer.Typer(
@@ -87,9 +90,24 @@ app.command("doctor", epilog=example("doctor"))(doctor.doctor)
 
 
 @app.command("ui", epilog=example("ui"))
-def ui() -> None:
-    """Open the dashboard in a browser."""
-    fail("the dashboard is not available in this version")
+def ui(ctx: typer.Context) -> None:
+    """Open the dashboard in a browser: the read-only page a running Daemon serves at /."""
+    config_dir = state(ctx).config_dir
+    if not load_settings(config_dir).daemon.dashboard:
+        fail(
+            "the dashboard is off: [daemon] dashboard = false in config.toml; "
+            "set it to true and restart the Daemon"
+        )
+    live = read_live(config_dir)
+    if not live.running:
+        console.print(
+            "Daemon not running, so there is no dashboard to open. "
+            "Start it with: mcpshape daemon up"
+        )
+        return
+    page = f"{live.url}/"
+    webbrowser.open(page)
+    console.print(f"Opened {page}")
 
 
 app.command("serve", hidden=True, epilog=serving.EPILOG)(serving.serve)

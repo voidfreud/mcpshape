@@ -71,6 +71,13 @@ class DaemonSettings(BaseModel):
             "Required to bind a non-loopback host."
         ),
     )
+    dashboard: bool = Field(
+        default=True,
+        description=(
+            "Serve the read-only dashboard at /. Off, the Daemon does not mount it at all: "
+            "for a Daemon nobody browses to. Read at Daemon start."
+        ),
+    )
 
 
 LOG_CAP_BYTES = 50 * 1024 * 1024

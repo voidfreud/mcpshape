@@ -32,8 +32,10 @@ from starlette.applications import Starlette
 from starlette.middleware import Middleware
 from starlette.responses import JSONResponse, PlainTextResponse
 from starlette.routing import Match, Mount
+from starlette.staticfiles import StaticFiles
 
 from mcpshape import catalog as catalogs
+from mcpshape import dashboard
 from mcpshape.adapters.fastmcp import (
     MCP_PATH,
     UpstreamConnection,
@@ -208,6 +210,8 @@ class _Proxy:
         self._held: _Held | None = None
         self.health = "ok"
         self.detail: str | None = None
+        self.exposed: Exposed = _nothing()
+        """What the Proxy exposes, as last derived: what the dashboard asks for (#17)."""
         self.listener_problem: str | None = None
         """Why the port this Proxy's file asks for is not listened on, while it is not (#70)."""
         self._port: int | None = None
@@ -323,6 +327,7 @@ class _Proxy:
                 self.app.fail(str(exc))
                 return
             self.health, self.detail = "ok", None
+            self.exposed = exposed
             self._port = proxy.port
             self._listeners.want(self._key, self._port, self)
             if server_name(upstream, self._name, exposed) == self.app.name:
@@ -350,6 +355,12 @@ class _Proxy:
         await self.start()
         if previous is not None:
             await previous.close()
+
+    async def exposed_now(self) -> Exposed:
+        """The exposed set after the files are looked at: ``/api/.../exposed`` (#17)."""
+        await self._owner.refresh()
+        await self.refresh()
+        return self.exposed
 
     async def state(self) -> ProxyState:
         await self._owner.refresh()
@@ -1112,7 +1123,8 @@ def build_app(
     """The Daemon apps for the Upstreams registered under ``config_dir``.
 
     Every Proxy is served at ``/<upstream>/<proxy>/mcp``; the ``default`` Proxy also at
-    ``/<upstream>/mcp``; live state at ``/api/status``; ``/api/shutdown`` stops it. ``clock``
+    ``/<upstream>/mcp``; live state at ``/api/status``; ``/api/shutdown`` stops it; the
+    dashboard at ``/`` unless ``[daemon] dashboard = false`` (#17). ``clock``
     is what every lifecycle timer runs on, so tests advance time instead of waiting for it. A
     Proxy whose file sets ``port`` is also served alone on that additional listener, which
     ``.listeners`` keeps in step with the file while the Daemon runs (#70); ``serve_all`` is
@@ -1146,6 +1158,9 @@ def build_app(
     routes += [
         Mount("/{upstream}", app=_ProxyRoute(upstreams)),
     ]
+    if settings.daemon.dashboard:
+        # last, since "/" matches everything a route above did not: the page and its files
+        routes.append(Mount("/", app=StaticFiles(directory=dashboard.directory(), html=True)))
 
     @contextlib.asynccontextmanager
     async def lifespan(_app: Starlette) -> AsyncGenerator[None]:
@@ -1156,6 +1171,7 @@ def build_app(
             yield
 
     main = Starlette(routes=routes, lifespan=lifespan, middleware=_middleware(token))
+    main.router.redirect_slashes = False  # a path nothing serves is not found, not redirected
     return DaemonApp(main=main, listeners=listeners, stop=stop)
 
 

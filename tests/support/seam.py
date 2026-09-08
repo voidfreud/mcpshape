@@ -182,12 +182,14 @@ class RunningDaemon:
             answer = await http.request(method, f"{BASE_URL}{path}", params=params, headers=headers)
         return answer.status_code, json.loads(answer.text)
 
-    async def request(self, method: str, path: str) -> httpx2.Response:
+    async def request(
+        self, method: str, path: str, headers: dict[str, str] | None = None
+    ) -> httpx2.Response:
         """One raw HTTP request to the Daemon at ``path``, for what is not JSON: a redirect,
-        a plain not found."""
+        a plain not found, a page."""
         factory = asgi_client_factory(self.app, BASE_URL)
         async with factory() as http:
-            return await http.request(method, f"{BASE_URL}{path}")
+            return await http.request(method, f"{BASE_URL}{path}", headers=headers)
 
     async def upstream(self, name: str) -> dict[str, Any]:
         """What the Daemon says about the one Upstream called ``name`` at ``/api/status``."""
