@@ -32,7 +32,7 @@ if TYPE_CHECKING:
     import pytest
     from fastmcp.client.client import CallToolResult
 
-    from tests.support.oauth_provider import Provider
+    from tests.support.oauth_provider import ChildProvider
     from tests.support.seam import ConfigDir, RunningDaemon
 
 CONNECTED = ("ready", "idle-pending")
@@ -47,7 +47,7 @@ def key_file(cfg: ConfigDir) -> Path:
     return cfg.state / "oauth.key"
 
 
-def access_token(provider: Provider) -> str:
+def access_token(provider: ChildProvider) -> str:
     """The last token the provider handed out, which is the one in use."""
     return provider.issuer.issued[-1]
 
@@ -58,8 +58,19 @@ def visiting_browser(monkeypatch: pytest.MonkeyPatch, *, deny: bool = False) -> 
 
     def open_url(url: str, *_args: object, **_kwargs: object) -> bool:
         def visit() -> None:
-            with httpx2.Client(follow_redirects=True) as browser:
-                browser.get(url + ("&deny=1" if deny else ""))
+            # The provider answers from its own process at once (#76), so the redirect can
+            # reach the CLI's callback server before it listens: a browser would retry, so
+            # this one does, for a short while.
+            for attempt in range(50):
+                try:
+                    with httpx2.Client(follow_redirects=True) as browser:
+                        browser.get(url + ("&deny=1" if deny else ""))
+                except httpx2.ConnectError:
+                    if attempt == 49:
+                        raise
+                    time.sleep(0.05)
+                else:
+                    return
 
         threading.Thread(target=visit, daemon=True).start()
         return True
@@ -80,7 +91,7 @@ async def upstream_error(daemon_status: dict[str, object], name: str) -> str:
     return str(found["error"])  # pyright: ignore[reportUnknownArgumentType]
 
 
-def add_oauth_upstream(cfg: ConfigDir, provider: Provider, name: str = "x") -> None:
+def add_oauth_upstream(cfg: ConfigDir, provider: ChildProvider, name: str = "x") -> None:
     """Write the Upstream by hand, for the tests whose login is not what they are about."""
     cfg.add_upstream(
         name, f'transport = "http"\nurl = {json.dumps(provider.mcp_url)}\nauth = "oauth"\n'
@@ -95,7 +106,7 @@ async def test_adding_an_oauth_upstream_logs_in_and_stores_the_token_encrypted(
 ) -> None:
     """Story 3: the browser flow, and story 69: what it leaves on disk."""
     visiting_browser(monkeypatch)
-    async with serving_provider(calculator()) as provider:
+    async with serving_provider(calculator) as provider:
         result = await cli(config_dir, "add", "x", "--url", provider.mcp_url, "--oauth")
 
     assert LOGGED_IN in result.output
@@ -112,7 +123,7 @@ async def test_upstream_sync_logs_in_when_no_token_is_stored_and_then_scans(
     config_dir: ConfigDir, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     visiting_browser(monkeypatch)
-    async with serving_provider(calculator()) as provider:
+    async with serving_provider(calculator) as provider:
         add_oauth_upstream(config_dir, provider)
         assert not token_file(config_dir, "x").is_file()
 
@@ -127,7 +138,7 @@ async def test_upstream_show_says_the_auth_kind_and_whether_a_token_is_stored(
     config_dir: ConfigDir, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     visiting_browser(monkeypatch)
-    async with serving_provider(calculator()) as provider:
+    async with serving_provider(calculator) as provider:
         add_oauth_upstream(config_dir, provider)
         before = run_cli(config_dir, "upstream", "show", "x")
         assert "OAuth, not logged in" in before.output
@@ -143,7 +154,7 @@ async def test_upstream_rm_forgets_the_stored_login(
     config_dir: ConfigDir, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     visiting_browser(monkeypatch)
-    async with serving_provider(calculator()) as provider:
+    async with serving_provider(calculator) as provider:
         await cli(config_dir, "add", "x", "--url", provider.mcp_url, "--oauth")
         assert token_file(config_dir, "x").is_file()
 
@@ -156,7 +167,7 @@ async def test_device_code_pairing_prints_the_uri_and_the_code_and_stores_the_to
     config_dir: ConfigDir,
 ) -> None:
     """Story 4: the machine where no browser can open."""
-    async with serving_provider(calculator()) as provider:
+    async with serving_provider(calculator) as provider:
         approving = asyncio.create_task(_approve_when_asked(provider))
         result = await cli(config_dir, "add", "x", "--url", provider.mcp_url, "--oauth", "--device")
         await approving
@@ -173,7 +184,7 @@ async def test_device_code_pairing_prints_the_uri_and_the_code_and_stores_the_to
 async def test_device_code_pairing_says_when_the_provider_offers_none(
     config_dir: ConfigDir,
 ) -> None:
-    async with serving_provider(calculator(), Issuer(device_offered=False)) as provider:
+    async with serving_provider(calculator, Issuer(device_offered=False)) as provider:
         result = await asyncio.to_thread(
             run_cli, config_dir, "add", "x", "--url", provider.mcp_url, "--oauth", "--device"
         )
@@ -182,7 +193,7 @@ async def test_device_code_pairing_says_when_the_provider_offers_none(
     assert "no device-code pairing" in result.output
 
 
-async def _approve_when_asked(provider: Provider) -> None:
+async def _approve_when_asked(provider: ChildProvider) -> None:
     """Stand in for the user typing the code at the provider on another machine."""
     await until(provider.issuer.awaiting_device, "a device code to approve")
     provider.issuer.approve_device()
@@ -193,7 +204,7 @@ async def test_a_refused_login_is_not_a_stored_login_to_show_or_sync(
 ) -> None:
     """#56: the registration a refused login leaves behind is not a login."""
     visiting_browser(monkeypatch, deny=True)
-    async with serving_provider(calculator()) as provider:
+    async with serving_provider(calculator) as provider:
         refused = await asyncio.to_thread(
             run_cli, config_dir, "add", "x", "--url", provider.mcp_url, "--oauth"
         )
@@ -218,7 +229,7 @@ async def test_a_login_from_the_cli_makes_a_running_daemon_connect_now(
     backoff its revoked token put it in."""
     clock = FakeClock()
     visiting_browser(monkeypatch)
-    async with serving_provider(calculator(), Issuer(token_ttl=1)) as provider:
+    async with serving_provider(calculator, Issuer(token_ttl=1)) as provider:
         add_oauth_upstream(config_dir, provider)
         await cli(config_dir, "upstream", "sync", "x")
         provider.issuer.refresh_accepted = False
@@ -241,7 +252,7 @@ async def test_show_and_sync_say_when_the_browser_flow_was_granted_other_scopes(
 ) -> None:
     """#51: the SDK asks for what the provider advertises, not what the file says."""
     visiting_browser(monkeypatch)
-    async with serving_provider(calculator(), Issuer(scopes_supported=["everything"])) as provider:
+    async with serving_provider(calculator, Issuer(scopes_supported=["everything"])) as provider:
         config_dir.add_upstream(
             "x",
             f'transport = "http"\nurl = {json.dumps(provider.mcp_url)}\nauth = "oauth"\n'
@@ -259,7 +270,7 @@ async def test_show_and_sync_say_when_the_browser_flow_was_granted_other_scopes(
 async def test_device_code_pairing_is_granted_the_configured_scopes_with_no_note(
     config_dir: ConfigDir,
 ) -> None:
-    async with serving_provider(calculator(), Issuer(scopes_supported=["everything"])) as provider:
+    async with serving_provider(calculator, Issuer(scopes_supported=["everything"])) as provider:
         config_dir.add_upstream(
             "x",
             f'transport = "http"\nurl = {json.dumps(provider.mcp_url)}\nauth = "oauth"\n'
@@ -281,7 +292,7 @@ async def test_a_provider_that_names_no_scope_granted_what_was_asked(
 ) -> None:
     """RFC 6749, 5.1: no ``scope`` in the answer means the request's, so nothing to say."""
     visiting_browser(monkeypatch)
-    async with serving_provider(calculator(), Issuer(names_scope=False)) as provider:
+    async with serving_provider(calculator, Issuer(names_scope=False)) as provider:
         config_dir.add_upstream(
             "x",
             f'transport = "http"\nurl = {json.dumps(provider.mcp_url)}\nauth = "oauth"\n'
@@ -302,7 +313,7 @@ async def test_a_daemon_uses_the_stored_token_with_no_login_across_a_restart(
     config_dir: ConfigDir, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     visiting_browser(monkeypatch)
-    async with serving_provider(calculator()) as provider:
+    async with serving_provider(calculator) as provider:
         await cli(config_dir, "add", "x", "--url", provider.mcp_url, "--oauth")
         monkeypatch.setattr("webbrowser.open", _no_browser)
 
@@ -316,7 +327,7 @@ async def test_an_expiring_token_is_refreshed_with_no_user_action(
     config_dir: ConfigDir, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     visiting_browser(monkeypatch)
-    async with serving_provider(calculator(), Issuer(token_ttl=1)) as provider:
+    async with serving_provider(calculator, Issuer(token_ttl=1)) as provider:
         await cli(config_dir, "add", "x", "--url", provider.mcp_url, "--oauth")
         monkeypatch.setattr("webbrowser.open", _no_browser)
         refreshes = provider.issuer.refreshes
@@ -335,7 +346,7 @@ async def test_a_revoked_refresh_leaves_the_upstream_unavailable_naming_the_logi
 ) -> None:
     message = "The Upstream is not up; nothing was written."
     visiting_browser(monkeypatch)
-    async with serving_provider(calculator(), Issuer(token_ttl=1)) as provider:
+    async with serving_provider(calculator, Issuer(token_ttl=1)) as provider:
         config_dir.add_upstream(
             "x",
             f'transport = "http"\nurl = {json.dumps(provider.mcp_url)}\nauth = "oauth"\n',
@@ -362,7 +373,7 @@ async def test_upstream_sync_logs_in_again_when_the_stored_login_stopped_working
 ) -> None:
     """The command an unavailable OAuth Upstream names is the command that fixes it."""
     visiting_browser(monkeypatch)
-    async with serving_provider(calculator(), Issuer(token_ttl=1)) as provider:
+    async with serving_provider(calculator, Issuer(token_ttl=1)) as provider:
         add_oauth_upstream(config_dir, provider)
         await cli(config_dir, "upstream", "sync", "x")
         provider.issuer.refresh_accepted = False
@@ -379,7 +390,7 @@ async def test_a_key_file_anyone_else_can_read_is_refused(
     config_dir: ConfigDir, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     visiting_browser(monkeypatch)
-    async with serving_provider(calculator()) as provider:
+    async with serving_provider(calculator) as provider:
         await cli(config_dir, "add", "x", "--url", provider.mcp_url, "--oauth")
         key_file(config_dir).chmod(0o644)
         add_oauth_upstream(config_dir, provider, "y")
@@ -397,7 +408,7 @@ async def test_an_oauth_upstream_with_no_stored_login_says_which_command_logs_it
 ) -> None:
     """The Daemon opens no browser: a login it has not got is one the user runs."""
     visiting_browser(monkeypatch)
-    async with serving_provider(calculator()) as provider:
+    async with serving_provider(calculator) as provider:
         add_oauth_upstream(config_dir, provider)
         await cli(config_dir, "upstream", "sync", "x")
         token_file(config_dir, "x").unlink()
@@ -426,7 +437,7 @@ async def test_the_api_starts_a_login_without_a_browser_and_says_where_it_stands
     """The ``/api`` flow (#16): the Daemon hands back the provider's page instead of opening
     it, takes the callback on loopback, and the Upstream is usable once the token is stored."""
     monkeypatch.setattr("webbrowser.open", _no_browser)
-    async with serving_provider(calculator()) as provider:
+    async with serving_provider(calculator) as provider:
         add_oauth_upstream(config_dir, provider)
 
         async with running_daemon(config_dir) as daemon:
@@ -458,7 +469,7 @@ async def test_the_api_login_says_why_when_the_user_refuses_at_the_provider(
     config_dir: ConfigDir, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr("webbrowser.open", _no_browser)
-    async with serving_provider(calculator()) as provider:
+    async with serving_provider(calculator) as provider:
         add_oauth_upstream(config_dir, provider)
 
         async with running_daemon(config_dir) as daemon:

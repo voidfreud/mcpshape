@@ -706,7 +706,7 @@ async def test_a_refresh_that_fails_raises_nothing_and_reaches_the_redirect_hand
     The SDK clears the token set on a failed refresh and falls through to the full flow, so a
     redirect handler that refuses is what turns it into a readable failure.
     """
-    async with serving_provider(calculator()) as provider:
+    async with serving_provider(calculator) as provider:
         storage = _Storage(
             OAuthToken(access_token="stale", refresh_token="gone", expires_in=-1),
             OAuthClientInformationFull(client_id="c", token_endpoint_auth_method="none"),
@@ -725,7 +725,7 @@ async def test_the_sdk_stores_the_client_registration_before_any_token_set() -> 
     to the consent screen, so a login refused at the redirect leaves a registration and no
     token set behind. ``logged_in`` reads the token set for that reason.
     """
-    async with serving_provider(calculator()) as provider:
+    async with serving_provider(calculator) as provider:
         storage = _Storage()
         auth = _provider(storage, provider.mcp_url)
 
