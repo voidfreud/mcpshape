@@ -123,6 +123,11 @@ Claude Code is the first and best-integrated Profile, never a special case in th
   validation via the TOML schema comment. `proxy export` produces strict `mcpServers` JSON
   (Client config files reject comments) pointing at the Proxy.
 - Secrets: `${ENV_VAR}` references resolved from the Daemon environment or a 0600 secrets file.
+- An Upstream is reached over stdio, http, or sse, and those are the transports a user's file
+  may name. `transport = "memory"` is the test seam's alone (settled in #18): it imports Python
+  into the Daemon process by naming it in a config file, so the loader refuses it in a user's
+  file with the reason, the shipped schema does not list it, and only the seam enables it, in
+  Python; no config value, environment variable, or CLI flag does.
 - OAuth for remote Upstreams: CLI opens the browser and receives the loopback callback;
   dashboard flow second; device-code pairing on headless.
 

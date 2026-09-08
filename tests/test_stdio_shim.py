@@ -23,8 +23,8 @@ import pytest
 from fastmcp import Client
 from fastmcp.client.transports import StdioTransport
 
+from tests.support import child_upstream
 from tests.support.seam import free_port, run_cli, serving_daemon
-from tests.support.shim_upstream import TARGET
 
 if TYPE_CHECKING:
     from collections.abc import Generator
@@ -50,13 +50,14 @@ pytestmark = pytest.mark.skipif(
 
 
 def add_upstream_a_separate_daemon_can_import(cfg: ConfigDir, name: str) -> None:
-    """Register an Upstream by import target, so a Daemon in another process resolves it too."""
-    directory = cfg.path / "upstreams" / name
-    directory.mkdir(parents=True)
-    (directory / "upstream.toml").write_text(
-        f'version = 1\ntransport = "memory"\ntarget = "{TARGET}"\n'
+    """Register a real stdio Upstream, so a Daemon in another process can reach it too.
+
+    The seam's ``memory`` transport is in-process only (#18): a Daemon the shim starts is
+    another process, and it refuses a memory Upstream like any user's Daemon would.
+    """
+    cfg.add_stdio_upstream(
+        name, child_upstream.command(), child_upstream.args(), env=child_upstream.env()
     )
-    (directory / "default.toml").write_text("version = 1\n")
 
 
 def shim(cfg: ConfigDir, log: Path, *args: str) -> Client[StdioTransport]:
@@ -116,7 +117,7 @@ async def test_the_shim_bridges_stdio_to_a_running_daemon(
     log = tmp_path / "shim.log"
 
     async with serving_daemon(config_dir), shim(config_dir, log, "calc") as client:
-        assert [tool.name for tool in await client.list_tools()] == ["add"]
+        assert "add" in [tool.name for tool in await client.list_tools()]
         assert (await client.call_tool("add", {"a": 2, "b": 3})).data == 5
 
     assert daemons_in(log) == [], "a Daemon was already up, so the shim started none"

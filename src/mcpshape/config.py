@@ -6,6 +6,7 @@ and ``upstreams/<name>/<proxy>.toml`` per Proxy. Every file carries ``version``.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import partial
 from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
@@ -37,7 +38,7 @@ from mcpshape.secrets import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable, Mapping
+    from collections.abc import Callable, Generator, Iterable, Mapping
     from pathlib import Path
 
     from mcpshape.catalog import Item, Kind
@@ -287,10 +288,17 @@ class MemoryUpstreamFile(_UpstreamFile, MemoryTransport):
 
 
 UpstreamFile = Annotated[
+    StdioUpstreamFile | HttpUpstreamFile | SseUpstreamFile,
+    Field(discriminator="transport"),
+]
+"""``upstream.toml``: how the Upstream is reached. What a user's file may say, and what the
+shipped schema describes."""
+
+_TestUpstreamFile = Annotated[
     StdioUpstreamFile | HttpUpstreamFile | SseUpstreamFile | MemoryUpstreamFile,
     Field(discriminator="transport"),
 ]
-"""``upstream.toml``: how the Upstream is reached."""
+"""``upstream.toml`` as the test seam reads it: ``transport = "memory"`` as well (#18)."""
 
 FILE_MODELS: dict[FileKind, TypeAdapter[Any]] = {
     "settings": TypeAdapter(SettingsFile),
@@ -298,6 +306,37 @@ FILE_MODELS: dict[FileKind, TypeAdapter[Any]] = {
     "proxy": TypeAdapter(ProxyFile),
     "secrets": TypeAdapter(SecretsFile),
 }
+
+_MEMORY_UPSTREAM_MODEL: TypeAdapter[Any] = TypeAdapter(_TestUpstreamFile)
+
+MEMORY_TRANSPORT = "memory"
+MEMORY_REFUSED = (
+    "'memory' is the test seam's transport, an MCP server living in the Daemon process; "
+    "an Upstream is reached over stdio, http, or sse"
+)
+"""What a user's Upstream file is told when it says ``transport = "memory"`` (#18)."""
+
+_memory_allowed = False
+
+
+@contextmanager
+def memory_upstreams_allowed() -> Generator[None]:
+    """Let ``upstream.toml`` say ``transport = "memory"`` while the block runs.
+
+    The test seam's alone (#18): a memory Upstream imports Python into the Daemon process by
+    naming it in a config file, which no user's file may do. Nothing but Python code entering
+    this block enables it: no config value, no environment variable, no CLI flag.
+    """
+    global _memory_allowed  # noqa: PLW0603  # the one switch the seam flips
+    previous, _memory_allowed = _memory_allowed, True
+    try:
+        yield
+    finally:
+        _memory_allowed = previous
+
+
+def _upstream_model() -> TypeAdapter[Any]:
+    return _MEMORY_UPSTREAM_MODEL if _memory_allowed else FILE_MODELS["upstream"]
 
 
 def schema_url(kind: FileKind) -> str:
@@ -333,8 +372,11 @@ def read_document(path: Path) -> tomlkit.TOMLDocument:
 
 
 def _validate(path: Path, kind: FileKind, data: dict[str, Any]) -> list[Problem]:
+    if kind == "upstream" and data.get("transport") == MEMORY_TRANSPORT and not _memory_allowed:
+        return [Problem(path, "transport", MEMORY_REFUSED)]
+    model = _upstream_model() if kind == "upstream" else FILE_MODELS[kind]
     try:
-        FILE_MODELS[kind].validate_python(data)
+        model.validate_python(data)
     except ValidationError as exc:
         return [Problem(path, _key(error["loc"], data), error["msg"]) for error in exc.errors()]
     return []
@@ -409,7 +451,7 @@ def load_upstream(
     if not path.is_file():
         msg = f"no Upstream named {name!r} in {config_dir}"
         raise ConfigError(msg)
-    file: _UpstreamFile = FILE_MODELS["upstream"].validate_python(_load(path, "upstream"))
+    file: _UpstreamFile = _upstream_model().validate_python(_load(path, "upstream"))
     if defaults is None:
         defaults = load_settings(config_dir).lifecycle
     return Upstream(

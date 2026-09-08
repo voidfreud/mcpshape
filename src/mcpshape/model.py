@@ -47,7 +47,9 @@ class SseTransport(_Transport):
 class MemoryTransport(_Transport):
     """An MCP server living in the Daemon process, as ``module:attribute``.
 
-    Test-only: it lets an in-memory server act as an Upstream with no subprocess or network.
+    The test seam's alone (#18): it lets an in-memory server act as an Upstream with no
+    subprocess or network. The config loader refuses it in a user's file and the shipped
+    schema does not list it; only the seam enables it, in Python.
     """
 
     transport: Literal["memory"]

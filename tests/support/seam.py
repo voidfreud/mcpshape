@@ -22,6 +22,7 @@ from fastmcp.client.transports import StreamableHttpTransport
 from typer.testing import CliRunner, Result  # annotated at runtime
 
 from mcpshape.cli import app
+from mcpshape.config import memory_upstreams_allowed
 from mcpshape.daemon import STATUS_PATH, build_app, serve_all
 from tests.support import upstreams
 from tests.support.asgi import asgi_client_factory
@@ -133,10 +134,12 @@ class ConfigDir:
 
 @pytest.fixture
 def config_dir(tmp_path: Path) -> Generator[ConfigDir]:
+    """The temp config directory, with the seam's own ``memory`` transport enabled (#18)."""
     cfg = ConfigDir(tmp_path / "config", tmp_path / "state")
     cfg.path.mkdir()
     try:
-        yield cfg
+        with memory_upstreams_allowed():
+            yield cfg
     finally:
         cfg.cleanup()
 

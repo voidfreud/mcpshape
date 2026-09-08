@@ -193,42 +193,6 @@
       "title": "LifecycleOverrides",
       "type": "object"
     },
-    "MemoryUpstreamFile": {
-      "additionalProperties": false,
-      "properties": {
-        "transport": {
-          "const": "memory",
-          "title": "Transport",
-          "type": "string"
-        },
-        "target": {
-          "pattern": "^[A-Za-z_][\\w.]*:[A-Za-z_]\\w*$",
-          "title": "Target",
-          "type": "string"
-        },
-        "version": {
-          "const": 1,
-          "description": "Format version of this file.",
-          "title": "Version",
-          "type": "integer"
-        },
-        "lifecycle": {
-          "$ref": "#/$defs/LifecycleOverrides",
-          "description": "This Upstream's lifecycle settings, over the defaults in config.toml."
-        },
-        "caps": {
-          "$ref": "#/$defs/CapOverrides",
-          "description": "This Upstream's Caps, over the global master Caps in config.toml."
-        }
-      },
-      "required": [
-        "transport",
-        "target",
-        "version"
-      ],
-      "title": "MemoryUpstreamFile",
-      "type": "object"
-    },
     "SseUpstreamFile": {
       "additionalProperties": false,
       "properties": {
@@ -318,7 +282,6 @@
   "discriminator": {
     "mapping": {
       "http": "#/$defs/HttpUpstreamFile",
-      "memory": "#/$defs/MemoryUpstreamFile",
       "sse": "#/$defs/SseUpstreamFile",
       "stdio": "#/$defs/StdioUpstreamFile"
     },
@@ -333,9 +296,6 @@
     },
     {
       "$ref": "#/$defs/SseUpstreamFile"
-    },
-    {
-      "$ref": "#/$defs/MemoryUpstreamFile"
     }
   ]
 }
