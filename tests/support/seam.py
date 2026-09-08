@@ -369,7 +369,7 @@ async def serving_upstream(server: FastMCP, transport: str = "http") -> AsyncGen
         await _wait_for_port(port)
         yield f"http://127.0.0.1:{port}{path}"
     finally:
-        await drain_sessions(app)
+        await drain_sessions(app, expected=transport == "http")
         running.should_exit = True
         await serving
 
@@ -453,16 +453,22 @@ def open_sessions(
     }
 
 
-async def drain_sessions(app: object, patience: float = 5.0) -> None:
+async def drain_sessions(app: object, patience: float = 5.0, *, expected: bool = True) -> None:
     """Let every streamable HTTP session on ``app`` end before its server stops (#76).
 
     A FastMCP HTTP server stopped in-process while a legacy-era session is still open leaves
     every later one in the process unable to serve that era (``docs/clients.md``). FastMCP
     itself terminates live transports when its lifespan exits, but uvicorn stops the server
     first, so the seam waits here for the sessions the Daemon just closed to be terminated,
-    and terminates any that linger the way FastMCP would, saying so.
+    and terminates any that linger the way FastMCP would, saying so. Only a streamable HTTP
+    app has a session manager to read; an SSE app has none, and ``expected=False`` says so,
+    while a streamable HTTP app whose manager cannot be found is a wrapper hiding it, which
+    would make this a silent no-op, so it fails instead.
     """
     managers = session_managers(app)
+    if expected and not managers:
+        msg = "no streamable HTTP session manager under the app to drain; is it wrapped?"
+        raise AssertionError(msg)
     deadline = time.monotonic() + patience
     while any(open_sessions(manager) for manager in managers):
         if time.monotonic() > deadline:

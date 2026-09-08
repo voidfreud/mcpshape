@@ -191,7 +191,8 @@ async def test_rotation_under_the_global_cap(config_dir: ConfigDir) -> None:
     # write was the one that filled it (#76): where it is depends on how many bytes a record
     # took, and a slow runner's durations take more.
     newest = calls_file if calls_file.exists() else log_dir / "calls.jsonl.1"
-    assert newest.stat().st_size <= 4096
+    if calls_file.exists():
+        assert calls_file.stat().st_size < 4096, "a current file has not reached its rotation"
     last_record = json.loads(newest.read_text().splitlines()[-1])
     assert last_record["arguments"] == {"a": 149, "b": 1}
 

@@ -128,6 +128,8 @@ async def test_a_streamable_http_app_tracks_the_live_sessions_its_lifespan_termi
         assert open_sessions(manager) == {}, "a closed client's session is terminated"
         assert len(manager._server_instances) == 1, "and still listed"  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
 
+    assert session_managers(echo_server().http_app(path="/sse", transport="sse")) == []
+
 
 async def test_http_app_serves_mcp_under_a_starlette_mount_with_its_own_lifespan() -> None:
     proxy_app = create_proxy(echo_server(), name="proxy").http_app(path="/mcp")

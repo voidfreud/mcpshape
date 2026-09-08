@@ -180,6 +180,11 @@ class Provider:
             ],
         )
 
+    @property
+    def mcp_app(self) -> Starlette:
+        """The FastMCP app behind the guard: what holds the sessions to drain before a stop."""
+        return self._mcp
+
     def lifespan(self) -> Any:  # noqa: ANN401  # FastMCP's lifespan context is its own type
         """The mounted MCP app's own lifespan, which the parent app must run."""
         return self._mcp.router.lifespan_context(self._mcp)
@@ -305,7 +310,7 @@ async def serving_provider(
             await _wait_for(port)
             yield provider
         finally:
-            await drain_sessions(provider.app)
+            await drain_sessions(provider.mcp_app)  # the guard around it hides its routes
             running.should_exit = True
             await serving
 
