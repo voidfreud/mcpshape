@@ -308,7 +308,17 @@ configuration works while the Daemon is down.
 host = "127.0.0.1"
 port = 8321
 # token = "..."   # required for any other host
+dashboard = true  # the read-only page at /; false leaves it unmounted
 ```
+
+`mcpshape ui` opens the dashboard: a read-only page the Daemon serves at `/`, showing every
+Upstream's state and when its next attempt is, every Proxy's health, the Catalog and its
+Drift, what each Proxy exposes after its Overrides, and the latest calls, all from the
+management API, refreshed every few seconds and on a button. It changes nothing; the CLI is
+where changes are made. With no Daemon running there is no page, and `ui` says so. On a
+Daemon nobody browses to, `dashboard = false` leaves `/` unmounted; with a `token` set, the
+page needs the same `Authorization` header as every route, which a browser on its own does not
+send, so a token-guarded Daemon's page is reached through your own routing.
 
 ## Files and secrets
 

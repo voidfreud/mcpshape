@@ -182,12 +182,14 @@ class RunningDaemon:
             answer = await http.request(method, f"{BASE_URL}{path}", params=params, headers=headers)
         return answer.status_code, json.loads(answer.text)
 
-    async def request(self, method: str, path: str) -> httpx2.Response:
+    async def request(
+        self, method: str, path: str, headers: dict[str, str] | None = None
+    ) -> httpx2.Response:
         """One raw HTTP request to the Daemon at ``path``, for what is not JSON: a redirect,
-        a plain not found."""
+        a plain not found, a page."""
         factory = asgi_client_factory(self.app, BASE_URL)
         async with factory() as http:
-            return await http.request(method, f"{BASE_URL}{path}")
+            return await http.request(method, f"{BASE_URL}{path}", headers=headers)
 
     async def upstream(self, name: str) -> dict[str, Any]:
         """What the Daemon says about the one Upstream called ``name`` at ``/api/status``."""
@@ -315,19 +317,26 @@ def free_port() -> int:
 
 @contextlib.asynccontextmanager
 async def serving_daemon(
-    cfg: ConfigDir, clock: Clock | None = None, token: str | None = None
+    cfg: ConfigDir,
+    clock: Clock | None = None,
+    token: str | None = None,
+    *,
+    dashboard: bool = True,
 ) -> AsyncGenerator[str]:
     """Run the Daemon from ``cfg`` on a loopback port, as ``daemon up`` would, and yield its URL.
 
     For the tests that need a socket: a subprocess speaking to a Proxy, or the CLI reading
     live state. Everything else uses ``running_daemon``. The port is written into
-    ``config.toml`` so the CLI computes the same URLs. The Daemon's own ``/api/shutdown``
-    stop event is what is watched, so ``daemon down`` and this fixture's own cleanup agree.
+    ``config.toml`` so the CLI computes the same URLs, with ``dashboard = false`` when asked.
+    The Daemon's own ``/api/shutdown`` stop event is what is watched, so ``daemon down`` and
+    this fixture's own cleanup agree.
     """
     port = free_port()
     settings = f"version = 1\n[daemon]\nport = {port}\n"
     if token:
         settings += f'token = "{token}"\n'
+    if not dashboard:
+        settings += "dashboard = false\n"
     (cfg.path / "config.toml").write_text(settings)
     daemon_app = build_app(cfg.path, cfg.state, clock, token)
     server = asyncio.create_task(serve_all(daemon_app, "127.0.0.1", port))

@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>mcpshape</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header>
+    <h1>mcpshape</h1>
+    <p class="note">This page is read-only: it shows what the Daemon is doing. Change things with the <code>mcpshape</code> CLI.</p>
+    <p class="status">
+      <span id="daemon-url"></span>
+      <span id="updated">not yet updated</span>
+      <button id="refresh" type="button">Refresh</button>
+    </p>
+  </header>
+
+  <main>
+    <section id="upstreams-section">
+      <h2>Upstreams and Proxies</h2>
+      <table id="upstreams">
+        <thead>
+          <tr><th>Upstream</th><th>State</th><th>Proxy</th><th>Health</th><th>Look at</th></tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+      <p id="upstreams-empty" class="empty" hidden>No Upstreams yet. Add one with <code>mcpshape add</code>.</p>
+    </section>
+
+    <section id="detail-section" hidden>
+      <h2 id="detail-title"></h2>
+      <div id="detail"></div>
+    </section>
+
+    <section id="calls-section">
+      <h2>Calls</h2>
+      <p class="filters">
+        <label>Upstream <select id="filter-upstream"><option value="">all</option></select></label>
+        <label>Proxy <select id="filter-proxy"><option value="">all</option></select></label>
+      </p>
+      <table id="calls">
+        <thead>
+          <tr><th>When</th><th>Proxy</th><th>Tool</th><th>Outcome</th><th>Duration</th><th>Answer</th></tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+      <p id="calls-empty" class="empty" hidden>No calls yet.</p>
+    </section>
+  </main>
+
+  <script src="/app.js"></script>
+</body>
+</html>

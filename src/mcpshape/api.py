@@ -17,6 +17,10 @@ Routes, all behind the bearer token when one is configured:
 - ``POST /api/shutdown``: what ``daemon down`` posts to.
 - ``GET /api/upstreams/<name>/catalog``: the accepted Catalog, or ``null`` before a scan.
 - ``GET /api/upstreams/<name>/drift``: the unreviewed Drift, or ``null``.
+- ``GET /api/upstreams/<name>/proxies/<proxy>/exposed``: the Proxy's exposed set as the
+  Daemon derives it, the Catalog with its Overrides and Caps applied and its Virtual Tools,
+  beside what it hides, and the Proxy's health, since an unhealthy Proxy keeps its last
+  exposed set (#17).
 - ``POST /api/upstreams/<name>/sync``: scan now and record the Drift. Accepting it edits
   Proxy files, so it stays the CLI's: ``upstream sync --accept``.
 - ``GET`` and ``POST /api/upstreams/<name>/oauth``: the login's state, and starting one.
@@ -31,6 +35,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import inspect
 import logging
 import os
 from dataclasses import dataclass, field
@@ -42,7 +47,7 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from mcpshape import catalog as catalogs
-from mcpshape.adapters.fastmcp import CALLBACK_TIMEOUT, logged_in, login
+from mcpshape.adapters.fastmcp import CALLBACK_TIMEOUT, logged_in, login, server_name
 from mcpshape.calls import CallRecord
 from mcpshape.commands import command_missing
 from mcpshape.connection import TimedOutError, bounded
@@ -63,6 +68,7 @@ if TYPE_CHECKING:
     from mcpshape.calls import CallLog
     from mcpshape.connection import Clock
     from mcpshape.model import Upstream
+    from mcpshape.proxy import Exposed
     from mcpshape.secrets import Secrets
 
 log = logging.getLogger("mcpshape.api")
@@ -164,6 +170,35 @@ class CatalogAnswer(BaseModel):
     catalog: catalogs.Catalog | None = None
 
 
+class ExposedItem(BaseModel):
+    """One item as a Proxy exposes it, or one it hides (#17)."""
+
+    kind: str
+    name: str
+    """The exposed name; for a hidden item, its Catalog name."""
+    origin: str | None = None
+    """The Catalog name it stands for; nothing for a Virtual Tool."""
+    description: str | None = None
+    hidden: bool = False
+    virtual: bool = False
+
+
+class ExposedAnswer(BaseModel):
+    """``/api/upstreams/<name>/proxies/<proxy>/exposed``: the exposed set, and what is hidden."""
+
+    name: str
+    """The server name a Client sees."""
+    health: str
+    detail: str | None = None
+    """The Proxy's health as ``/api/status`` reports it: an unhealthy Proxy keeps advertising
+    its last exposed set, which is what ``items`` then is."""
+    scanned: bool = True
+    """Whether the Upstream has a Catalog at all; before its first scan there is nothing to
+    expose and nothing to hide."""
+    instructions: str | None = None
+    items: list[ExposedItem] = Field(default_factory=list[ExposedItem])
+
+
 class DriftAnswer(BaseModel):
     """``/api/upstreams/<name>/drift``: the unreviewed Drift, or nothing."""
 
@@ -208,9 +243,10 @@ class LogsAnswer(BaseModel):
 
 
 class ProxyLike(Protocol):
-    """One Proxy as the API needs it: its live state, and a reload."""
+    """One Proxy as the API needs it: its live state, its exposed set, and a reload."""
 
     async def state(self) -> ProxyState: ...
+    async def exposed_now(self) -> Exposed: ...
     async def reload(self) -> None: ...
 
 
@@ -230,6 +266,7 @@ class ServedLike(Protocol):
     def proxies(self) -> Mapping[str, ProxyLike]: ...
     @property
     def retired(self) -> bool: ...
+    async def proxy(self, name: str) -> ProxyLike | None: ...
 
 
 class UpstreamsLike(Protocol):
@@ -351,6 +388,7 @@ class Management:
             Route(SHUTDOWN_PATH, self._shutdown, methods=["POST"]),
             Route(f"{UPSTREAMS_PATH}/{{upstream}}/catalog", self._catalog),
             Route(f"{UPSTREAMS_PATH}/{{upstream}}/drift", self._drift),
+            Route(f"{UPSTREAMS_PATH}/{{upstream}}/proxies/{{proxy}}/exposed", self._exposed),
             Route(f"{UPSTREAMS_PATH}/{{upstream}}/sync", self._sync, methods=["POST"]),
             Route(f"{UPSTREAMS_PATH}/{{upstream}}/oauth", self._login_state),
             Route(f"{UPSTREAMS_PATH}/{{upstream}}/oauth", self._login_start, methods=["POST"]),
@@ -449,6 +487,30 @@ class Management:
         name = served.upstream.name
         drift = await asyncio.to_thread(catalogs.load_drift, self.state_dir, name)
         return _answer(DriftAnswer(drift=DriftState.of(drift) if drift else None))
+
+    async def _exposed(self, request: Request) -> JSONResponse:
+        proxy_name: str = request.path_params["proxy"]
+        return await self._for_upstream(request, partial(self._exposed_of, proxy_name))
+
+    async def _exposed_of(self, proxy_name: str, served: ServedLike) -> JSONResponse:
+        """The Proxy's exposed set beside what the Catalog has that it hides (#17)."""
+        upstream = served.upstream.name
+        proxy = await served.proxy(proxy_name)
+        if proxy is None:
+            return _refusal(f"no Proxy {upstream}/{proxy_name}", NOT_FOUND)
+        health = await proxy.state()
+        exposed = await proxy.exposed_now()
+        stored = await asyncio.to_thread(catalogs.load_catalog, self.state_dir, upstream)
+        return _answer(
+            ExposedAnswer(
+                name=server_name(served.upstream, proxy_name, exposed),
+                health=health.health,
+                detail=health.detail,
+                scanned=stored is not None,
+                instructions=exposed.catalog.instructions,
+                items=_exposed_items(exposed, stored),
+            )
+        )
 
     async def _sync(self, request: Request) -> JSONResponse:
         return await self._for_upstream(request, self._sync_of)
@@ -579,6 +641,46 @@ class Management:
         if found is None:
             return _refusal(f"no Upstream named {name!r}", NOT_FOUND)
         return await answer(found)
+
+
+def _exposed_items(exposed: Exposed, stored: catalogs.Catalog | None) -> list[ExposedItem]:
+    """Every exposed item under its exposed name, every hidden Catalog item, and every
+    Virtual Tool, in that order within each kind."""
+    items: list[ExposedItem] = []
+    for kind in catalogs.KINDS:
+        field_name = f"{kind}s"
+        covered: set[str] = set()
+        for name, definition in getattr(exposed.catalog, field_name).items():
+            origin = exposed.origin(catalogs.Item(kind=kind, name=name))
+            covered.add(origin)
+            items.append(
+                ExposedItem(
+                    kind=kind, name=name, origin=origin, description=definition.get("description")
+                )
+            )
+        if stored is not None:
+            for name, definition in getattr(stored, field_name).items():
+                if name not in covered:
+                    items.append(
+                        ExposedItem(
+                            kind=kind,
+                            name=name,
+                            origin=name,
+                            description=definition.get("description"),
+                            hidden=True,
+                        )
+                    )
+        if kind == "tool":
+            items += [
+                ExposedItem(
+                    kind=kind,
+                    name=name,
+                    description=virtual.description or inspect.getdoc(virtual.fn),
+                    virtual=True,
+                )
+                for name, virtual in exposed.code.tools.items()
+            ]
+    return items
 
 
 def _answer(model: BaseModel) -> JSONResponse:
