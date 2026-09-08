@@ -256,3 +256,8 @@ and the Profile writes the common `mcpServers` + `{"type": "http", "url": ...}` 
   a modern-era `Client` and an in-memory `ProxyClient` still work (checked 2026-09-08, 4.0.3).
   mcpshape's Upstream client is a `ProxyClient`, which is legacy-era, so a test that kills an
   HTTP Upstream serves it from a child process instead of in-process uvicorn.
+- The MCP SDK's OAuth client writes the dynamic client registration to its `TokenStorage`
+  before any token set, at the start of a login (checked 2026-09-08, `mcp` 2.x behind
+  FastMCP 4.0.3). So a token file's existence says a login started, not that it finished; the
+  token set under it is what says that, which is what `/api/upstreams/<name>/oauth` reports as
+  `stored`.

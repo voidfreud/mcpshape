@@ -203,6 +203,16 @@ class Connection:
             return
         await self._fail(f"a call found the connection dead: {reason}")
 
+    def retry(self) -> None:
+        """Try again now instead of waiting out the backoff, when that is where it is.
+
+        For a login the ``/api`` flow has just stored (#16): the reason the last attempt
+        failed is gone, so the next one need not wait. Anywhere else this is nothing.
+        """
+        if self._state == "unavailable":
+            self._begin_connect()
+            self._nudge()
+
     # --- the keeper ------------------------------------------------------------------------
 
     async def _keep(self) -> None:

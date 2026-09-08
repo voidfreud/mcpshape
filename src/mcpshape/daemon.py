@@ -5,9 +5,11 @@ files the CLI edits, so each Proxy re-reads them when they change, checked on ev
 Starting the Daemon rescans every Upstream, recording Drift rather than serving it.
 
 One connection per Upstream is built here and shared by all of that Upstream's Proxies and
-every Client (story 74); the lifespan warms it, times it, and lets it go. ``/api/status`` is
-the live state the CLI and, later, the dashboard read: nothing here is configuration, which is
-read from files whether the Daemon runs or not.
+every Client (story 74); the lifespan warms it, times it, and lets it go. The management API
+under ``/api`` (``mcpshape.api``) is the live state the CLI and the dashboard read: nothing
+there is configuration, which is read from files whether the Daemon runs or not. Every tool
+call through a Proxy goes to the call log, and the app log goes to the state directory, both
+rotated under the one size cap ``config.toml`` sets (#16).
 """
 
 from __future__ import annotations
@@ -21,14 +23,15 @@ from datetime import UTC, datetime
 from functools import partial
 from typing import TYPE_CHECKING, Literal
 
-from pydantic import BaseModel, Field
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
 from starlette.responses import JSONResponse
-from starlette.routing import Mount, Route
+from starlette.routing import Mount
 
 from mcpshape import catalog as catalogs
 from mcpshape.adapters.fastmcp import UpstreamConnection, proxy_app, scan, server_name
+from mcpshape.api import Management, ProxyState
+from mcpshape.calls import CallLog
 from mcpshape.config import (
     ConfigError,
     DaemonSettings,
@@ -41,16 +44,16 @@ from mcpshape.config import (
 )
 from mcpshape.connection import SystemClock, TimedOutError, bounded
 from mcpshape.hooks import UserCodeError, load_user_code
+from mcpshape.logs import RotatingFile, configure_app_log
 from mcpshape.model import DEFAULT_PROXY_NAME, CapError, CapSettings
-from mcpshape.paths import daemon_log_file
+from mcpshape.paths import call_log_file
 from mcpshape.proxy import Exposed, OverrideError, cap, expose
 from mcpshape.tokens import Tokens
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, Awaitable, Callable
+    from collections.abc import AsyncGenerator
     from pathlib import Path
 
-    from starlette.requests import Request
     from starlette.routing import BaseRoute
     from starlette.types import ASGIApp, Receive, Scope, Send
 
@@ -61,16 +64,6 @@ if TYPE_CHECKING:
     from mcpshape.secrets import Secrets
 
 log = logging.getLogger("mcpshape.daemon")
-
-STATUS_PATH = "/api/status"
-"""One of three management routes so far: live state, which #16 grows into the management API."""
-
-SHUTDOWN_PATH = "/api/shutdown"
-"""What ``daemon down`` posts to: sets the stop event ``serve`` is watching."""
-
-RELOAD_PATH = "/api/reload"
-"""What ``daemon reload`` posts to: every Proxy re-reads its files now, and the live state
-that came of it is the answer (#10)."""
 
 
 def is_loopback(host: str) -> bool:
@@ -121,30 +114,6 @@ def _authed(app: ASGIApp, token: str | None) -> ASGIApp:
 
 def _middleware(token: str | None) -> list[Middleware]:
     return [Middleware(_BearerAuth, token=token)] if token else []
-
-
-class ProxyState(BaseModel):
-    """One Proxy as the Daemon sees it right now."""
-
-    name: str
-    health: str
-    detail: str | None = None
-
-
-class UpstreamState(BaseModel):
-    """One Upstream's connection as the Daemon sees it right now."""
-
-    name: str
-    state: str
-    seconds: float
-    error: str | None = None
-    proxies: list[ProxyState] = Field(default_factory=list[ProxyState])
-
-
-class LiveState(BaseModel):
-    """What ``/api/status`` answers. The CLI reads it back through the same model."""
-
-    upstreams: list[UpstreamState] = Field(default_factory=list[UpstreamState])
 
 
 class _Held:
@@ -198,6 +167,7 @@ class _Proxy:
         name: str,
         connection: UpstreamConnection,
         global_caps: CapSettings,
+        calls: CallLog,
     ) -> None:
         self._code_path = proxy_code_file(config_dir, upstream.name, name)
         self._sources = (
@@ -215,11 +185,12 @@ class _Proxy:
         self._global_caps = global_caps
         self._stamp: tuple[_StampEntry, ...] | None = None
         self._connection = connection
+        self._calls = calls
         self._lock = asyncio.Lock()
         self._held: _Held | None = None
         self.health = "ok"
         self.detail: str | None = None
-        self.app: ProxyApp = proxy_app(upstream, name, _nothing(), connection)
+        self.app: ProxyApp = proxy_app(upstream, name, _nothing(), connection, calls)
 
     async def start(self) -> None:
         self._held = _Held(self.app)
@@ -295,7 +266,7 @@ class _Proxy:
 
     async def _rebuild(self, exposed: Exposed) -> None:
         previous = self._held
-        self.app = proxy_app(self._upstream, self._name, exposed, self._connection)
+        self.app = proxy_app(self._upstream, self._name, exposed, self._connection, self._calls)
         await self.start()
         if previous is not None:
             await previous.close()
@@ -401,7 +372,10 @@ def build_app(
     """
     running_clock = clock or SystemClock()
     upstreams = load_upstreams(config_dir)
-    global_caps = load_settings(config_dir).caps
+    settings = load_settings(config_dir)
+    configure_app_log(state_dir, settings.log.level, settings.log.max_bytes)
+    calls = CallLog(RotatingFile(call_log_file(state_dir), settings.log.max_bytes))
+    global_caps = settings.caps
     secrets = secrets_for(config_dir)
     connections = {
         upstream.name: UpstreamConnection(
@@ -415,17 +389,29 @@ def build_app(
     }
     proxies = {
         (upstream.name, proxy_name): _Proxy(
-            config_dir, state_dir, upstream, proxy_name, connections[upstream.name], global_caps
+            config_dir,
+            state_dir,
+            upstream,
+            proxy_name,
+            connections[upstream.name],
+            global_caps,
+            calls,
         )
         for upstream in upstreams
         for proxy_name in upstream.proxies
     }
     stop = asyncio.Event()
-    routes: list[BaseRoute] = [
-        Route(STATUS_PATH, _status(upstreams, connections, proxies)),
-        Route(RELOAD_PATH, _reload(upstreams, connections, proxies), methods=["POST"]),
-        Route(SHUTDOWN_PATH, _shutdown(stop), methods=["POST"]),
-    ]
+    management = Management(
+        upstreams=upstreams,
+        connections=connections,
+        proxies=dict(proxies),
+        calls=calls,
+        state_dir=state_dir,
+        secrets=secrets,
+        clock=running_clock,
+        stop=stop,
+    )
+    routes: list[BaseRoute] = management.routes()
     routes += [
         Mount(f"/{name}/{proxy_name}", app=proxy) for (name, proxy_name), proxy in proxies.items()
     ]
@@ -444,6 +430,7 @@ def build_app(
             )
         )
         async with contextlib.AsyncExitStack() as stack:
+            stack.push_async_callback(management.close)
             for proxy in proxies.values():
                 await proxy.start()
                 stack.push_async_callback(proxy.stop)
@@ -469,71 +456,6 @@ def _proxy_ports(config_dir: Path, upstreams: list[Upstream]) -> dict[tuple[str,
             if proxy.port is not None:
                 ports[upstream.name, proxy_name] = proxy.port
     return ports
-
-
-async def _live(
-    upstreams: list[Upstream],
-    connections: dict[str, UpstreamConnection],
-    proxies: dict[tuple[str, str], _Proxy],
-) -> LiveState:
-    """What every Upstream and Proxy is doing right now, each Proxy refreshed on the way."""
-
-    async def state_of(upstream: Upstream) -> UpstreamState:
-        status = connections[upstream.name].status()
-        return UpstreamState(
-            name=upstream.name,
-            state=status.state,
-            seconds=round(status.seconds, 3),
-            error=status.error,
-            proxies=[await proxies[upstream.name, name].state() for name in upstream.proxies],
-        )
-
-    return LiveState(upstreams=[await state_of(upstream) for upstream in upstreams])
-
-
-def _status(
-    upstreams: list[Upstream],
-    connections: dict[str, UpstreamConnection],
-    proxies: dict[tuple[str, str], _Proxy],
-) -> Callable[[Request], Awaitable[JSONResponse]]:
-    """The ``/api/status`` endpoint: what every Upstream and Proxy is doing right now."""
-
-    async def endpoint(_request: Request) -> JSONResponse:
-        live = await _live(upstreams, connections, proxies)
-        return JSONResponse(live.model_dump(mode="json"))
-
-    return endpoint
-
-
-def _reload(
-    upstreams: list[Upstream],
-    connections: dict[str, UpstreamConnection],
-    proxies: dict[tuple[str, str], _Proxy],
-) -> Callable[[Request], Awaitable[JSONResponse]]:
-    """``/api/reload``: every Proxy re-reads its files now, changed or not (#10).
-
-    What ``daemon reload`` posts to. A Proxy re-reads a changed file on the next request
-    anyway; this is for forcing the matter, and for seeing every Proxy's health in one
-    answer, which is the live state after the reload.
-    """
-
-    async def endpoint(_request: Request) -> JSONResponse:
-        for proxy in proxies.values():
-            await proxy.reload()
-        live = await _live(upstreams, connections, proxies)
-        return JSONResponse(live.model_dump(mode="json"))
-
-    return endpoint
-
-
-def _shutdown(stop: asyncio.Event) -> Callable[[Request], Awaitable[JSONResponse]]:
-    """``/api/shutdown``: what ``daemon down`` posts to. Sets ``stop`` and answers at once."""
-
-    async def endpoint(_request: Request) -> JSONResponse:
-        stop.set()
-        return JSONResponse({"stopping": True})
-
-    return endpoint
 
 
 async def serve(
@@ -580,32 +502,12 @@ async def serve_all(daemon: DaemonApp, host: str, port: int) -> None:
     )
 
 
-def log_to_file(state_dir: Path) -> None:
-    """Send the app log to the state directory, where ``daemon logs`` reads it.
-
-    Standard levels, verbose for now; #16 brings the level setting and the size-based
-    rotation. Adding the handler twice would double every line, so it is added once.
-    """
-    path = daemon_log_file(state_dir)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    app_log = logging.getLogger("mcpshape")
-    if any(
-        isinstance(h, logging.FileHandler) and h.baseFilename == str(path) for h in app_log.handlers
-    ):
-        return
-    handler = logging.FileHandler(path)
-    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
-    app_log.addHandler(handler)
-    app_log.setLevel(logging.INFO)
-
-
 def run(config_dir: Path, state_dir: Path) -> None:
     """Build the Daemon app from ``config_dir`` and serve it, and every port override, until
     ``daemon down`` or a signal stops it. Refuses an unguarded non-loopback bind itself."""
     settings = load_settings(config_dir).daemon
     check_bind(settings)
-    log_to_file(state_dir)
-    log.info("Daemon starting on %s:%d", settings.host, settings.port)
     app = build_app(config_dir, state_dir, token=settings.token)
+    log.info("Daemon starting on %s:%d", settings.host, settings.port)
     asyncio.run(serve_all(app, settings.host, settings.port))
     log.info("Daemon stopped")

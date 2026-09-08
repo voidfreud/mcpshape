@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import copy
 import importlib
 import json
 import logging
@@ -72,8 +73,9 @@ from mcp.shared.exceptions import MCPError
 from pydantic import AnyUrl, PrivateAttr, TypeAdapter
 
 from mcpshape import hooks
+from mcpshape.calls import CallRecord, Outcome
 from mcpshape.catalog import Catalog, Item
-from mcpshape.connection import Connection, UpstreamUnavailableError
+from mcpshape.connection import CONNECTED, Connection, UpstreamUnavailableError
 from mcpshape.hooks import Call, UpstreamError, UserCode
 from mcpshape.model import HttpTransport, MemoryTransport, SseTransport, StdioTransport
 from mcpshape.proxy import ArgumentMap, Exposed, cut_output
@@ -90,6 +92,7 @@ if TYPE_CHECKING:
     from pydantic import BaseModel
     from starlette.types import ASGIApp
 
+    from mcpshape.calls import CallLog
     from mcpshape.connection import Clock, Status
     from mcpshape.hooks import VirtualTool
     from mcpshape.model import Transport, Upstream
@@ -229,13 +232,33 @@ class UpstreamConnection:
         """
         if self._on_catalog is None:
             return
+        await self._on_catalog(await self._over_open_client())
+
+    async def _over_open_client(self) -> Catalog:
+        """What the Upstream advertises, looked at over the connection already open."""
         client = self._link.client
         async with _concealing(self._link.transport, self._link.secrets, self._link.tokens), client:
-            observed = await _catalog_of(client)
-        await self._on_catalog(observed)
+            return await _catalog_of(client)
 
     def status(self) -> Status:
         return self._connection.status()
+
+    async def observe(self) -> Catalog:
+        """What the Upstream advertises now: ``/api`` sync (#16).
+
+        Over the connection already open when there is one, acquired as a call acquires it so
+        the idle timer starts over and an stdio Upstream is not spawned a second time;
+        otherwise over a connection of its own, as the Daemon's own start-up scan does, which
+        leaves the lifecycle where it was.
+        """
+        if self._connection.status().state in CONNECTED:
+            await self._connection.acquire()
+            return await self._over_open_client()
+        return await scan(self._link.transport, self._link.secrets, self._link.tokens)
+
+    def retry(self) -> None:
+        """Try to connect again now: a login just stored what the last attempt lacked (#16)."""
+        self._connection.retry()
 
     def running(self) -> AbstractAsyncContextManager[None]:
         """Warm, time, and finally let the connection go, for the life of the Daemon."""
@@ -270,10 +293,17 @@ def server_name(upstream: Upstream, proxy_name: str, exposed: Exposed) -> str:
 
 
 def proxy_app(
-    upstream: Upstream, proxy_name: str, exposed: Exposed, connection: UpstreamConnection
+    upstream: Upstream,
+    proxy_name: str,
+    exposed: Exposed,
+    connection: UpstreamConnection,
+    calls: CallLog,
 ) -> ProxyApp:
-    """The Proxy ``proxy_name`` of ``upstream``, exposing ``exposed`` over ``connection``."""
-    runtime = _Runtime(f"{upstream.name}/{proxy_name}", connection)
+    """The Proxy ``proxy_name`` of ``upstream``, exposing ``exposed`` over ``connection``.
+
+    Every tool call it serves is recorded in ``calls``.
+    """
+    runtime = _Runtime(upstream.name, proxy_name, connection, calls)
     provider = _CatalogProvider(connection.client, runtime)
     name = server_name(upstream, proxy_name, exposed)
     server = FastMCP(name=name)
@@ -450,12 +480,66 @@ class _Handle:
 class _Runtime:
     """What every component of one Proxy runs its calls through: the Hooks, or the failure."""
 
-    def __init__(self, label: str, connection: UpstreamConnection) -> None:
-        self.label = label
+    def __init__(
+        self, upstream: str, proxy: str, connection: UpstreamConnection, calls: CallLog
+    ) -> None:
+        self.upstream, self.proxy = upstream, proxy
+        self.label = f"{upstream}/{proxy}"
         self.connection = connection
+        self.calls = calls
         self.handle = _Handle(connection)
         self.code = UserCode()
         self.failure: str | None = None
+
+    async def run_tool(
+        self,
+        call: Call,
+        exposed: str,
+        forward: Callable[[Call], Awaitable[hooks.ToolResult]],
+        cap: Callable[[hooks.ToolResult], hooks.ToolResult] | None,
+        check: Callable[[hooks.ToolResult, str], None] | None,
+    ) -> hooks.ToolResult:
+        """``run`` for a tool call, recorded in the call log however it ends (#16).
+
+        What is recorded is what the Client experienced: the arguments it sent, under Catalog
+        names and before any Hook touched them, the time it waited, Hooks included, and the
+        result or the error it was answered with.
+        """
+        at = datetime.now(UTC)
+        arguments = copy.deepcopy(call.args)  # a Hook may change them in place, however deep
+        started = time.perf_counter()
+        try:
+            result = await self.run(call, forward, hooks.ToolResult.of, ToolError, cap, check)
+        except Exception as exc:
+            self._record(at, call, exposed, arguments, started, "error", _message(exc))
+            raise
+        outcome: Outcome = "error" if result.is_error else "ok"
+        self._record(at, call, exposed, arguments, started, outcome, result.text)
+        return result
+
+    def _record(  # noqa: PLR0913, PLR0917  # every one of these is what a record is
+        self,
+        at: datetime,
+        call: Call,
+        exposed: str,
+        arguments: dict[str, Any],
+        started: float,
+        outcome: Outcome,
+        result: str,
+    ) -> None:
+        self.calls.record(
+            CallRecord.build(
+                at,
+                self.upstream,
+                self.proxy,
+                call.name,
+                exposed,
+                arguments,
+                (time.perf_counter() - started) * 1000,
+                outcome,
+                result,
+            )
+        )
 
     def serve(self, code: UserCode) -> None:
         self.code, self.failure = code, None
@@ -499,7 +583,11 @@ class _Runtime:
             except FastMCPError:
                 raise
             except Exception as exc:
-                raise error(str(exc) or type(exc).__name__, log_level=logging.WARNING) from exc
+                raise error(_message(exc), log_level=logging.WARNING) from exc
+
+
+def _message(exc: BaseException) -> str:
+    return str(exc) or type(exc).__name__
 
 
 def _capped_output(
@@ -553,11 +641,10 @@ class _CuratedTool(ProxyTool):
             return result
 
         call = Call("tool", self._origin, self._arguments.to_catalog(arguments))
-        result = await self._runtime.run(
+        result = await self._runtime.run_tool(
             call,
+            self.name,
             forward,
-            hooks.ToolResult.of,
-            ToolError,
             _capped_output(self._output_cap, self.output_schema),
             _schema_check(self._origin, self.output_schema),
         )
@@ -688,11 +775,10 @@ class _VirtualTool(FunctionTool):
             return result
 
         call = Call("tool", self.name, dict(arguments))
-        result = await self._runtime.run(
+        result = await self._runtime.run_tool(
             call,
+            self.name,
             forward,
-            hooks.ToolResult.of,
-            ToolError,
             _capped_output(self._output_cap, self.output_schema),
             _schema_check(self.name, self.output_schema),
         )
@@ -1077,6 +1163,19 @@ class _TokenStorage(TokenStorage):
         self._tokens.write(document)
 
 
+def logged_in(tokens: Tokens) -> bool:
+    """Whether a token set is stored, as opposed to only the client registration.
+
+    The SDK writes the registration first, so ``tokens.stored()`` is true from the moment a
+    login starts; the token set is what says the login finished.
+    """
+    try:
+        document = tokens.read() or {}
+    except Exception:  # noqa: BLE001  # an unreadable file is no login
+        return False
+    return document.get(_TokenStorage.TOKENS) is not None
+
+
 class _Provider(OAuthClientProvider):
     """The MCP SDK's OAuth client, told when the stored token runs out.
 
@@ -1155,13 +1254,18 @@ def _provider(
     )
 
 
-async def login(
+type Opener = Callable[[str], Awaitable[None]]
+"""What is handed the provider's page to open, in the browser flow."""
+
+
+async def login(  # noqa: PLR0913  # the three ways in are keywords, each with a default
     transport: Transport,
     secrets: Secrets,
     tokens: Tokens,
     announce: Callable[[str], None],
     *,
     device: bool = False,
+    opener: Opener | None = None,
 ) -> None:
     """Log this Upstream in with its provider and keep what came back (stories 3 and 4).
 
@@ -1171,14 +1275,24 @@ async def login(
 
     Whatever comes back is written through the same token store the Daemon reads, so a Daemon
     started afterwards, or restarted later, uses it without asking again. ``announce`` is how
-    the CLI is told what to do; nothing it is given is ever a token.
+    the CLI is told what to do; nothing it is given is ever a token. ``opener`` is what the
+    provider's page is handed to instead of this machine's browser: the ``/api`` flow (#16)
+    hands it to the dashboard, which opens it wherever the user's browser is.
     """
     remote = _logging_in(secrets.expanded(transport))
     async with _concealing(transport, secrets, tokens):
         if device:
             await _device_login(remote, tokens, announce)
         else:
-            await _browser_login(remote, tokens, announce)
+            await _browser_login(remote, tokens, announce, opener or _this_browser(announce))
+
+
+def _this_browser(announce: Callable[[str], None]) -> Opener:
+    async def open_here(authorization_url: str) -> None:
+        announce("Opening your browser to finish the login.")
+        webbrowser.open(authorization_url)
+
+    return open_here
 
 
 def _logging_in(transport: Transport) -> HttpTransport | SseTransport:
@@ -1189,7 +1303,10 @@ def _logging_in(transport: Transport) -> HttpTransport | SseTransport:
 
 
 async def _browser_login(
-    remote: HttpTransport | SseTransport, tokens: Tokens, announce: Callable[[str], None]
+    remote: HttpTransport | SseTransport,
+    tokens: Tokens,
+    announce: Callable[[str], None],
+    opener: Opener,
 ) -> None:
     """Open the provider's page and take the answer on a loopback port (story 3).
 
@@ -1199,14 +1316,10 @@ async def _browser_login(
     port = find_available_port(host=CALLBACK_HOST)
     redirect_uri = f"http://{CALLBACK_HOST}:{port}{CALLBACK_PATH}"
 
-    async def redirect(authorization_url: str) -> None:
-        announce("Opening your browser to finish the login.")
-        webbrowser.open(authorization_url)
-
     async def callback() -> AuthorizationCodeResult:
         return await _await_callback(port, remote.url)
 
-    auth = _provider(remote, tokens, redirect_uri, redirect, callback)
+    auth = _provider(remote, tokens, redirect_uri, opener, callback)
     async with Client(_remote_target(remote, auth)):
         announce("Logged in.")
 

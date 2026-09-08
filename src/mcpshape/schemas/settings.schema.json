@@ -138,6 +138,33 @@
       },
       "title": "LifecycleSettings",
       "type": "object"
+    },
+    "LogSettings": {
+      "additionalProperties": false,
+      "description": "The app log's level, and the one size cap every log file shares.",
+      "properties": {
+        "level": {
+          "default": "debug",
+          "description": "The least severe app log level kept: debug, info, warning, or error. Verbose by default; the call log is always on whatever this says.",
+          "enum": [
+            "debug",
+            "info",
+            "warning",
+            "error"
+          ],
+          "title": "Level",
+          "type": "string"
+        },
+        "max_bytes": {
+          "default": 52428800,
+          "description": "The most the app log and the call log together may take on disk, rotated files included; the oldest rotated files go first. At the smallest value no rotated file is kept at all.",
+          "minimum": 8192,
+          "title": "Max Bytes",
+          "type": "integer"
+        }
+      },
+      "title": "LogSettings",
+      "type": "object"
     }
   },
   "additionalProperties": false,
@@ -151,6 +178,9 @@
     },
     "daemon": {
       "$ref": "#/$defs/DaemonSettings"
+    },
+    "log": {
+      "$ref": "#/$defs/LogSettings"
     },
     "drift": {
       "$ref": "#/$defs/DriftSettings"

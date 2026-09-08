@@ -12,6 +12,7 @@ import asyncio
 import json
 import stat
 import threading
+import time
 from typing import TYPE_CHECKING
 
 import httpx2
@@ -30,7 +31,7 @@ if TYPE_CHECKING:
     from fastmcp.client.client import CallToolResult
 
     from tests.support.oauth_provider import Provider
-    from tests.support.seam import ConfigDir
+    from tests.support.seam import ConfigDir, RunningDaemon
 
 CONNECTED = ("ready", "idle-pending")
 LOGGED_IN = "Logged in."
@@ -304,3 +305,84 @@ async def test_an_oauth_upstream_with_no_stored_login_says_which_command_logs_it
 def _no_browser(url: str, *_args: object, **_kwargs: object) -> bool:
     msg = f"a browser was opened at {url} when a stored token should have been used"
     raise AssertionError(msg)
+
+
+# --- the dashboard's flow, through the API -----------------------------------------------------
+
+
+async def test_the_api_starts_a_login_without_a_browser_and_says_where_it_stands(
+    config_dir: ConfigDir, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The ``/api`` flow (#16): the Daemon hands back the provider's page instead of opening
+    it, takes the callback on loopback, and the Upstream is usable once the token is stored."""
+    monkeypatch.setattr("webbrowser.open", _no_browser)
+    async with serving_provider(calculator()) as provider:
+        add_oauth_upstream(config_dir, provider)
+
+        async with running_daemon(config_dir) as daemon:
+            code, before = await daemon.api("GET", "/api/upstreams/x/oauth")
+            assert (code, before) == (200, _login_state(stored=False))
+
+            code, started = await daemon.api("POST", "/api/upstreams/x/oauth")
+            assert code == 200, started
+            assert started["pending"] is True
+            assert started["stored"] is False
+            url = started["url"]
+            assert isinstance(url, str)
+            assert url.startswith(provider.base)
+
+            code, again = await daemon.api("POST", "/api/upstreams/x/oauth")
+            assert (code, again["url"]) == (200, url), "a second start joined the pending login"
+
+            await asyncio.to_thread(_visit, url)
+            after = await _settled_login(daemon)
+            assert after == _login_state(stored=True)
+            assert access_token(provider) not in json.dumps(after)
+
+            async with daemon.client("/x/mcp") as client:
+                assert (await client.call_tool("add", {"a": 2, "b": 3})).data == 5
+            assert await daemon.upstream_state("x") in CONNECTED
+
+
+async def test_the_api_login_says_why_when_the_user_refuses_at_the_provider(
+    config_dir: ConfigDir, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("webbrowser.open", _no_browser)
+    async with serving_provider(calculator()) as provider:
+        add_oauth_upstream(config_dir, provider)
+
+        async with running_daemon(config_dir) as daemon:
+            code, started = await daemon.api("POST", "/api/upstreams/x/oauth")
+            assert code == 200, started
+
+            await asyncio.to_thread(_visit, started["url"], deny=True)
+            after = await _settled_login(daemon)
+
+    assert after["stored"] is False, "a refused login left a token set behind"
+    assert after["url"] is None
+    assert "denied" in str(after["error"])
+
+
+def _login_state(*, stored: bool) -> dict[str, object]:
+    """What ``/api/upstreams/<name>/oauth`` says when no login is pending."""
+    return {"stored": stored, "pending": False, "url": None, "error": None}
+
+
+def _visit(url: str, *, deny: bool = False) -> None:
+    """Stand in for the user's browser: open the provider's page and follow it to the
+    callback. ``deny`` is the user refusing at the consent screen."""
+    with httpx2.Client(follow_redirects=True) as browser:
+        browser.get(url + ("&deny=1" if deny else ""))
+
+
+async def _settled_login(daemon: RunningDaemon, patience: float = 5.0) -> dict[str, object]:
+    """The login's state once it is no longer pending."""
+    deadline = time.monotonic() + patience
+    while True:
+        _, state = await daemon.api("GET", "/api/upstreams/x/oauth")
+        if not state["pending"]:
+            return state
+        if time.monotonic() > deadline:
+            msg = f"the login never finished: {state}"
+            raise AssertionError(msg)
+        await asyncio.sleep(0.02)

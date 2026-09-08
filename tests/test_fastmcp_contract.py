@@ -697,6 +697,25 @@ async def test_a_refresh_that_fails_raises_nothing_and_reaches_the_redirect_hand
                 pass
 
 
+async def test_the_sdk_stores_the_client_registration_before_any_token_set() -> None:
+    """Why a token file's existence does not mean a login finished (#16).
+
+    The SDK registers with the provider and stores what came back before it sends the user
+    to the consent screen, so a login refused at the redirect leaves a registration and no
+    token set behind. ``logged_in`` reads the token set for that reason.
+    """
+    async with serving_provider(calculator()) as provider:
+        storage = _Storage()
+        auth = _provider(storage, provider.mcp_url)
+
+        with pytest.raises(Exception, match=REFUSED):
+            async with Client(StreamableHttpTransport(provider.mcp_url, auth=auth)):
+                pass
+
+    assert storage.client is not None, "the registration was not stored"
+    assert storage.token is None, "a token set was stored with no code exchanged"
+
+
 async def test_the_callback_server_hands_back_the_code_and_state_the_browser_carried() -> None:
     """The loopback half of the browser login: what mcpshape runs while the browser is out."""
     port = free_port()

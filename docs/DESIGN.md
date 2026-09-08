@@ -164,6 +164,14 @@ Claude Code is the first and best-integrated Profile, never a special case in th
   when the provider allows, and an expired token that cannot be refreshed is the
   `unavailable` case above. No token, key, or code ever reaches a log line, an error
   message, or the terminal.
+- Settled in #16, the dashboard's flow: `POST /api/upstreams/<name>/oauth` starts the same
+  login the CLI runs, but the Daemon opens no browser: it answers with the provider's page for
+  the dashboard to open, receives the callback on loopback, and stores what the CLI would.
+  `GET` says whether a token set is stored, whether a login is pending and at which page, and
+  why the last one failed. A login that succeeds scans the Upstream, since the start-up scan
+  had nothing to log in with, and makes it connect at once instead of waiting out its backoff.
+  A login nobody finishes is given up after the browser flow's own five minutes, so a fresh
+  one can start. A connect still never waits on a login.
 
 ### Client Profiles
 - One Profile per supported Client: config file path and format, transports accepted, whether
@@ -185,6 +193,24 @@ Claude Code is the first and best-integrated Profile, never a special case in th
   warnings or errors only. A separate, always-on call log (name, args, duration, outcome,
   truncated result) feeds the dashboard: in-memory ring buffer plus JSON lines on disk.
   Size-based rotation under one global size cap across all log files. No database.
+- Settled in #16: both logs live under `<state>/log/`, `daemon.log` and `calls.jsonl`, and
+  `[log]` in `config.toml` sets the app log's `level` (`debug` by default) and `max_bytes`, the
+  one cap both share. A file is rotated aside at a quarter of the cap, and the oldest rotated
+  files go, whichever log they belong to, until the directory fits. A call record carries the
+  tool's Catalog name and exposed name, the arguments under Catalog names as the Client sent
+  them, the time the Client waited with the Hooks included, `ok` or `error`, and the first
+  500 characters of the result or the error, with the full length beside it, and every
+  string among the arguments cut the same way. Every tool call a Proxy runs is recorded, one
+  it refused as unhealthy or one its Upstream was away for included; a call FastMCP refuses
+  before it reaches the Proxy's chain, to a name it does not expose or with arguments that
+  fail the tool's schema, is not, and neither are resource reads and prompt gets. The ring buffer keeps the latest 200 calls per Proxy. `daemon logs` reads the
+  app log tail, `--calls` the call log, from the running Daemon when there is one and from
+  the files otherwise.
+- Settled in #16: the management API under `/api` is the live state and what only a running
+  Daemon can do: `status`, `reload`, `shutdown`, per Upstream the stored Catalog, the Drift,
+  a `sync` that rescans and records Drift, and the OAuth flow; `calls` and `logs` tails. A
+  sync through the API never accepts Drift: accepting edits Proxy files, which is the CLI's.
+  The bearer token, when configured, guards every one of them.
 
 ### CLI
 ```

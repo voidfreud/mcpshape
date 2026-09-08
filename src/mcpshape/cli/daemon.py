@@ -13,7 +13,7 @@ import typer
 from rich.markup import escape
 from rich.table import Table
 
-from mcpshape import autostart, daemon
+from mcpshape import autostart, calls, daemon, logs
 from mcpshape.cli.common import (
     HELP_OPTIONS,
     answering,
@@ -24,7 +24,15 @@ from mcpshape.cli.common import (
     state,
 )
 from mcpshape.cli.listing import health_text, state_text
-from mcpshape.cli.live import Live, how_long, read_live, reload_daemon, stop_daemon
+from mcpshape.cli.live import (
+    Live,
+    how_long,
+    read_calls,
+    read_live,
+    read_log_tail,
+    reload_daemon,
+    stop_daemon,
+)
 from mcpshape.config import load_settings
 from mcpshape.paths import daemon_lock_file, daemon_log_file, log_dir
 
@@ -168,20 +176,53 @@ def reload(ctx: typer.Context) -> None:
         console.print(f"  [yellow]![/] {escape(note)}")
 
 
-@app.command("logs", epilog=example("daemon logs"))
-def logs(
+@app.command("logs", epilog=example("daemon logs --calls"))
+def show_logs(
     ctx: typer.Context,
     lines: Annotated[
         int, typer.Option("-n", "--lines", help="How many lines to show, from the end.")
     ] = LOG_LINES,
+    *,
+    show_calls: Annotated[
+        bool, typer.Option("--calls", help="The call log instead: one line per tool call.")
+    ] = False,
 ) -> None:
-    """Show the tail of the Daemon's app log."""
-    path = daemon_log_file(state(ctx).state_dir)
-    if not path.is_file():
-        console.print("No log yet. Start the Daemon with: [bold]mcpshape daemon up[/bold]")
+    """Show the tail of the Daemon's app log, or of its call log.
+
+    Read from the running Daemon when there is one, else from the files in the state
+    directory, rotated ones included.
+    """
+    config_dir, state_dir = state(ctx).config_dir, state(ctx).state_dir
+    with reporting_errors():
+        shown, from_daemon = (
+            _call_lines(config_dir, state_dir, lines)
+            if show_calls
+            else _log_lines(config_dir, state_dir, lines)
+        )
+    if not shown:
+        what = "calls" if show_calls else "log"
+        if from_daemon:
+            console.print(f"No {what} yet: the Daemon is up and has nothing to show.")
+        else:
+            console.print(f"No {what} yet. Start the Daemon with: [bold]mcpshape daemon up[/bold]")
         return
-    for line in path.read_text().splitlines()[-lines:]:
+    for line in shown:
         console.print(line, markup=False, highlight=False)
+
+
+def _log_lines(config_dir: Path, state_dir: Path, lines: int) -> tuple[list[str], bool]:
+    """The app log's tail, and whether a running Daemon answered it or the files did."""
+    found = read_log_tail(config_dir, lines)
+    if found is None:
+        return logs.tail(daemon_log_file(state_dir), lines), False
+    return found, True
+
+
+def _call_lines(config_dir: Path, state_dir: Path, lines: int) -> tuple[list[str], bool]:
+    """The call log's tail, and whether a running Daemon answered it or the file did."""
+    found = read_calls(config_dir, lines)
+    records = calls.read_recent(state_dir, lines) if found is None else found
+    return [calls.render(record) for record in records], found is not None
 
 
 @app.command("install", epilog=example("daemon install"))

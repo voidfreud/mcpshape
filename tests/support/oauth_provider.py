@@ -211,7 +211,12 @@ class Provider:
         )
 
     async def _authorize(self, request: Request) -> Response:
+        """The consent screen, already clicked through: ``deny=1`` is the user refusing."""
         asked = request.query_params
+        if asked.get("deny"):
+            return RedirectResponse(
+                f"{asked['redirect_uri']}?error=access_denied&state={asked.get('state')}"
+            )
         code = self.issuer.authorize(asked.get("code_challenge", ""), asked.get("scope", ""))
         return RedirectResponse(f"{asked['redirect_uri']}?code={code}&state={asked.get('state')}")
 

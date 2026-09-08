@@ -2,25 +2,37 @@
 
 Every CLI command works with the Daemon down (story 80), so nothing answering is a state to
 report, not an error. This is the only place the CLI speaks HTTP: a loopback GET of
-``/api/status``, or a POST to ``/api/reload`` or ``/api/shutdown``, at the address
-``config.toml`` names, read back through the Daemon's own model.
+``/api/status``, ``/api/logs``, or ``/api/calls``, or a POST to ``/api/reload`` or
+``/api/shutdown``, at the address ``config.toml`` names, read back through the Daemon's own
+models (``mcpshape.api``).
 """
 
 from __future__ import annotations
 
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
+from mcpshape.api import (
+    CALLS_PATH,
+    LOGS_PATH,
+    RELOAD_PATH,
+    SHUTDOWN_PATH,
+    STATUS_PATH,
+    CallsAnswer,
+    LiveState,
+    LogsAnswer,
+)
 from mcpshape.config import DaemonSettings, load_settings
-from mcpshape.daemon import RELOAD_PATH, SHUTDOWN_PATH, STATUS_PATH, LiveState
 
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from mcpshape.daemon import ProxyState, UpstreamState
+    from mcpshape.api import ProxyState, UpstreamState
+    from mcpshape.calls import CallRecord
 
 TIMEOUT = 2.0
 """Seconds to wait for the Daemon. A Daemon that is up answers a status GET at once."""
@@ -80,24 +92,49 @@ def reload_daemon(config_dir: Path) -> Live:
 
 def _live_from(config_dir: Path, path: str, method: str) -> Live:
     daemon = load_settings(config_dir).daemon
-    url = f"http://{daemon.host}:{daemon.port}"
+    return Live(_url(daemon), _read(daemon, path, method, LiveState))
+
+
+def read_log_tail(config_dir: Path, lines: int) -> list[str] | None:
+    """The last ``lines`` of the app log as the Daemon reads them, or nothing when it is down."""
+    daemon = load_settings(config_dir).daemon
+    answer = _read(daemon, _query(LOGS_PATH, lines=lines), "GET", LogsAnswer)
+    return None if answer is None else answer.lines
+
+
+def read_calls(config_dir: Path, limit: int) -> list[CallRecord] | None:
+    """The latest ``limit`` calls from the Daemon's ring buffer, or nothing when it is down."""
+    daemon = load_settings(config_dir).daemon
+    answer = _read(daemon, _query(CALLS_PATH, limit=limit), "GET", CallsAnswer)
+    return None if answer is None else answer.calls
+
+
+def _query(path: str, **params: int) -> str:
+    return f"{path}?{urllib.parse.urlencode(params)}"
+
+
+def _url(daemon: DaemonSettings) -> str:
+    return f"http://{daemon.host}:{daemon.port}"
+
+
+def _read[M: BaseModel](daemon: DaemonSettings, path: str, method: str, model: type[M]) -> M | None:
+    """What the Daemon answers at ``path``, as ``model``, or nothing when nothing answered."""
     request = urllib.request.Request(  # noqa: S310
-        f"{url}{path}", method=method, headers=_headers(daemon)
+        f"{_url(daemon)}{path}", method=method, headers=_headers(daemon)
     )
     try:
         with urllib.request.urlopen(request, timeout=TIMEOUT) as answer:  # noqa: S310
             body: bytes = answer.read()
-        return Live(url, LiveState.model_validate_json(body))
+        return model.model_validate_json(body)
     except (OSError, ValidationError, ValueError):
-        return Live(url)
+        return None
 
 
 def stop_daemon(config_dir: Path) -> bool:
     """Ask the Daemon to stop. ``False`` when nothing answered to ask."""
     daemon = load_settings(config_dir).daemon
-    url = f"http://{daemon.host}:{daemon.port}"
     request = urllib.request.Request(  # noqa: S310
-        f"{url}{SHUTDOWN_PATH}", method="POST", headers=_headers(daemon)
+        f"{_url(daemon)}{SHUTDOWN_PATH}", method="POST", headers=_headers(daemon)
     )
     try:
         with urllib.request.urlopen(request, timeout=TIMEOUT):  # noqa: S310
