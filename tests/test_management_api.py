@@ -11,6 +11,8 @@ from mcpshape.api import CALLS_PATH, LOGS_PATH, RELOAD_PATH, STATUS_PATH, UPSTRE
 from tests.support.seam import run_cli, running_daemon
 from tests.test_proxy_seam import calculator
 
+CONNECTED = ("ready", "idle-pending")
+
 if TYPE_CHECKING:
     from tests.support.seam import ConfigDir
 
@@ -175,7 +177,8 @@ async def test_connect_answers_the_connection_state_and_404s_an_unknown_name(
 
     async with running_daemon(config_dir) as daemon:
         status, answer = await daemon.api("POST", f"{UPSTREAMS_PATH}/calc/connect")
-        assert (status, answer) == (200, {"state": "cold"}), "a cold Upstream is left alone"
+        assert (status, answer) == (200, {"state": "connecting"}), "a cold Upstream connects (#64)"
+        assert await daemon.awaiting_state("calc", "ready", "idle-pending") in CONNECTED
 
         status, answer = await daemon.api("POST", f"{UPSTREAMS_PATH}/nope/connect")
         assert status == 404

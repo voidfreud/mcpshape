@@ -507,11 +507,17 @@ async def test_the_log_says_it_once_per_reason_and_once_per_doubling(
     config_dir: ConfigDir,
 ) -> None:
     """#64: not one line per attempt. Three failed connects at 1 s, 2 s, and 4 s, then three
-    more at the ceiling of 4 s, are three lines, not six; connecting again is one more."""
+    more at the ceiling of 4 s, are three lines, not six; a failure for another reason at the
+    same wait is one more; connecting again is exactly one more."""
     clock = FakeClock()
-    config_dir.add_memory_upstream("calc", calculator(), lifecycle={"warm": True, "backoff_cap": 4})
+    config_dir.add_memory_upstream(
+        "calc", calculator(), lifecycle={"warm": True, "backoff_cap": 4, "connect_timeout": 1}
+    )
     await cli(config_dir, "upstream", "sync", "calc")
     config_dir.break_upstream("calc")
+
+    def unavailable_lines() -> list[str]:
+        return [line for line in daemon_log(config_dir).splitlines() if "is unavailable" in line]
 
     async with running_daemon(config_dir, clock) as daemon:
         assert await daemon.awaiting_state("calc", "unavailable") == "unavailable"
@@ -519,18 +525,26 @@ async def test_the_log_says_it_once_per_reason_and_once_per_doubling(
             await clock.advance(delay + 0.1)
         assert await seconds_in_state(daemon, "calc") < 0.5
 
-        unavailable = [
-            line for line in daemon_log(config_dir).splitlines() if "is unavailable" in line
-        ]
+        unavailable = unavailable_lines()
         assert len(unavailable) == 3, unavailable
         assert "retrying in 1s" in unavailable[0]
         assert "retrying in 2s" in unavailable[1]
         assert "retrying in 4s" in unavailable[2]
 
-        config_dir.restore_upstream("calc")
+        # the same wait, another reason: an Upstream that hangs instead of one that is gone
+        config_dir.restore_upstream("calc", slow_server(asyncio.Event()))
+        await clock.advance(4.1)  # the retry, which hangs
+        await clock.advance(1.1)  # past connect_timeout: it fails for the new reason
+        assert await daemon.upstream_state("calc") == "unavailable"
+        unavailable = unavailable_lines()
+        assert len(unavailable) == 4, unavailable
+        assert "connect timed out" in unavailable[3]
+
+        connected_before = daemon_log(config_dir).count("is connected")
+        config_dir.restore_upstream("calc", calculator())
         await clock.advance(4.1)
         assert await daemon.awaiting_state("calc", *CONNECTED) in CONNECTED
-        assert daemon_log(config_dir).count("is connected") >= 1
+        assert daemon_log(config_dir).count("is connected") == connected_before + 1
 
 
 async def test_status_says_when_the_next_attempt_is(config_dir: ConfigDir) -> None:
@@ -558,13 +572,14 @@ async def test_status_says_when_the_next_attempt_is(config_dir: ConfigDir) -> No
 async def test_daemon_status_names_the_next_attempt_and_upstream_connect(
     config_dir: ConfigDir,
 ) -> None:
+    clock = FakeClock()  # nothing moves, so the warm Upstream stays in its first backoff
     config_dir.add_memory_upstream("warm", calculator(), lifecycle={"warm": True})
     config_dir.add_memory_upstream("lazy", calculator())
     await cli(config_dir, "upstream", "sync")
     config_dir.break_upstream("warm")
     config_dir.break_upstream("lazy")
 
-    async with serving_daemon(config_dir) as url:
+    async with serving_daemon(config_dir, clock) as url:
         await awaiting_state_at(url, "warm", "unavailable")
         async with Client(f"{url}/lazy/mcp") as client:
             assert (await client.call_tool("add", {"a": 1, "b": 1}, raise_on_error=False)).is_error
@@ -583,12 +598,25 @@ async def test_daemon_status_names_the_next_attempt_and_upstream_connect(
 
         tried = await asyncio.to_thread(run_cli, config_dir, "upstream", "connect", "lazy")
         assert tried.exit_code == 0, tried.output
-        assert "lazy" in tried.stdout
-        assert "connecting" in tried.stdout or "unavailable" in tried.stdout
+        assert "Upstream lazy is connecting" in tried.stdout
 
         unknown = await asyncio.to_thread(run_cli, config_dir, "upstream", "connect", "nothing")
         assert unknown.exit_code != 0
         assert "no Upstream named 'nothing'" in unknown.output
+
+
+async def test_upstream_connect_connects_a_cold_upstream_too(config_dir: ConfigDir) -> None:
+    """A lazy Upstream nobody has called is the usual state; ``connect`` connects it (#64)."""
+    config_dir.add_memory_upstream("calc", calculator())
+
+    async with serving_daemon(config_dir) as url:
+        await awaiting_state_at(url, "calc", "cold")
+
+        tried = await asyncio.to_thread(run_cli, config_dir, "upstream", "connect", "calc")
+        assert tried.exit_code == 0, tried.output
+        assert "Upstream calc is connecting" in tried.stdout
+
+        assert await awaiting_state_at(url, "calc", *CONNECTED) in CONNECTED
 
 
 def test_upstream_connect_says_so_when_the_daemon_is_not_running(config_dir: ConfigDir) -> None:

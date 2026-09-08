@@ -276,7 +276,7 @@ Claude Code is the first and best-integrated Profile, never a special case in th
 ```
 mcpshape add <upstream> --stdio '...' | --url ...   convenience for upstream add + default Proxy
 mcpshape ls                                          convenience for upstream ls + proxy ls
-mcpshape upstream   add | env | ls | show | sync | rm | scan
+mcpshape upstream   add | env | ls | show | sync | connect | rm | scan
 mcpshape proxy      new | ls | show | rm | install | export
 mcpshape tool       hide | show | rename | describe | trim | cap
 mcpshape daemon     up | down | status | logs | reload | install | uninstall

@@ -20,8 +20,9 @@ Routes, all behind the bearer token when one is configured:
 - ``POST /api/upstreams/<name>/sync``: scan now and record the Drift. Accepting it edits
   Proxy files, so it stays the CLI's: ``upstream sync --accept``.
 - ``GET`` and ``POST /api/upstreams/<name>/oauth``: the login's state, and starting one.
-- ``POST /api/upstreams/<name>/connect``: connect now instead of waiting out the backoff;
-  answers the connection's state. What a login from the CLI is followed by (#58).
+- ``POST /api/upstreams/<name>/connect``: connect now, from cold or from the backoff;
+  answers the connection's state. What ``upstream connect`` posts to (#64), and what a login
+  from the CLI is followed by (#58).
 - ``GET /api/calls?upstream=&proxy=&limit=``: the latest calls, oldest first.
 - ``GET /api/logs?lines=``: the app log's tail.
 """
@@ -543,8 +544,8 @@ class Management:
         return await self._for_upstream(request, self._connect_of)
 
     async def _connect_of(self, served: ServedLike) -> JSONResponse:
-        """Have an ``unavailable`` Upstream try again now, and say where it stands."""
-        served.connection.retry()
+        """Have the Upstream connect now, cold or ``unavailable``, and say where it stands."""
+        served.connection.connect_now()
         return _answer(ConnectAnswer(state=served.connection.status().state))
 
     async def _calls(self, request: Request) -> JSONResponse:

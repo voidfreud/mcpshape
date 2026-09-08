@@ -130,7 +130,7 @@
         },
         "backoff_cap": {
           "default": 1800.0,
-          "description": "The longest a warm Upstream waits between two connect attempts, in seconds; the wait doubles from one second up to this. A lazy Upstream never retries on its own.",
+          "description": "The longest wait after a failed connect before another is tried, in seconds; the wait doubles from one second up to this. A warm Upstream's keeper tries again when it has passed; a lazy Upstream's calls are answered without trying until it has.",
           "exclusiveMinimum": 0,
           "title": "Backoff Cap",
           "type": "number"

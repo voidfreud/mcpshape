@@ -285,5 +285,8 @@ async def test_a_removed_upstream_is_noticed_by_the_reconnect_that_would_have_re
 
     # the start-up scan of a broken Upstream logs its traceback as it always has; the
     # retirement that follows the reconnect's rescan must not
-    after_retiring = daemon_log(config_dir).split("dropping what its reconnect saw", 1)[1]
+    _, retiring, after_retiring = daemon_log(config_dir).partition(
+        "dropping what its reconnect saw"
+    )
+    assert retiring, "the retirement was never logged"
     assert "Traceback" not in after_retiring

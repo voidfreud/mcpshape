@@ -116,9 +116,11 @@ class Status:
     supervised: bool = True
     """Whether a keeper is running. False once one gave up, until ``reload()`` (#50)."""
     warm: bool = False
+    """Whether the keeper connects and retries on its own: what the dashboard and the CLI read
+    to say how an Upstream comes back."""
     retry_in: float | None = None
-    """Seconds until the keeper tries again, while ``unavailable`` and warm; nothing for a
-    lazy Upstream, whose next call is what tries again (#64)."""
+    """Seconds until the keeper tries again, while ``unavailable``, warm, and supervised;
+    nothing otherwise, since the next call is then what tries again (#64)."""
 
 
 class Connection:
@@ -159,7 +161,7 @@ class Connection:
     def status(self) -> Status:
         now = self._clock.now()
         retry_in = None
-        if self._state == "unavailable" and self._settings.warm:
+        if self._state == "unavailable" and self._settings.warm and self._supervised:
             retry_in = _left(self._backoff(), now - self._since)
         return Status(
             state=self._state,
@@ -276,6 +278,17 @@ class Connection:
         if self._state == "unavailable":
             self._begin_connect()
             self._nudge()
+
+    def connect_now(self) -> None:
+        """Connect now from wherever it is, whatever the backoff says: ``upstream connect``.
+
+        A cold Upstream is connected as a call would connect it; an ``unavailable`` one tries
+        again at once; one already connecting or connected is left alone (#64).
+        """
+        if self._state in CONNECTED or self._state in ("connecting", "stopping"):
+            return
+        self._begin_connect()
+        self._nudge()
 
     # --- the keeper ------------------------------------------------------------------------
 
@@ -436,7 +449,7 @@ class Connection:
         delay = self._backoff()
         if self._announced != (reason, delay):
             self._announced = (reason, delay)
-            if self._settings.warm:
+            if self._settings.warm and self._supervised:
                 log.warning(
                     "Upstream %s is unavailable (%s); retrying in %.0fs", self._name, reason, delay
                 )

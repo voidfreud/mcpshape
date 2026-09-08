@@ -106,8 +106,9 @@ LIFECYCLE_HELP = {
         "Seconds between pings of a warm Upstream, so it is never falsely reported up."
     ),
     "backoff_cap": (
-        "The longest a warm Upstream waits between two connect attempts, in seconds; the wait "
-        "doubles from one second up to this. A lazy Upstream never retries on its own."
+        "The longest wait after a failed connect before another is tried, in seconds; the "
+        "wait doubles from one second up to this. A warm Upstream's keeper tries again when "
+        "it has passed; a lazy Upstream's calls are answered without trying until it has."
     ),
     "unavailable_message": (
         "The tool error a call is answered with while the Upstream is not connected."

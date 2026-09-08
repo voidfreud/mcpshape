@@ -269,8 +269,12 @@ An Upstream that goes away does not take its Proxies down. The Proxy stays up; o
 fail, with the Upstream's `unavailable_message`, until the Upstream is back. The connection is
 opened on the first call and let go after `idle_timeout` seconds without one; `warm = true`
 connects at Daemon start and pings on an interval, so a warm Upstream is never falsely
-reported up. These are Upstream settings, in `upstream.toml`, with global defaults in
-`config.toml`:
+reported up. After a failed connect the wait before another doubles, from a second up to
+`backoff_cap`: a warm Upstream tries again on its own when the wait has passed, a lazy one
+only when the next call asks, so nothing is spent on an Upstream nobody is calling.
+`mcpshape ls` and `mcpshape daemon status` say when the next attempt is, and
+`mcpshape upstream connect <name>` tries now whatever the wait says. These are Upstream
+settings, in `upstream.toml`, with global defaults in `config.toml`:
 
 ```toml
 [lifecycle]
@@ -278,6 +282,7 @@ warm = false
 idle_timeout = 600
 connect_timeout = 10
 ping_interval = 30
+backoff_cap = 1800
 unavailable_message = "The Upstream is not reachable right now, so this call did not run. Nothing changed; try again in a moment."
 ```
 
