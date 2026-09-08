@@ -11,7 +11,7 @@ import typer
 
 from mcpshape import catalog, config
 from mcpshape import tokens as token_store
-from mcpshape.adapters.fastmcp import login, scan
+from mcpshape.adapters.fastmcp import login, login_message, scan
 from mcpshape.cli import scan as scanning
 from mcpshape.cli.common import (
     HELP_OPTIONS,
@@ -212,16 +212,16 @@ def scanned(
 
     An OAuth Upstream with no stored login is logged in before the scan; one whose stored
     login has stopped working is logged in again, since ``sync`` is the command every
-    unavailable OAuth Upstream is told to run.
+    unavailable OAuth Upstream is told to run. Only that failure costs the stored login: an
+    Upstream that cannot be reached for any other reason keeps a token that may still work.
     """
     tokens = token_store.Tokens(state_dir, upstream.name)
-    oauth = oauth_upstream(upstream.transport)
-    if oauth and not tokens.stored():
+    if oauth_upstream(upstream.transport) and not tokens.stored():
         log_in(config_dir, state_dir, upstream, device=device)
     try:
         return _scan(config_dir, upstream, tokens)
     except Exception as exc:  # noqa: BLE001  # however the Upstream failed, the user gets the why
-        if not oauth:
+        if login_message(upstream.name) not in str(exc):
             fail(f"cannot scan {upstream.name}: {exc}")
         console.print(f"[yellow]![/] {upstream.name}: {exc}")
     tokens.forget()
