@@ -22,9 +22,10 @@ from fastmcp import Client, FastMCP
 from fastmcp.client.transports import StreamableHttpTransport
 from typer.testing import CliRunner, Result  # annotated at runtime
 
+from mcpshape.api import STATUS_PATH
 from mcpshape.cli import app
 from mcpshape.config import memory_upstreams_allowed
-from mcpshape.daemon import STATUS_PATH, build_app, serve_all
+from mcpshape.daemon import build_app, serve_all
 from tests.support import child_upstream, upstreams
 from tests.support.asgi import asgi_client_factory
 
@@ -164,10 +165,21 @@ class RunningDaemon:
 
     async def status(self, headers: dict[str, str] | None = None) -> dict[str, Any]:
         """What the Daemon reports at ``/api/status``, as any HTTP caller would read it."""
+        _, answer = await self.api("GET", STATUS_PATH, headers=headers)
+        return answer
+
+    async def api(
+        self,
+        method: str,
+        path: str,
+        params: dict[str, str] | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> tuple[int, Any]:
+        """Call the management API at ``path``: the status code and the JSON it answered."""
         factory = asgi_client_factory(self.app, BASE_URL)
         async with factory() as http:
-            answer = await http.get(f"{BASE_URL}{STATUS_PATH}", headers=headers)
-        return json.loads(answer.text)
+            answer = await http.request(method, f"{BASE_URL}{path}", params=params, headers=headers)
+        return answer.status_code, json.loads(answer.text)
 
     async def upstream_state(self, name: str) -> str:
         for upstream in (await self.status())["upstreams"]:

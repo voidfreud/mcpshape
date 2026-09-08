@@ -1,0 +1,461 @@
+"""The management API under ``/api``: the live state the CLI's live commands and the dashboard
+read, and the few things they trigger (#16).
+
+Nothing here is configuration: config is read from files whether the Daemon runs or not, and
+edited by the CLI alone. What lives here is what only a running Daemon knows or does: every
+Upstream's connection and every Proxy's health, the stored Catalog and Drift, the call log
+and the app log's tail, a reload, a rescan, and the OAuth flow for the dashboard. The CLI
+reads the answers back through the same models.
+
+Routes, all behind the bearer token when one is configured:
+
+- ``GET /api/status``: every Upstream and Proxy, with lifecycle state and health.
+- ``POST /api/reload``: every Proxy re-reads its files; answers the live state after.
+- ``POST /api/shutdown``: what ``daemon down`` posts to.
+- ``GET /api/upstreams/<name>/catalog``: the accepted Catalog, or ``null`` before a scan.
+- ``GET /api/upstreams/<name>/drift``: the unreviewed Drift, or ``null``.
+- ``POST /api/upstreams/<name>/sync``: scan now and record the Drift. Accepting it edits
+  Proxy files, so it stays the CLI's: ``upstream sync --accept``.
+- ``GET`` and ``POST /api/upstreams/<name>/oauth``: the login's state, and starting one.
+- ``GET /api/calls?upstream=&proxy=&limit=``: the latest calls, oldest first.
+- ``GET /api/logs?lines=``: the app log's tail.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import logging
+from dataclasses import dataclass, field
+from functools import partial
+from typing import TYPE_CHECKING, Any, Protocol
+
+from pydantic import BaseModel, Field
+from starlette.responses import JSONResponse
+from starlette.routing import Route
+
+from mcpshape import catalog as catalogs
+from mcpshape.adapters.fastmcp import logged_in, login
+from mcpshape.calls import CallRecord
+from mcpshape.connection import TimedOutError, bounded
+from mcpshape.logs import tail
+from mcpshape.model import HttpTransport, SseTransport
+from mcpshape.paths import daemon_log_file
+from mcpshape.tokens import Tokens
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+    from pathlib import Path
+
+    from starlette.requests import Request
+    from starlette.routing import BaseRoute
+
+    from mcpshape.adapters.fastmcp import UpstreamConnection
+    from mcpshape.calls import CallLog
+    from mcpshape.connection import Clock
+    from mcpshape.model import Upstream
+    from mcpshape.secrets import Secrets
+
+log = logging.getLogger("mcpshape.api")
+
+STATUS_PATH = "/api/status"
+RELOAD_PATH = "/api/reload"
+SHUTDOWN_PATH = "/api/shutdown"
+CALLS_PATH = "/api/calls"
+LOGS_PATH = "/api/logs"
+UPSTREAMS_PATH = "/api/upstreams"
+
+DEFAULT_LIMIT = 100
+MOST_LINES = 10_000
+"""The most one ``/api/logs`` or ``/api/calls`` answer carries, whatever was asked."""
+
+NOT_FOUND, BAD_REQUEST, UPSTREAM_FAILED = 404, 400, 502
+
+
+class _ScanFailedError(Exception):
+    """An Upstream could not be scanned; the message says why, with nothing concealed lost."""
+
+
+# --- what the API answers ------------------------------------------------------------------
+
+
+class ProxyState(BaseModel):
+    """One Proxy as the Daemon sees it right now."""
+
+    name: str
+    health: str
+    detail: str | None = None
+
+
+class UpstreamState(BaseModel):
+    """One Upstream's connection as the Daemon sees it right now."""
+
+    name: str
+    state: str
+    seconds: float
+    error: str | None = None
+    proxies: list[ProxyState] = Field(default_factory=list[ProxyState])
+
+
+class LiveState(BaseModel):
+    """What ``/api/status`` answers. The CLI reads it back through the same model."""
+
+    upstreams: list[UpstreamState] = Field(default_factory=list[UpstreamState])
+
+
+class ItemRef(BaseModel):
+    """One Catalog item, by kind and Catalog name."""
+
+    kind: str
+    name: str
+
+
+class DriftState(BaseModel):
+    """Unreviewed Drift of one Upstream, as ``/api/upstreams/<name>/drift`` answers it."""
+
+    added: list[ItemRef] = Field(default_factory=list[ItemRef])
+    removed: list[ItemRef] = Field(default_factory=list[ItemRef])
+    changed: list[ItemRef] = Field(default_factory=list[ItemRef])
+    instructions_changed: bool = False
+    summary: str = ""
+
+    @classmethod
+    def of(cls, drift: catalogs.Drift) -> DriftState:
+        def refs(items: tuple[catalogs.Item, ...]) -> list[ItemRef]:
+            return [ItemRef(kind=item.kind, name=item.name) for item in items]
+
+        return cls(
+            added=refs(drift.added),
+            removed=refs(drift.removed),
+            changed=refs(drift.changed),
+            instructions_changed=drift.instructions_changed,
+            summary=drift.summary(),
+        )
+
+
+class CatalogAnswer(BaseModel):
+    """``/api/upstreams/<name>/catalog``: the accepted Catalog, or nothing before a scan."""
+
+    catalog: catalogs.Catalog | None = None
+
+
+class DriftAnswer(BaseModel):
+    """``/api/upstreams/<name>/drift``: the unreviewed Drift, or nothing."""
+
+    drift: DriftState | None = None
+
+
+class SyncState(BaseModel):
+    """What a ``/api`` sync found: a first Catalog, or the Drift since the stored one."""
+
+    first: bool
+    drift: DriftState | None = None
+
+
+class LoginState(BaseModel):
+    """Where an Upstream's OAuth login stands. Never carries a token."""
+
+    stored: bool
+    """Whether a token set is on disk. Says nothing about whether it still works."""
+    pending: bool
+    """Whether a login started here is waiting for the browser."""
+    url: str | None = None
+    """The provider's page the user must open, while a login is pending."""
+    error: str | None = None
+    """Why the last login started here failed, until the next one starts."""
+
+
+class CallsAnswer(BaseModel):
+    calls: list[CallRecord] = Field(default_factory=list[CallRecord])
+
+
+class LogsAnswer(BaseModel):
+    lines: list[str] = Field(default_factory=list[str])
+
+
+# --- what the API is built over --------------------------------------------------------------
+
+
+class ProxyLike(Protocol):
+    """One Proxy as the API needs it: its live state, and a reload."""
+
+    async def state(self) -> ProxyState: ...
+    async def reload(self) -> None: ...
+
+
+class _Login:
+    """One Upstream's OAuth flow as the dashboard drives it (#16).
+
+    The Daemon opens no browser: it starts the same login the CLI runs, hands the provider's
+    page back to whoever asked, and receives the callback on loopback as the CLI would. What
+    it stores is what the CLI stores. A login that succeeds is followed by ``on_success``: the
+    Upstream is scanned, since the Daemon's start-up scan had nothing to log in with, and
+    then made to connect at once instead of waiting out its backoff.
+    """
+
+    def __init__(
+        self,
+        upstream: Upstream,
+        secrets: Secrets,
+        tokens: Tokens,
+        on_success: Callable[[], Awaitable[None]],
+    ) -> None:
+        self._upstream = upstream
+        self._secrets = secrets
+        self._tokens = tokens
+        self._on_success = on_success
+        self._task: asyncio.Task[None] | None = None
+        self._opened = asyncio.Event()
+        self.url: str | None = None
+        self.error: str | None = None
+
+    def state(self) -> LoginState:
+        pending = self._task is not None and not self._task.done()
+        return LoginState(
+            stored=logged_in(self._tokens),
+            pending=pending,
+            url=self.url if pending else None,
+            error=self.error,
+        )
+
+    async def start(self) -> LoginState:
+        """Start a login unless one is pending, and answer once its page is known or it failed."""
+        if self._task is None or self._task.done():
+            self.url, self.error = None, None
+            self._opened = asyncio.Event()
+            self._task = asyncio.create_task(self._run())
+        opened = asyncio.create_task(self._opened.wait())
+        await asyncio.wait({opened, self._task}, return_when=asyncio.FIRST_COMPLETED)
+        opened.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await opened
+        return self.state()
+
+    async def _run(self) -> None:
+        try:
+            await login(
+                self._upstream.transport,
+                self._secrets,
+                self._tokens,
+                lambda text: log.info("Upstream %s login: %s", self._upstream.name, text),
+                opener=self._open,
+            )
+        except Exception as exc:  # noqa: BLE001  # however the provider refused, the state says why
+            self.error = str(exc) or type(exc).__name__
+            log.warning("Upstream %s could not log in: %s", self._upstream.name, self.error)
+            return
+        await self._on_success()
+
+    async def _open(self, url: str) -> None:
+        self.url = url
+        self._opened.set()
+
+    async def close(self) -> None:
+        if self._task is not None and not self._task.done():
+            self._task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await self._task
+
+
+@dataclass
+class Management:
+    """Everything the API answers from: built by the Daemon, one per Daemon."""
+
+    upstreams: list[Upstream]
+    connections: dict[str, UpstreamConnection]
+    proxies: dict[tuple[str, str], ProxyLike]
+    calls: CallLog
+    state_dir: Path
+    secrets: Secrets
+    clock: Clock
+    stop: asyncio.Event
+    _logins: dict[str, _Login] = field(default_factory=dict[str, _Login])
+
+    def routes(self) -> list[BaseRoute]:
+        return [
+            Route(STATUS_PATH, self._status),
+            Route(RELOAD_PATH, self._reload, methods=["POST"]),
+            Route(SHUTDOWN_PATH, self._shutdown, methods=["POST"]),
+            Route(f"{UPSTREAMS_PATH}/{{upstream}}/catalog", self._catalog),
+            Route(f"{UPSTREAMS_PATH}/{{upstream}}/drift", self._drift),
+            Route(f"{UPSTREAMS_PATH}/{{upstream}}/sync", self._sync, methods=["POST"]),
+            Route(f"{UPSTREAMS_PATH}/{{upstream}}/oauth", self._login_state),
+            Route(f"{UPSTREAMS_PATH}/{{upstream}}/oauth", self._login_start, methods=["POST"]),
+            Route(CALLS_PATH, self._calls),
+            Route(LOGS_PATH, self._logs),
+        ]
+
+    async def close(self) -> None:
+        """Let go of whatever the API started and is still waiting on: pending logins."""
+        for pending in self._logins.values():
+            await pending.close()
+
+    async def live(self) -> LiveState:
+        """What every Upstream and Proxy is doing right now, each Proxy refreshed on the way."""
+
+        async def state_of(upstream: Upstream) -> UpstreamState:
+            status = self.connections[upstream.name].status()
+            return UpstreamState(
+                name=upstream.name,
+                state=status.state,
+                seconds=round(status.seconds, 3),
+                error=status.error,
+                proxies=[
+                    await self.proxies[upstream.name, name].state() for name in upstream.proxies
+                ],
+            )
+
+        return LiveState(upstreams=[await state_of(upstream) for upstream in self.upstreams])
+
+    # --- the endpoints ---------------------------------------------------------------------
+
+    async def _status(self, _request: Request) -> JSONResponse:
+        return _answer(await self.live())
+
+    async def _reload(self, _request: Request) -> JSONResponse:
+        """Every Proxy re-reads its files now, changed or not (#10), and says how it went."""
+        for proxy in self.proxies.values():
+            await proxy.reload()
+        return _answer(await self.live())
+
+    async def _shutdown(self, _request: Request) -> JSONResponse:
+        self.stop.set()
+        return JSONResponse({"stopping": True})
+
+    async def _catalog(self, request: Request) -> JSONResponse:
+        return await self._for_upstream(request, self._catalog_of)
+
+    async def _catalog_of(self, upstream: Upstream) -> JSONResponse:
+        stored = await asyncio.to_thread(catalogs.load_catalog, self.state_dir, upstream.name)
+        return _answer(CatalogAnswer(catalog=stored))
+
+    async def _drift(self, request: Request) -> JSONResponse:
+        return await self._for_upstream(request, self._drift_of)
+
+    async def _drift_of(self, upstream: Upstream) -> JSONResponse:
+        drift = await asyncio.to_thread(catalogs.load_drift, self.state_dir, upstream.name)
+        return _answer(DriftAnswer(drift=DriftState.of(drift) if drift else None))
+
+    async def _sync(self, request: Request) -> JSONResponse:
+        return await self._for_upstream(request, self._sync_of)
+
+    async def _sync_of(self, upstream: Upstream) -> JSONResponse:
+        try:
+            return _answer(await self._scanned(upstream))
+        except _ScanFailedError as exc:
+            return _refusal(str(exc), UPSTREAM_FAILED)
+
+    async def _scanned(self, upstream: Upstream) -> SyncState:
+        """Scan the Upstream now, over its open connection when it has one, and record it.
+
+        Bounded by the Upstream's own ``connect_timeout``, as the start-up scan is (#20).
+        Recording holds the Upstream's lock (#21), off the event loop. Raises
+        ``_ScanFailedError`` with the reason when the Upstream could not be scanned.
+        """
+        connection = self.connections[upstream.name]
+        try:
+            observed = await bounded(
+                connection.observe(), upstream.lifecycle.connect_timeout, self.clock
+            )
+        except TimedOutError:
+            seconds = upstream.lifecycle.connect_timeout
+            msg = (
+                f"{upstream.name} could not be scanned within its connect_timeout of {seconds:.0f}s"
+            )
+            raise _ScanFailedError(msg) from None
+        except Exception as exc:  # however the Upstream failed, the caller gets the why
+            msg = f"{upstream.name} could not be scanned: {exc}"
+            raise _ScanFailedError(msg) from exc
+        scan = await asyncio.to_thread(
+            catalogs.record_scan, self.state_dir, upstream.name, observed
+        )
+        return SyncState(first=scan.first, drift=DriftState.of(scan.drift) if scan.drift else None)
+
+    async def _login_state(self, request: Request) -> JSONResponse:
+        return await self._for_upstream(request, self._login_state_of)
+
+    async def _login_state_of(self, upstream: Upstream) -> JSONResponse:
+        found = self._login_of(upstream)
+        if found is None:
+            return _refusal(_not_oauth(upstream), BAD_REQUEST)
+        return _answer(found.state())
+
+    async def _login_start(self, request: Request) -> JSONResponse:
+        return await self._for_upstream(request, self._login_start_of)
+
+    async def _login_start_of(self, upstream: Upstream) -> JSONResponse:
+        found = self._login_of(upstream)
+        if found is None:
+            return _refusal(_not_oauth(upstream), BAD_REQUEST)
+        return _answer(await found.start())
+
+    def _login_of(self, upstream: Upstream) -> _Login | None:
+        transport = upstream.transport
+        if not isinstance(transport, HttpTransport | SseTransport) or transport.auth != "oauth":
+            return None
+        if upstream.name not in self._logins:
+            self._logins[upstream.name] = _Login(
+                upstream,
+                self.secrets,
+                Tokens(self.state_dir, upstream.name),
+                partial(self._logged_in, upstream),
+            )
+        return self._logins[upstream.name]
+
+    async def _logged_in(self, upstream: Upstream) -> None:
+        """Scan the Upstream a login just made reachable, and have it connect now."""
+        try:
+            await self._scanned(upstream)
+        except _ScanFailedError as exc:
+            log.warning("after logging in, %s", exc)
+        self.connections[upstream.name].retry()
+
+    async def _calls(self, request: Request) -> JSONResponse:
+        """The latest calls of every Proxy, or of the Upstream or Proxy named, oldest first."""
+        limit = _count(request, "limit")
+        if limit is None:
+            return _refusal("limit must be a positive integer", BAD_REQUEST)
+        recent = self.calls.recent(
+            request.query_params.get("upstream"), request.query_params.get("proxy"), limit
+        )
+        return _answer(CallsAnswer(calls=recent))
+
+    async def _logs(self, request: Request) -> JSONResponse:
+        lines = _count(request, "lines")
+        if lines is None:
+            return _refusal("lines must be a positive integer", BAD_REQUEST)
+        found = await asyncio.to_thread(tail, daemon_log_file(self.state_dir), lines)
+        return _answer(LogsAnswer(lines=found))
+
+    async def _for_upstream(
+        self, request: Request, answer: Callable[[Upstream], Awaitable[JSONResponse]]
+    ) -> JSONResponse:
+        name: str = request.path_params["upstream"]
+        found = next((upstream for upstream in self.upstreams if upstream.name == name), None)
+        if found is None:
+            return _refusal(f"no Upstream named {name!r}", NOT_FOUND)
+        return await answer(found)
+
+
+def _answer(model: BaseModel) -> JSONResponse:
+    return JSONResponse(model.model_dump(mode="json"))
+
+
+def _refusal(message: str, status: int) -> JSONResponse:
+    return JSONResponse({"error": message}, status_code=status)
+
+
+def _not_oauth(upstream: Upstream) -> str:
+    return f'{upstream.name} is not an Upstream with auth = "oauth", so there is no login'
+
+
+def _count(request: Request, key: str) -> int | None:
+    """``?key=<n>`` as a count between one and ``MOST_LINES``, the default when absent."""
+    given: Any = request.query_params.get(key)
+    if given is None:
+        return DEFAULT_LIMIT
+    try:
+        count = int(given)
+    except ValueError:
+        return None
+    return min(count, MOST_LINES) if count > 0 else None

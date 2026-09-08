@@ -32,12 +32,18 @@ def _xdg_dir(override_env: str, xdg_env: str, fallback: Path) -> Path:
 
 
 def log_dir(state_dir: Path) -> Path:
-    """Where the Daemon's app log lives."""
+    """Where the Daemon's app log and call log live, rotated under one size cap."""
     return state_dir / "log"
 
 
 def daemon_log_file(state_dir: Path) -> Path:
+    """The app log."""
     return log_dir(state_dir) / "daemon.log"
+
+
+def call_log_file(state_dir: Path) -> Path:
+    """The call log: one JSON line per tool call through any Proxy (#16)."""
+    return log_dir(state_dir) / "calls.jsonl"
 
 
 def daemon_lock_file(state_dir: Path) -> Path:

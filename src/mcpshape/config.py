@@ -15,6 +15,7 @@ import tomlkit
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError, model_validator
 from tomlkit.exceptions import TOMLKitError
 
+from mcpshape.logs import MIN_ROTATE_BYTES, Level
 from mcpshape.model import (
     DEFAULT_PROXY_NAME,
     CapOverrides,
@@ -72,6 +73,32 @@ class DaemonSettings(BaseModel):
     )
 
 
+LOG_CAP_BYTES = 50 * 1024 * 1024
+"""The most every log file together may take on disk, unless ``config.toml`` says otherwise."""
+
+
+class LogSettings(BaseModel):
+    """The app log's level, and the one size cap every log file shares."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    level: Level = Field(
+        default="debug",
+        description=(
+            "The least severe app log level kept: debug, info, warning, or error. "
+            "Verbose by default; the call log is always on whatever this says."
+        ),
+    )
+    max_bytes: int = Field(
+        default=LOG_CAP_BYTES,
+        ge=MIN_ROTATE_BYTES * 2,
+        description=(
+            "The most the app log and the call log together may take on disk, rotated "
+            "files included; the oldest rotated files go first."
+        ),
+    )
+
+
 class DriftSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -85,6 +112,7 @@ class SettingsFile(_File):
     """``config.toml``: global settings."""
 
     daemon: DaemonSettings = Field(default_factory=DaemonSettings)
+    log: LogSettings = Field(default_factory=LogSettings)
     drift: DriftSettings = Field(default_factory=DriftSettings)
     lifecycle: LifecycleSettings = Field(
         default_factory=LifecycleSettings,
