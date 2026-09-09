@@ -59,6 +59,9 @@ jobs:
           if [ "$bot" = 0 ] && [ "$found" != "$expected" ]; then
             echo "::error::body sections are not the template's, in order: expected '$expected', found '$found'"; fail=1
           fi
+          if [ "$bot" = 0 ] && printf '%s\n' "$body" | grep -vE '^Closes #[0-9]+' | grep -Eiq '\b(close[sd]?|fix(e[sd])?|resolve[sd]?):? +#[0-9]+'; then
+            echo "::error::a closing word before a ticket number outside the Closes lines; GitHub would close that ticket on merge"; fail=1
+          fi
           files=$(git diff --name-only "$(git merge-base "$BASE" "$HEAD")" "$HEAD")
           code=$(printf '%s\n' "$files" | grep -Ec '^(src|tests)/' || true)
           rulefiles=$(printf '%s\n' "$files" | grep -Ec '^(CONTRIBUTING\.md|CLAUDE\.md|release-please-config\.json|\.release-please-manifest\.json)$|^\.github/' || true)
@@ -124,5 +127,8 @@ jobs:
       - run: uv run pyright
       - run: uv run vulture src tests --min-confidence 80
       - run: uv run pytest
+        env:
+          HYPOTHESIS_PROFILE: ci
+      - run: uv run --python 3.14 --locked pytest
         env:
           HYPOTHESIS_PROFILE: ci

@@ -65,7 +65,7 @@ Names and wording, in tickets, pull requests, code, and every Markdown file, fol
    letters, digits, and hyphens, at most 40 characters. One branch per wave.
 3. **Implement** on the branch. No rule constrains the commits on the branch, their messages or their number; the
    pull request is what lands. Before review, the commands CI's `test` job runs are green locally;
-   CI runs the same with `HYPOTHESIS_PROFILE=ci`, more examples:
+   CI runs the same with `HYPOTHESIS_PROFILE=ci`, more examples, and the tests again on Python 3.14:
    `uv lock --check && uv sync --locked && uv run ruff check . && uv run ruff format --check . && uv run pyright && uv run vulture src tests --min-confidence 80 && uv run pytest`
 4. **Review** on the branch, before the pull request opens, by a reviewer that did not write
    the code, on the whole diff:
@@ -83,7 +83,8 @@ Names and wording, in tickets, pull requests, code, and every Markdown file, fol
 6. **Pull request**: title `<type>: <subject>`, the type the branch's, at most 72 characters, no
    trailing period. Body
    from the template, every section in order, then one `Closes #<n>` line per ticket; a wave that
-   closes no ticket has none. Rule files and code never change in one pull request.
+   closes no ticket has none, and no other line puts a closing word before a ticket number, since
+   GitHub closes on that too. Rule files and code never change in one pull request.
 7. **Checks**: wait for the CI run of the pushed head as its own step after the push has
    succeeded. A red check is fixed on the branch and pushed. When `main` has moved, the branch
    is brought up to date with `gh pr update-branch <n>`; a session never force-pushes.
@@ -109,9 +110,9 @@ green and up to date like any pull request.
   green; a major update opens as its own pull request and stays open until the maintainer
   decides. On every push to `main`, every open Dependabot pull request is asked to rebase, so
   its checks rerun on the new `main`.
-- release-please keeps one release pull request open whenever an unreleased `feat`, `fix`,
-  `perf`, or `revert` commit exists, holding the version bump and the changelog; commits of the
-  other types ship inside the next such release. The version is what those commits compute,
+- release-please keeps one release pull request open whenever an unreleased commit of a type
+  its changelog shows exists, `feat`, `fix`, `perf`, `revert`, or `docs`, holding the version bump
+  and the changelog; commits of the other types ship inside the next such release. The version is what those commits compute,
   unless the maintainer names one: a rules wave sets `release-as` in the release config, and a
   wave removes it once that release exists, or when the maintainer withdraws the name. The
   changelog begins at the commit the config names as `bootstrap-sha`, the one that put the
@@ -158,10 +159,10 @@ to find again; a tag `vX.Y.Z` is a release.
 | Pull requests only; squash only; linear history; every check green and up to date; no bypass | ruleset `protect-main` |
 | Squash subject is the title, body is the body; branch deleted on merge | repository settings |
 | Branch is `<type>/<slug>`; title is `type: subject` with the branch's type, at most 72 characters, no trailing period; a bot's pull request is exempt from the branch, type, body, `Closes`, and release-please-file checks | CI, job `rules` |
-| Body has the template's sections in order; `Closes #<n>` when code changed; every `Closes` ticket is open, `ready`, assigned to the author, and not a parent; rule files and code never in one pull request; release-please's files written by release-please alone | CI, job `rules` |
+| Body has the template's sections in order; `Closes #<n>` when code changed, and no closing word before a ticket number elsewhere; every `Closes` ticket is open, `ready`, assigned to the author, and not a parent; rule files and code never in one pull request; release-please's files written by release-please alone | CI, job `rules` |
 | Every command the README shows exists | CI, job `rules` |
 | Ticket sections and labels, checked on every open and edit, one comment until they pass | CI, workflow `Issue` |
-| Lint, format, types, tests, lock file, dead code | CI, job `test` |
+| Lint, format, types, lock file, dead code; tests on Python 3.12 and 3.14 | CI, job `test` |
 | Dependabot's minor and patch updates merge by themselves when green, and every open one is asked to rebase on each push to `main` | CI, workflow `Bots` |
 | `release-as`, when set, names a version above the last release | CI, job `rules` |
 | The release pull request exists; merging it tags, releases, and publishes | CI, workflows `Release` and `Publish` |
