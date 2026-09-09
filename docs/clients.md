@@ -11,8 +11,9 @@ Client Profiles. Checked 2026-09-06/07 against primary documentation.
   file), Cursor, Windsurf, VS Code, Gemini CLI, Codex CLI, Goose, JetBrains, Cline, Continue,
   OpenCode.
 - stdio only: Claude Desktop's config file, and Zed as far as confirmed: its docs also show a
-  remote entry taking `url`, unconfirmed against a second reading, so the Zed Profile writes
-  the Shim entry until that is settled. Both need the Shim to reach an HTTP server.
+  remote entry taking `url`, unconfirmed against a second reading, and settling it was declined
+  on 2026-09-09, so the Zed Profile writes the Shim entry, which works either way. Both need the
+  Shim to reach an HTTP server.
 - Remote HTTPS only: ChatGPT.
 
 ### Behavior
@@ -80,7 +81,7 @@ and the Profile writes the common `mcpServers` + `{"type": "http", "url": ...}` 
   (code.visualstudio.com/docs/agents/reference/mcp-configuration)
 - Zed: a `context_servers` entry needs only `command`/`args`/`env`; no `source` field is
   required. The remote entry its docs show takes `url` plus optional `headers`; see
-  Transports for why the Profile does not write it yet.
+  Transports for why the Profile does not write it.
   (zed.dev/docs/ai/mcp, and `docs/src/ai/mcp.md` in zed-industries/zed)
 - OpenCode: the top-level key of `opencode.json` is `mcp`; a remote entry is
   `{"type": "remote", "url": "...", "enabled": true}`. (opencode.ai/docs/mcp-servers/)
@@ -255,6 +256,15 @@ and the Profile writes the common `mcpServers` + `{"type": "http", "url": ...}` 
   OAuth provider included, is served from a child process (`tests/support/child_server.py`,
   `tests/support/oauth_provider.py`), and the provider's issuer is reached over a control
   route.
+- One stdio session carries calls that overlap, up to the child's thread pool (checked
+  2026-09-09, 4.0.3 with anyio 4.15.1). The stdio client sends each request as it comes, under
+  its own JSON-RPC id, and the server runs each request as a task of its own, a sync tool in a
+  worker thread from anyio's default pool of forty. One thread of the pool reads the child's
+  stdin, so thirty-nine sync calls made together are in flight together, their starts within
+  a fraction of one call's time, and a fortieth waits for a slot; an async tool has no such
+  bound. Pinned in `tests/test_fastmcp_contract.py`. That is what lets one child process serve
+  every Proxy and every Client session, which `tests/test_real_transports.py` shows through
+  the Daemon, and it is the Upstream's own bound, not mcpshape's.
 - The MCP SDK's OAuth client writes the dynamic client registration to its `TokenStorage`
   before any token set, at the start of a login (checked 2026-09-08, `mcp` 2.x behind
   FastMCP 4.0.3). So a token file's existence says a login started, not that it finished; the

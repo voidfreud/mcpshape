@@ -10,6 +10,7 @@ the environment the Upstream file asks for, and that a connect given up on leave
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import signal
@@ -92,6 +93,31 @@ async def test_two_proxies_and_several_sessions_share_one_child_process(
     await until(
         lambda: not child_upstream.alive(started[-1]), "the child going with the connection"
     )
+
+
+async def test_many_sessions_across_two_proxies_call_one_child_at_once(
+    config_dir: ConfigDir,
+) -> None:
+    """The one connection an Upstream has carries every session's calls together: none waits
+    for another, and one child answers them all."""
+    config_dir.add_stdio_upstream("child", child_upstream.command(), child_upstream.args())
+    config_dir.add_proxy("child", "review")
+    paths = ["/child/mcp", "/child/review/mcp"] * 4
+
+    async with running_daemon(config_dir) as daemon, contextlib.AsyncExitStack() as sessions:
+        clients = [await sessions.enter_async_context(daemon.client(path)) for path in paths]
+        answers = await asyncio.gather(
+            *(client.call_tool("slow", {"seconds": 0.4}) for client in clients)
+        )
+    reports = [child_upstream.report(answer.structured_content) for answer in answers]
+
+    assert len(reports) == len(paths)
+    pids = {int(report["pid"]) for report in reports}
+    assert len(pids) == 1, "the sessions reached two children"
+    starts = [report["started"] for report in reports]
+    assert max(starts) < min(report["ended"] for report in reports), "the calls queued"
+    assert max(starts) - min(starts) < 0.1, "the calls did not start together"
+    await until(lambda: not child_upstream.alive(pids.pop()), "the child going with the Daemon")
 
 
 async def test_a_child_process_is_given_the_environment_the_upstream_file_asks_for(
@@ -260,7 +286,7 @@ async def test_upstream_sync_scans_an_stdio_upstream_under_the_runner(
     scanned = await cli(config_dir, "upstream", "sync", "child")
 
     assert "Scanned" in scanned.output
-    assert "4 tools" in scanned.output
+    assert "5 tools" in scanned.output
 
 
 async def test_a_reconnect_looks_again_over_the_connection_it_already_has(

@@ -165,6 +165,8 @@ boundary, and the Keeper's fault injection.
 - Cross-Proxy calls from user code, programmatic tool-list Hooks, Virtual Upstreams, and
   tools composed across Upstreams beyond Virtual Tools.
 - The OS keychain for secrets.
+- Pushing `tools/list_changed` to idle Clients, once FastMCP serves the stream and Clients act
+  on it.
 - Windows.
 
 ## Out of scope
