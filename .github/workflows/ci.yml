@@ -130,8 +130,9 @@ jobs:
       - run: uv run pytest
         env:
           HYPOTHESIS_PROFILE: ci
-      - name: The package builds, and the wheel it built installs and starts
+      - name: The package builds, the wheel it built installs, and --help runs on it
         run: |
+          RUNNER_TEMP="${RUNNER_TEMP:-$(mktemp -d)}"
           uv build --out-dir "$RUNNER_TEMP/dist"
           UV_TOOL_DIR="$RUNNER_TEMP/tools" UV_TOOL_BIN_DIR="$RUNNER_TEMP/bin" uv tool install "$RUNNER_TEMP"/dist/*.whl
           "$RUNNER_TEMP/bin/mcpshape" --help > /dev/null
