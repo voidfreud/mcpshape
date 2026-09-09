@@ -118,25 +118,54 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v7
+        with:
+          fetch-depth: 0
+      - name: What changed decides what runs; a Markdown change runs nothing, a release pull request the lock check and the build alone
+        id: scope
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+          BRANCH: ${{ github.head_ref || github.ref_name }}
+        run: |
+          if [ "$EVENT" = pull_request ]; then base=$(git merge-base "$BASE" "$HEAD"); else base="$BASE"; fi
+          if git cat-file -e "$base" 2>/dev/null; then files=$(git diff --name-only "$base" "$HEAD"); else files=everything; fi
+          suite=false; build=false
+          case "$BRANCH" in
+            release-please--*) build=true;;
+            *) if [ "$files" = everything ] || printf '%s\n' "$files" | grep -Eq '^(src/|tests/|pyproject\.toml$|uv\.lock$|\.python-version$|\.github/workflows/ci\.yml$)'; then suite=true; build=true; fi;;
+          esac
+          echo "suite=$suite" >> "$GITHUB_OUTPUT"; echo "build=$build" >> "$GITHUB_OUTPUT"
+          echo "suite=$suite build=$build"
+      - if: steps.scope.outputs.build == 'true'
+        uses: astral-sh/setup-uv@v7
         with:
           python-version: "3.12"
-      - run: uv lock --check
-      - run: uv sync --locked
-      - run: uv run ruff check .
-      - run: uv run ruff format --check .
-      - run: uv run pyright
-      - run: uv run vulture src tests --min-confidence 80
-      - run: uv run pytest
+      - if: steps.scope.outputs.build == 'true'
+        run: uv lock --check
+      - if: steps.scope.outputs.build == 'true'
+        run: uv sync --locked
+      - if: steps.scope.outputs.suite == 'true'
+        run: uv run ruff check .
+      - if: steps.scope.outputs.suite == 'true'
+        run: uv run ruff format --check .
+      - if: steps.scope.outputs.suite == 'true'
+        run: uv run pyright
+      - if: steps.scope.outputs.suite == 'true'
+        run: uv run vulture src tests --min-confidence 80
+      - if: steps.scope.outputs.suite == 'true'
+        run: uv run pytest
         env:
           HYPOTHESIS_PROFILE: ci
       - name: The package builds, the wheel it built installs, and --help runs on it
+        if: steps.scope.outputs.build == 'true'
         run: |
           RUNNER_TEMP="${RUNNER_TEMP:-$(mktemp -d)}"
           uv build --out-dir "$RUNNER_TEMP/dist"
           UV_TOOL_DIR="$RUNNER_TEMP/tools" UV_TOOL_BIN_DIR="$RUNNER_TEMP/bin" uv tool install "$RUNNER_TEMP"/dist/*.whl
           "$RUNNER_TEMP/bin/mcpshape" --help > /dev/null
       - name: The tests once more on Python 3.14, last, since this rebuilds the environment
+        if: steps.scope.outputs.suite == 'true'
         run: uv run --python 3.14 --locked pytest
         env:
           HYPOTHESIS_PROFILE: ci
