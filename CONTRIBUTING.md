@@ -86,8 +86,10 @@ Names and wording, in tickets, pull requests, code, and every Markdown file, fol
 7. **Checks**: wait for the CI run of the pushed head as its own step after the push has
    succeeded. A red check is fixed on the branch and pushed. When `main` has moved, the branch
    is brought up to date with `gh pr update-branch <n>`; nothing is ever force-pushed.
-8. **Merge** by squash once every check is green: `gh pr merge <n> --squash`. The squash
-   commit's subject is the title and its body is the pull request body. The branch is deleted.
+8. **Merge** by squash once every check is green, by the maintainer, or by the session once the
+   maintainer has said so, at the start of the wave or after its report: `gh pr merge <n> --squash`.
+   The squash commit's subject is the title and its body is the pull request body. The branch
+   is deleted.
 9. **Close**: the merge closes the tickets. If a parent's last sub-issue just closed, close the
    parent. Nothing else is written to any ticket.
 
