@@ -64,9 +64,14 @@ Names and wording, in tickets, pull requests, code, and every Markdown file, fol
 2. **Branch** from `main`: `<type>/<slug>`, the type from the list below, the slug lowercase
    letters, digits, and hyphens, at most 40 characters. One branch per wave.
 3. **Implement** on the branch. No rule constrains the commits on the branch, their messages or their number; the
-   pull request is what lands. Before review, the commands CI's `test` job runs are green locally;
-   CI runs the same with `HYPOTHESIS_PROFILE=ci`, more examples, and also builds the package,
-   installs the wheel, and runs `--help` on it, and runs the tests again on Python 3.14:
+   pull request is what lands. Before review, when the wave changed code, `pyproject.toml`,
+   `uv.lock`, `.python-version`, or CI's own workflow, the line below is green locally; a wave
+   that changed anything else has nothing to run. Under the same condition, since no other
+   workflow runs them, CI runs the same line with `HYPOTHESIS_PROFILE=ci`, more examples, then
+   builds the package, installs the wheel, runs `--help` on it, and runs the tests again on
+   Python 3.14. A release pull request runs the lock check and the build alone, its code being
+   `main`'s. A `test` check that ran nothing reports green. The `rules` job runs on every pull
+   request, the README check and the uv it installs for it included:
    `uv lock --check && uv sync --locked && uv run ruff check . && uv run ruff format --check . && uv run pyright && uv run vulture src tests --min-confidence 80 && uv run pytest`
 4. **Review** on the branch, before the pull request opens, by a reviewer that did not write
    the code, on the whole diff:
@@ -112,8 +117,8 @@ Two bots open pull requests of their own. A bot's pull request is not a wave: no
 claimed, branched, reviewed, or filed for it, and it closes no ticket. The `rules` job exempts
 its branch, `dependabot/*` or `release-please--*`, from the branch, type, body-section,
 closing-word, `Closes`, and release-please-file checks and from nothing else; every other check
-applies, and it merges green and up to date like any pull request, which the workflows below
-keep it. They alone write to a bot's branch.
+applies, the `test` job scoping itself as step 3 says, and it merges green and up to date like
+any pull request, which the workflows below keep it. They alone write to a bot's branch.
 
 - Dependabot, weekly and grouped: a minor or patch update merges by itself once its checks are
   green; a major update opens as its own pull request and stays open until the maintainer
@@ -174,7 +179,7 @@ to find again; a tag `vX.Y.Z` is a release.
 | Body has the template's sections in order; `Closes #<n>` when code changed, and no closing word before a ticket reference in the title or elsewhere; every `Closes` ticket is open, `ready`, assigned to the author, and not a parent; rule files and code never in one pull request; release-please's files written by release-please alone | CI, job `rules` |
 | Every command the README shows exists | CI, job `rules` |
 | Ticket sections and labels, checked on every open and edit, one comment until they pass | CI, workflow `Issue` |
-| Lint, format, types, lock file, dead code; tests on Python 3.12 and 3.14; the package builds, its wheel installs, and `--help` runs on it | CI, job `test` |
+| Lint, format, types, lock file, dead code; tests on Python 3.12 and 3.14; the package builds, its wheel installs, and `--help` runs on it; green having run nothing when nothing they test changed | CI, job `test` |
 | Dependabot's minor and patch updates merge by themselves when green, and every open one is asked to rebase on each push to `main` | CI, workflow `Bots` |
 | `release-as`, when set, names a version above the last release | CI, job `rules` |
 | The release pull request exists and is brought up to date with `main` on every push to it; merging it tags, releases, and publishes | CI, workflows `Release` and `Publish` |
