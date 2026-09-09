@@ -15,12 +15,10 @@ Python 3.12 or newer, macOS or Linux.
 
 ```
 uv tool install mcpshape
-brew install voidfreud/mcpshape/mcpshape
 ```
 
-Either line installs the command: the first from PyPI, the second from the Homebrew tap. From
-this repository instead, `uv tool install git+https://github.com/voidfreud/mcpshape`; from a
-checkout, `uv tool install .`, and `uv sync` with `uv run mcpshape` runs it in place. mcpshape
+From this repository instead, `uv tool install git+https://github.com/voidfreud/mcpshape`; from
+a checkout, `uv tool install .`, and `uv sync` with `uv run mcpshape` runs it in place. mcpshape
 makes no network call except to your Upstreams.
 
 ## First steps

@@ -153,6 +153,8 @@ boundary, and the Keeper's fault injection.
 - An empty exposed set for an unhealthy Proxy, or serving Overrides without Hooks when user
   code fails: the first confuses Clients, the second silently skips rewrites.
 - pip and pipx as documented install paths: uv only.
+- A Homebrew tap: its formula pins every dependency by hand and drifts from the lock file on
+  each release, and no tool regenerates it from the lock.
 - Merging Upstreams into one Proxy; see above.
 
 ## Parked
