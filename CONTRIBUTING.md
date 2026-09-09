@@ -86,7 +86,7 @@ Names and wording, in tickets, pull requests, code, and every Markdown file, fol
    closes no ticket has none. Rule files and code never change in one pull request.
 7. **Checks**: wait for the CI run of the pushed head as its own step after the push has
    succeeded. A red check is fixed on the branch and pushed. When `main` has moved, the branch
-   is brought up to date with `gh pr update-branch <n>`; nothing is ever force-pushed.
+   is brought up to date with `gh pr update-branch <n>`; a session never force-pushes.
 8. **Merge** by squash once every check is green, by the maintainer, or by the session once the
    maintainer has said so, at the start of the wave or after its report: `gh pr merge <n> --squash`.
    The squash commit's subject is the title and its body is the pull request body. The branch
@@ -101,9 +101,9 @@ Types: `build`, `chore`, `ci`, `docs`, `feat`, `fix`, `perf`, `refactor`, `rever
 
 Two bots open pull requests of their own. A bot's pull request is not a wave: nothing is
 claimed, branched, reviewed, or filed for it, and it closes no ticket. The `rules` job exempts
-its branch, `dependabot/*` or `release-please--*`, from the branch-name, body-section, and
-`Closes` checks and from nothing else; every other check applies, and it merges green and up
-to date like any pull request.
+its branch, `dependabot/*` or `release-please--*`, from the branch, type, body, `Closes`, and
+release-please-file checks and from nothing else; every other check applies, and it merges
+green and up to date like any pull request.
 
 - Dependabot, weekly and grouped: a minor or patch update merges by itself once its checks are
   green; a major update opens as its own pull request and stays open until the maintainer
@@ -111,7 +111,14 @@ to date like any pull request.
   its checks rerun on the new `main`.
 - release-please keeps one release pull request open whenever an unreleased `feat`, `fix`,
   `perf`, or `revert` commit exists, holding the version bump and the changelog; commits of the
-  other types ship inside the next such release. The maintainer merges it, or tells a session
+  other types ship inside the next such release. The version is what those commits compute,
+  unless the maintainer names one: a rules wave sets `release-as` in the release config, and a
+  wave removes it once that release exists, or when the maintainer withdraws the name. The
+  changelog begins at the commit the config names as `bootstrap-sha`, the one that put the
+  workflow in this file, read only until the first release exists; what came before is in the
+  tracker. The lock file records the version, so once release-please has opened or updated its
+  pull request, the `Release` workflow refreshes the lock on that branch and pushes it with the
+  bot token, and the checks rerun. The maintainer merges the pull request, or tells a session
   to. The merge creates the tag `vX.Y.Z` and the GitHub release, and the `Publish` workflow
   ships that release to PyPI; a `Publish` run that failed is rerun from the Actions page.
   `CHANGELOG.md`, `.release-please-manifest.json`, and the version in `pyproject.toml` are
@@ -150,10 +157,11 @@ to find again; a tag `vX.Y.Z` is a release.
 | --- | --- |
 | Pull requests only; squash only; linear history; every check green and up to date; no bypass | ruleset `protect-main` |
 | Squash subject is the title, body is the body; branch deleted on merge | repository settings |
-| Branch is `<type>/<slug>`; title is `type: subject` with the branch's type, at most 72 characters, no trailing period; a bot's pull request is exempt from the branch, body, and `Closes` checks | CI, job `rules` |
+| Branch is `<type>/<slug>`; title is `type: subject` with the branch's type, at most 72 characters, no trailing period; a bot's pull request is exempt from the branch, type, body, `Closes`, and release-please-file checks | CI, job `rules` |
 | Body has the template's sections in order; `Closes #<n>` when code changed; every `Closes` ticket is open, `ready`, assigned to the author, and not a parent; rule files and code never in one pull request; release-please's files written by release-please alone | CI, job `rules` |
 | Every command the README shows exists | CI, job `rules` |
 | Ticket sections and labels, checked on every open and edit, one comment until they pass | CI, workflow `Issue` |
 | Lint, format, types, tests, lock file, dead code | CI, job `test` |
 | Dependabot's minor and patch updates merge by themselves when green, and every open one is asked to rebase on each push to `main` | CI, workflow `Bots` |
+| `release-as`, when set, names a version above the last release | CI, job `rules` |
 | The release pull request exists; merging it tags, releases, and publishes | CI, workflows `Release` and `Publish` |

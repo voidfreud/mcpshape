@@ -77,6 +77,11 @@ jobs:
               echo "::error::the version in pyproject.toml is written by release-please alone"; fail=1
             fi
           fi
+          ra=$(jq -r '.["release-as"] // empty' release-please-config.json)
+          last=$(jq -r '.["."]' .release-please-manifest.json)
+          if [ -n "$ra" ] && [ "$(printf '%s\n%s\n' "$ra" "$last" | sort -V | tail -1)" = "$last" ]; then
+            echo "::error::release-as names $ra, which is not above the last release $last"; fail=1
+          fi
           for n in $closes; do
             if ! json=$(gh api "repos/$REPO/issues/$n" 2>/dev/null); then
               echo "::error::Closes #$n: no such issue"; fail=1; continue

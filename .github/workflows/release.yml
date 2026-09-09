@@ -10,17 +10,37 @@ permissions:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   release-please:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     env:
       BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
     steps:
       - name: The release pull request holds the version bump and the changelog of everything unreleased
         if: env.BOT_TOKEN != ''
+        id: release
         uses: googleapis/release-please-action@v5
         with:
           token: ${{ secrets.BOT_TOKEN }}
+      - name: The release pull request's lock file records the version it bumps to
+        if: env.BOT_TOKEN != '' && steps.release.outputs.prs_created == 'true'
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ fromJSON(steps.release.outputs.pr).headBranchName }}
+          token: ${{ secrets.BOT_TOKEN }}
+      - if: env.BOT_TOKEN != '' && steps.release.outputs.prs_created == 'true'
+        uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.12"
+      - if: env.BOT_TOKEN != '' && steps.release.outputs.prs_created == 'true'
+        run: |
+          uv lock
+          if ! git diff --quiet -- uv.lock; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git commit -m "chore: the lock file records the release's version" -- uv.lock
+            git push
+          fi
