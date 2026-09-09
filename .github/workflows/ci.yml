@@ -58,7 +58,7 @@ jobs:
           fi
           files=$(git diff --name-only "$(git merge-base "$BASE" "$HEAD")" "$HEAD")
           code=$(printf '%s\n' "$files" | grep -Ec '^(src|tests)/' || true)
-          rulefiles=$(printf '%s\n' "$files" | grep -Ec '^(CONTRIBUTING\.md|CLAUDE\.md|\.github/|release-please-config\.json|\.release-please-manifest\.json)' || true)
+          rulefiles=$(printf '%s\n' "$files" | grep -Ec '^(CONTRIBUTING\.md|CLAUDE\.md|release-please-config\.json|\.release-please-manifest\.json)$|^\.github/' || true)
           closes=$(printf '%s\n' "$body" | grep -Eo '^Closes #[0-9]+' | grep -Eo '[0-9]+' || true)
           if [ "$bot" = 0 ] && [ "$code" -gt 0 ] && [ -z "$closes" ]; then
             echo "::error::src/ or tests/ changed but the body has no 'Closes #<n>' line"; fail=1
@@ -88,6 +88,15 @@ jobs:
             [ "$children" = 0 ] || { echo "::error::Closes #$n: a parent ($children sub-issues) is closed by its last sub-issue, not by a merge"; fail=1; }
           done
           exit $fail
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.12"
+      - name: Every command the README shows exists
+        run: |
+          uv sync --locked
+          awk '/^```/ { fenced = !fenced; next } fenced && /^mcpshape /' README.md | while IFS= read -r line; do
+            eval "uv run $line --help" > /dev/null 2>&1 || { echo "::error::README.md shows a command that does not exist: $line"; exit 1; }
+          done
   test:
     strategy:
       fail-fast: false

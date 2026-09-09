@@ -2,7 +2,7 @@
 <!-- What the wave delivers, in the glossary's words. -->
 
 ## Changes
-<!-- By module, with file names. Facts recorded in the document CLAUDE.md names for them, when any. -->
+<!-- By module, with file names. Facts recorded in the facts file CLAUDE.md names, when any. -->
 
 ## Tests
 <!-- Which files, what they assert, how they drive the seam. "None" for a change without code. -->
