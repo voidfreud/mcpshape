@@ -31,8 +31,8 @@ and every Upstream gets one named `default` when it is added.
 
 ### Unmodified FastMCP, behind the Adapter
 
-FastMCP provides proxying, tool transforms, visibility control, middleware, and every
-transport needed, so writing an MCP implementation here would reinvent a maintained library.
+FastMCP provides proxying, its own `ToolTransform`, visibility control, middleware, and
+every transport needed, so writing an MCP implementation here would reinvent a maintained library.
 Its public API changed twice in 2026, so anything bound to it directly is exposed to that
 churn. mcpshape depends on FastMCP as a normal dependency pinned to a major, never forked or
 patched. Only the Adapter imports it, which `tests/test_boundaries.py` enforces, and nothing
