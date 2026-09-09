@@ -65,8 +65,8 @@ Names and wording, in tickets, pull requests, code, and every Markdown file, fol
    letters, digits, and hyphens, at most 40 characters. One branch per wave.
 3. **Implement** on the branch. No rule constrains the commits on the branch, their messages or their number; the
    pull request is what lands. Before review, the commands CI's `test` job runs are green locally;
-   CI runs the same, then the tests once more on Python 3.14, both with `HYPOTHESIS_PROFILE=ci`,
-   more examples:
+   CI runs the same with `HYPOTHESIS_PROFILE=ci`, more examples, then builds the package and
+   starts the wheel it built, then the tests once more on Python 3.14:
    `uv lock --check && uv sync --locked && uv run ruff check . && uv run ruff format --check . && uv run pyright && uv run vulture src tests --min-confidence 80 && uv run pytest`
 4. **Review** on the branch, before the pull request opens, by a reviewer that did not write
    the code, on the whole diff:
@@ -125,14 +125,16 @@ applies, and it merges green and up to date like any pull request.
   in the release config, and a wave removes it once that release exists, or when the maintainer
   withdraws the name. The changelog begins at the commit the config names as `bootstrap-sha`,
   the one that put the workflow in this file, read only until the first release exists; what
-  came before is in the tracker. The lock file records the version, so once release-please has
-  opened or updated its pull request, the `Release` workflow refreshes the lock on that branch
-  and pushes it with the bot token, and the checks rerun. The maintainer merges the pull
-  request, or tells a session to. The merge creates the tag `vX.Y.Z` and the GitHub release, and
-  the `Publish` workflow ships that release to PyPI; a `Publish` run that failed is rerun from
-  the Actions page. `CHANGELOG.md`, `.release-please-manifest.json`, and the version in
-  `pyproject.toml` are written by release-please alone, and its two `autorelease:` labels are
-  its own, on its pull requests only.
+  came before is in the tracker. release-please rebuilds its pull request only when the
+  changelog changes, so the `Release` workflow then brings it up to date with `main` when it is
+  behind; and when release-please opened or updated it, the workflow refreshes the lock on its
+  branch, since the lock records the version, pushing with the bot token so the checks rerun.
+  The maintainer merges the pull request, or tells a session to. The merge creates the tag
+  `vX.Y.Z` and the GitHub release, and the `Publish` workflow ships that release to PyPI; a
+  `Publish` run that failed is rerun from the Actions page. `CHANGELOG.md`,
+  `.release-please-manifest.json`, and the version in `pyproject.toml` are written by
+  release-please alone, and its two `autorelease:` labels are its own, on its pull requests
+  only.
 
 The bots' workflows run with the `BOT_TOKEN` secret, a fine-grained token with contents and
 pull requests read and write, since anything done with GitHub's own token triggers no
@@ -170,7 +172,7 @@ to find again; a tag `vX.Y.Z` is a release.
 | Body has the template's sections in order; `Closes #<n>` when code changed, and no closing word before a ticket reference in the title or elsewhere; every `Closes` ticket is open, `ready`, assigned to the author, and not a parent; rule files and code never in one pull request; release-please's files written by release-please alone | CI, job `rules` |
 | Every command the README shows exists | CI, job `rules` |
 | Ticket sections and labels, checked on every open and edit, one comment until they pass | CI, workflow `Issue` |
-| Lint, format, types, lock file, dead code; tests on Python 3.12 and 3.14 | CI, job `test` |
+| Lint, format, types, lock file, dead code; tests on Python 3.12 and 3.14; the package builds and its wheel starts | CI, job `test` |
 | Dependabot's minor and patch updates merge by themselves when green, and every open one is asked to rebase on each push to `main` | CI, workflow `Bots` |
 | `release-as`, when set, names a version above the last release | CI, job `rules` |
-| The release pull request exists; merging it tags, releases, and publishes | CI, workflows `Release` and `Publish` |
+| The release pull request exists and is kept up to date with `main`; merging it tags, releases, and publishes | CI, workflows `Release` and `Publish` |

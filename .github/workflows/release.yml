@@ -25,6 +25,22 @@ jobs:
         uses: googleapis/release-please-action@v5
         with:
           token: ${{ secrets.BOT_TOKEN }}
+      - name: The release pull request is up to date with main
+        if: env.BOT_TOKEN != ''
+        env:
+          GH_TOKEN: ${{ secrets.BOT_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          n=$(gh pr list --repo "$REPO" --state open --head release-please--branches--main --json number --jq '.[0].number // empty')
+          [ -n "$n" ] || exit 0
+          for i in 1 2 3 4 5 6; do
+            state=$(gh pr view "$n" --repo "$REPO" --json mergeStateStatus --jq .mergeStateStatus)
+            [ "$state" = UNKNOWN ] || break
+            sleep 10
+          done
+          if [ "$state" = BEHIND ]; then
+            gh pr update-branch "$n" --repo "$REPO"
+          fi
       - name: The release pull request's lock file records the version it bumps to
         if: env.BOT_TOKEN != '' && steps.release.outputs.prs_created == 'true'
         uses: actions/checkout@v7
