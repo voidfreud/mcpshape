@@ -112,7 +112,7 @@ async def test_many_sessions_across_two_proxies_call_one_child_at_once(
     reports = [reported(answer.structured_content) for answer in answers]
 
     assert len(reports) == len(paths)
-    assert len({report["pid"] for report in reports}) == 1, "the sessions reached more than one child"
+    assert len({report["pid"] for report in reports}) == 1, "the sessions reached two children"
     assert max(report["started"] for report in reports) < min(
         report["ended"] for report in reports
     ), "the calls queued behind each other instead of overlapping"
