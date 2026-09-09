@@ -114,9 +114,9 @@ async def test_many_sessions_across_two_proxies_call_one_child_at_once(
     assert len(reports) == len(paths)
     pids = {int(report["pid"]) for report in reports}
     assert len(pids) == 1, "the sessions reached two children"
-    assert max(report["started"] for report in reports) < min(
-        report["ended"] for report in reports
-    ), "the calls queued behind each other instead of overlapping"
+    starts = [report["started"] for report in reports]
+    assert max(starts) < min(report["ended"] for report in reports), "the calls queued"
+    assert max(starts) - min(starts) < 0.1, "the calls did not start together"
     await until(lambda: not child_upstream.alive(pids.pop()), "the child going with the Daemon")
 
 

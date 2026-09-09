@@ -12,6 +12,7 @@ import threading
 from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any, cast
 
+import anyio
 import fastmcp
 import httpx2
 import mcp_types
@@ -578,13 +579,22 @@ async def test_a_stdio_child_gets_a_safe_slice_of_the_environment_plus_what_it_i
         ).data == ""
 
 
-async def test_one_stdio_session_carries_calls_that_overlap() -> None:
-    """Why one child process can serve every Proxy and every Client session at once.
+POOL = 40
+"""anyio's default thread limiter, which FastMCP runs a sync tool under."""
+WAIT = 0.4
+"""How long the child's ``slow`` tool waits in the tests, in seconds."""
+
+
+async def test_one_stdio_session_carries_calls_that_overlap_up_to_the_thread_pool() -> None:
+    """Why one child process can serve every Proxy and every Client session at once, and
+    where that ends.
 
     The stdio client sends each request as it comes, under its own JSON-RPC id, and the
-    server runs each request as a task of its own, a sync tool in a worker thread; so calls
-    made together on one session are in flight together and finish in about one call's time.
+    server runs each request as a task of its own, a sync tool in a worker thread from anyio's
+    default pool. One thread of the pool reads the child's stdin, so one call fewer than the
+    pool are in flight together, and one more waits for a slot.
     """
+    assert anyio.to_thread.current_default_thread_limiter().total_tokens == POOL
     transport = StdioTransport(
         command=child_upstream.command(),
         args=child_upstream.args(),
@@ -592,16 +602,26 @@ async def test_one_stdio_session_carries_calls_that_overlap() -> None:
         keep_alive=False,
     )
     async with Client(transport) as client:
-        answers = await asyncio.gather(
-            *(client.call_tool("slow", {"seconds": 0.4}) for _ in range(8))
-        )
-    reports = [child_upstream.report(answer.structured_content) for answer in answers]
-    pids = {int(report["pid"]) for report in reports}
+        together = await slow_calls(client, POOL - 1)
+        one_more = await slow_calls(client, POOL)
+    pids = {int(report["pid"]) for report in together + one_more}
     assert len(pids) == 1
-    assert max(report["started"] for report in reports) < min(
-        report["ended"] for report in reports
-    ), "the calls queued instead of overlapping"
+
+    starts = [report["started"] for report in together]
+    assert max(starts) < min(report["ended"] for report in together), "the calls queued"
+    assert max(starts) - min(starts) < WAIT / 4, "the calls did not start together"
+    assert max(report["started"] for report in one_more) > min(
+        report["ended"] for report in one_more
+    ), "a call past the pool did not wait for a slot"
     await until(lambda: not child_upstream.alive(pids.pop()), "the child going with the session")
+
+
+async def slow_calls(client: Client[StdioTransport], count: int) -> list[dict[str, float]]:
+    """``count`` calls of the child's ``slow`` tool made together, and what each reported."""
+    answers = await asyncio.gather(
+        *(client.call_tool("slow", {"seconds": WAIT}) for _ in range(count))
+    )
+    return [child_upstream.report(answer.structured_content) for answer in answers]
 
 
 async def test_a_client_raises_when_nothing_serves_the_url() -> None:
