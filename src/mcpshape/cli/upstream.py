@@ -67,7 +67,7 @@ EnvOpt = Annotated[
     typer.Option(
         "--env",
         metavar="NAME=VALUE",
-        help="With --stdio: set NAME=VALUE in the [env] block; repeatable. "
+        help="With --stdio: set NAME=VALUE in the \\[env] block; repeatable. "
         "VALUE may be a ${VAR} reference.",
     ),
 ]
@@ -199,7 +199,7 @@ def env_cmd(
     name: NameArg,
     pairs: Annotated[
         list[str],
-        typer.Argument(metavar="NAME=VALUE...", help="Set each in the Upstream's [env] block."),
+        typer.Argument(metavar="NAME=VALUE...", help="Set each in the Upstream's \\[env] block."),
     ],
 ) -> None:
     """Set environment variables on an existing stdio Upstream, keeping its comments."""
