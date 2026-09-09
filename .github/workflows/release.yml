@@ -25,6 +25,19 @@ jobs:
         uses: googleapis/release-please-action@v5
         with:
           token: ${{ secrets.BOT_TOKEN }}
+      - name: The release pull request is up to date with main
+        if: env.BOT_TOKEN != ''
+        env:
+          GH_TOKEN: ${{ secrets.BOT_TOKEN }}
+          REPO: ${{ github.repository }}
+          HEAD: release-please--branches--main
+        run: |
+          n=$(gh pr list --repo "$REPO" --state open --head "$HEAD" --json number --jq '.[0].number // empty')
+          [ -n "$n" ] || exit 0
+          behind=$(gh api "repos/$REPO/compare/main...$HEAD" --jq .behind_by)
+          [ "$behind" -gt 0 ] || exit 0
+          gh pr update-branch "$n" --repo "$REPO" || {
+            echo "::error::the release pull request could not be brought up to date; release-please rebuilds it on the next changelog change, or bring it up to date by hand"; exit 1; }
       - name: The release pull request's lock file records the version it bumps to
         if: env.BOT_TOKEN != '' && steps.release.outputs.prs_created == 'true'
         uses: actions/checkout@v7
