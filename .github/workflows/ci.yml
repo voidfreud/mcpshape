@@ -120,7 +120,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-      - name: What changed decides what runs; a Markdown change runs nothing, a release pull request the lock check and the build alone
+      - name: What changed decides what runs; a change that cannot affect them runs nothing, a release pull request the lock check and the build alone
         id: scope
         env:
           EVENT: ${{ github.event_name }}
@@ -128,12 +128,14 @@ jobs:
           HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
           BRANCH: ${{ github.head_ref || github.ref_name }}
         run: |
-          if [ "$EVENT" = pull_request ]; then base=$(git merge-base "$BASE" "$HEAD"); else base="$BASE"; fi
+          if [ "$EVENT" = pull_request ]; then base=$(git merge-base "$BASE" "$HEAD" 2>/dev/null) || base=""; else base="$BASE"; fi
           if git cat-file -e "$base" 2>/dev/null; then files=$(git diff --name-only "$base" "$HEAD"); else files=everything; fi
           suite=false; build=false
-          case "$BRANCH" in
-            release-please--*) build=true;;
-            *) if [ "$files" = everything ] || printf '%s\n' "$files" | grep -Eq '^(src/|tests/|pyproject\.toml$|uv\.lock$|\.python-version$|\.github/workflows/ci\.yml$)'; then suite=true; build=true; fi;;
+          code='^(src/|tests/|pyproject\.toml$|uv\.lock$|\.python-version$|\.github/workflows/ci\.yml$)'
+          if [ "$files" = everything ] || printf '%s\n' "$files" | grep -Eq "$code"; then suite=true; build=true; fi
+          case "$BRANCH" in release-please--*)
+            build=true
+            if [ "$files" != everything ] && ! printf '%s\n' "$files" | grep -Eq '^(src/|tests/)'; then suite=false; fi;;
           esac
           echo "suite=$suite" >> "$GITHUB_OUTPUT"; echo "build=$build" >> "$GITHUB_OUTPUT"
           echo "suite=$suite build=$build"
