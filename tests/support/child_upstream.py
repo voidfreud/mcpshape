@@ -22,7 +22,7 @@ import subprocess  # a child process is what this module is about
 import sys
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from fastmcp import FastMCP
 
@@ -98,12 +98,20 @@ def die() -> int:
 
 
 @child.tool
-def slow(seconds: float) -> dict[str, float]:
+def slow(seconds: float) -> dict[str, float | int]:
     """Wait ``seconds``, then say when this call started and ended, on this process's clock,
     and which process it was: whether calls made together overlap or queue is in the numbers."""
     started = time.monotonic()
     time.sleep(seconds)
-    return {"pid": float(os.getpid()), "started": started, "ended": time.monotonic()}
+    return {"pid": os.getpid(), "started": started, "ended": time.monotonic()}
+
+
+def report(content: dict[str, Any] | None) -> dict[str, float]:
+    """What ``slow`` answered, unwrapped from the result FastMCP wraps a tool's value in."""
+    assert content is not None
+    answered = content.get("result", content)
+    assert isinstance(answered, dict)
+    return {str(key): float(value) for key, value in cast("dict[str, Any]", answered).items()}
 
 
 @child.tool

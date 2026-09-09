@@ -14,7 +14,7 @@ import contextlib
 import json
 import os
 import signal
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING
 
 from fastmcp import Client
 from mcp_types import TextContent
@@ -109,21 +109,15 @@ async def test_many_sessions_across_two_proxies_call_one_child_at_once(
         answers = await asyncio.gather(
             *(client.call_tool("slow", {"seconds": 0.4}) for client in clients)
         )
-    reports = [reported(answer.structured_content) for answer in answers]
+    reports = [child_upstream.report(answer.structured_content) for answer in answers]
 
     assert len(reports) == len(paths)
-    assert len({report["pid"] for report in reports}) == 1, "the sessions reached two children"
+    pids = {int(report["pid"]) for report in reports}
+    assert len(pids) == 1, "the sessions reached two children"
     assert max(report["started"] for report in reports) < min(
         report["ended"] for report in reports
     ), "the calls queued behind each other instead of overlapping"
-
-
-def reported(content: dict[str, Any] | None) -> dict[str, float]:
-    """What the child's ``slow`` tool answered, unwrapped from the result FastMCP wraps it in."""
-    assert content is not None
-    report = content.get("result", content)
-    assert isinstance(report, dict)
-    return {str(key): float(value) for key, value in cast("dict[str, Any]", report).items()}
+    await until(lambda: not child_upstream.alive(pids.pop()), "the child going with the Daemon")
 
 
 async def test_a_child_process_is_given_the_environment_the_upstream_file_asks_for(
@@ -292,7 +286,7 @@ async def test_upstream_sync_scans_an_stdio_upstream_under_the_runner(
     scanned = await cli(config_dir, "upstream", "sync", "child")
 
     assert "Scanned" in scanned.output
-    assert "4 tools" in scanned.output
+    assert "5 tools" in scanned.output
 
 
 async def test_a_reconnect_looks_again_over_the_connection_it_already_has(

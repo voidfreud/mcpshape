@@ -595,19 +595,13 @@ async def test_one_stdio_session_carries_calls_that_overlap() -> None:
         answers = await asyncio.gather(
             *(client.call_tool("slow", {"seconds": 0.4}) for _ in range(8))
         )
-    reports = [reported(answer.structured_content) for answer in answers]
-    assert len({report["pid"] for report in reports}) == 1
+    reports = [child_upstream.report(answer.structured_content) for answer in answers]
+    pids = {int(report["pid"]) for report in reports}
+    assert len(pids) == 1
     assert max(report["started"] for report in reports) < min(
         report["ended"] for report in reports
     ), "the calls queued instead of overlapping"
-
-
-def reported(content: dict[str, Any] | None) -> dict[str, float]:
-    """What the ``slow`` tool answered, unwrapped from the result FastMCP wraps it in."""
-    assert content is not None
-    report = content.get("result", content)
-    assert isinstance(report, dict)
-    return {str(key): float(value) for key, value in cast("dict[str, Any]", report).items()}
+    await until(lambda: not child_upstream.alive(pids.pop()), "the child going with the session")
 
 
 async def test_a_client_raises_when_nothing_serves_the_url() -> None:
