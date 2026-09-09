@@ -39,6 +39,17 @@ def test_serve_documents_both_ways_of_naming_a_proxy(config_dir: ConfigDir) -> N
     assert "[PROXY]" in result.output, "and the Proxy given separately"
 
 
+def test_the_help_of_env_names_the_env_block(config_dir: ConfigDir) -> None:
+    """The block is named without TOML's brackets: the help's own markup reads a bracketed
+    word as a tag and drops it, and an escape shows as a backslash when that markup is off."""
+    for command in (["add"], ["upstream", "env"]):
+        result = run_cli(config_dir, *command, "--help")
+
+        assert result.exit_code == 0
+        assert "the env block" in result.output or "'s env block" in result.output
+        assert "\\" not in result.output
+
+
 def test_upstream_help_lists_scan(config_dir: ConfigDir) -> None:
     result = run_cli(config_dir, "upstream", "--help")
 
