@@ -71,7 +71,7 @@ Names and wording, in tickets, pull requests, code, and every Markdown file, fol
 4. **Review** on the branch, before the pull request opens, by a reviewer that did not write
    the code, on the whole diff:
    - spec: each ticket's acceptance criteria, met or not, with evidence; and nothing built that
-     no ticket asked for;
+     no ticket or finding asked for;
    - standards: this file, `CONTEXT.md` (terms and Avoid lists, in names and in text), and,
      as `CLAUDE.md` names them, the design brief (a decision the diff breaks, or changes without
      editing the brief), the facts file (a fact the diff rests on that it does not date), and
@@ -81,7 +81,8 @@ Names and wording, in tickets, pull requests, code, and every Markdown file, fol
    - adversarial, when code changed: every way the diff can be made to do what a ticket or the
      brief says it must not, each with the inputs or the sequence that does it, the criterion or
      decision it contradicts, and the test that would pin it; a finding without that sequence is
-     not one, and a confirmed one lands with its test in the same wave.
+     not one and is dropped, and a confirmed one, reproduced by the session, lands with its test
+     in the same wave, or as a follow-up when a ticket of the wave rules that out.
    Every finding is fixed on the branch or answered; none is deferred. The session landing the
    wave reads the riskiest file itself, whoever wrote it.
 5. **File follow-ups** for everything seen and not fixed.
