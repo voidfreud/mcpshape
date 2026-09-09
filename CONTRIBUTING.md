@@ -76,11 +76,12 @@ Names and wording, in tickets, pull requests, code, and every Markdown file, fol
      editing the brief), the facts file (a fact the diff rests on that it does not date), and
      the README (a command the diff removed or changed); duplication;
    - rules, when a rule file changed: every rule once, no two in conflict, none ambiguous, none
-     unenforced that could be.
+     unenforced that could be, and the skills that execute this file still agree with it.
    Every finding is fixed on the branch or answered; none is deferred. The session landing the
    wave reads the riskiest file itself, whoever wrote it.
 5. **File follow-ups** for everything seen and not fixed.
-6. **Pull request**: title `<type>: <subject>`, at most 72 characters, no trailing period. Body
+6. **Pull request**: title `<type>: <subject>`, the type the branch's, at most 72 characters, no
+   trailing period. Body
    from the template, every section in order, then one `Closes #<n>` line per ticket; a wave that
    closes no ticket has none. Rule files and code never change in one pull request.
 7. **Checks**: wait for the CI run of the pushed head as its own step after the push has
@@ -131,7 +132,8 @@ workflow: a pull request it opened gets no checks, and a merge it performed runs
 - Nothing is done on GitHub outside the steps above. Anything else is asked first.
 - The skills `/ticket`, `/land`, `/review`, and `/scaffold` are the executable form of this
   file. They live in the maintainer's global skills directory, not in this repository, and hold
-  steps, not rules; where a skill and this file differ, this file wins and the skill is fixed.
+  steps, not rules; where a skill and this file differ, this file wins and the skill is fixed in
+  the same wave.
 
 ## Records
 
@@ -148,7 +150,7 @@ to find again; a tag `vX.Y.Z` is a release.
 | --- | --- |
 | Pull requests only; squash only; linear history; every check green and up to date; no bypass | ruleset `protect-main` |
 | Squash subject is the title, body is the body; branch deleted on merge | repository settings |
-| Branch is `<type>/<slug>`; title is `type: subject`, at most 72 characters, no trailing period; a bot's pull request is exempt from the branch, body, and `Closes` checks | CI, job `rules` |
+| Branch is `<type>/<slug>`; title is `type: subject` with the branch's type, at most 72 characters, no trailing period; a bot's pull request is exempt from the branch, body, and `Closes` checks | CI, job `rules` |
 | Body has the template's sections in order; `Closes #<n>` when code changed; every `Closes` ticket is open, `ready`, assigned to the author, and not a parent; rule files and code never in one pull request; release-please's files written by release-please alone | CI, job `rules` |
 | Every command the README shows exists | CI, job `rules` |
 | Ticket sections and labels, checked on every open and edit, one comment until they pass | CI, workflow `Issue` |

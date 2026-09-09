@@ -51,6 +51,9 @@ jobs:
           if [ "${#TITLE}" -gt 72 ]; then
             echo "::error::title is ${#TITLE} characters; at most 72"; fail=1
           fi
+          if [ "$bot" = 0 ] && [ "${BRANCH%%/*}" != "${TITLE%%:*}" ]; then
+            echo "::error::the branch's type (${BRANCH%%/*}) and the title's type (${TITLE%%:*}) differ"; fail=1
+          fi
           expected='## Summary,## Changes,## Tests,## Review'
           found=$(printf '%s\n' "$body" | grep -E '^## (Summary|Changes|Tests|Review)$' | paste -sd, -)
           if [ "$bot" = 0 ] && [ "$found" != "$expected" ]; then

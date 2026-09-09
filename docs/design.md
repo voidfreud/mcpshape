@@ -165,7 +165,6 @@ boundary, and the Keeper's fault injection.
 - Cross-Proxy calls from user code, programmatic tool-list Hooks, Virtual Upstreams, and
   tools composed across Upstreams beyond Virtual Tools.
 - The OS keychain for secrets.
-- A Homebrew formula, after the first stable release.
 - Windows.
 
 ## Out of scope
