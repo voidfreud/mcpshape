@@ -131,8 +131,7 @@ def page_status(config_dir: Path) -> int | None:
         with urllib.request.urlopen(request, timeout=TIMEOUT) as answer:  # noqa: S310
             return int(answer.status)
     except urllib.error.HTTPError as refused:
-        with refused:
-            return refused.code
+        return _closed(refused)
     except OSError:
         return None
 
@@ -153,6 +152,14 @@ def _url(daemon: DaemonSettings) -> str:
     return f"http://{daemon.host}:{daemon.port}"
 
 
+def _closed(refused: urllib.error.HTTPError) -> int:
+    """The code of an error answer, with the answer closed. An ``HTTPError`` holds the
+    response body in a temporary file, and Python 3.14 warns when the collector closes it
+    instead of the code that caught it."""
+    with refused:
+        return refused.code
+
+
 def _read[M: BaseModel](daemon: DaemonSettings, path: str, method: str, model: type[M]) -> M | None:
     """What the Daemon answers at ``path``, as ``model``, or nothing when nothing answered."""
     request = urllib.request.Request(  # noqa: S310
@@ -162,6 +169,9 @@ def _read[M: BaseModel](daemon: DaemonSettings, path: str, method: str, model: t
         with urllib.request.urlopen(request, timeout=TIMEOUT) as answer:  # noqa: S310
             body: bytes = answer.read()
         return model.model_validate_json(body)
+    except urllib.error.HTTPError as refused:
+        _closed(refused)
+        return None
     except (OSError, ValidationError, ValueError):
         return None
 
@@ -175,6 +185,9 @@ def stop_daemon(config_dir: Path) -> bool:
     try:
         with urllib.request.urlopen(request, timeout=TIMEOUT):  # noqa: S310
             pass
+    except urllib.error.HTTPError as refused:
+        _closed(refused)
+        return False
     except OSError:
         return False
     return True
