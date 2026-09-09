@@ -59,6 +59,10 @@ jobs:
           if [ "$bot" = 0 ] && [ "$found" != "$expected" ]; then
             echo "::error::body sections are not the template's, in order: expected '$expected', found '$found'"; fail=1
           fi
+          closing='\b(close[sd]?|fix(e[sd])?|resolve[sd]?):? +(#[0-9]+|[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#[0-9]+|https?://github\.com/[^ ]+/issues/[0-9]+)'
+          if [ "$bot" = 0 ] && printf '%s\n%s\n' "$TITLE" "$body" | sed -E 's/^Closes #[0-9]+//' | grep -Eiq "$closing"; then
+            echo "::error::a closing word before a ticket reference, in the title or outside the Closes lines; GitHub would close that ticket on merge"; fail=1
+          fi
           files=$(git diff --name-only "$(git merge-base "$BASE" "$HEAD")" "$HEAD")
           code=$(printf '%s\n' "$files" | grep -Ec '^(src|tests)/' || true)
           rulefiles=$(printf '%s\n' "$files" | grep -Ec '^(CONTRIBUTING\.md|CLAUDE\.md|release-please-config\.json|\.release-please-manifest\.json)$|^\.github/' || true)
@@ -124,5 +128,15 @@ jobs:
       - run: uv run pyright
       - run: uv run vulture src tests --min-confidence 80
       - run: uv run pytest
+        env:
+          HYPOTHESIS_PROFILE: ci
+      - name: The package builds, the wheel it built installs, and --help runs on it
+        run: |
+          RUNNER_TEMP="${RUNNER_TEMP:-$(mktemp -d)}"
+          uv build --out-dir "$RUNNER_TEMP/dist"
+          UV_TOOL_DIR="$RUNNER_TEMP/tools" UV_TOOL_BIN_DIR="$RUNNER_TEMP/bin" uv tool install "$RUNNER_TEMP"/dist/*.whl
+          "$RUNNER_TEMP/bin/mcpshape" --help > /dev/null
+      - name: The tests once more on Python 3.14, last, since this rebuilds the environment
+        run: uv run --python 3.14 --locked pytest
         env:
           HYPOTHESIS_PROFILE: ci
