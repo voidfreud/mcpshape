@@ -131,7 +131,8 @@ def page_status(config_dir: Path) -> int | None:
         with urllib.request.urlopen(request, timeout=TIMEOUT) as answer:  # noqa: S310
             return int(answer.status)
     except urllib.error.HTTPError as refused:
-        return refused.code
+        with refused:
+            return refused.code
     except OSError:
         return None
 
