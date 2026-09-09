@@ -10,10 +10,11 @@ the environment the Upstream file asks for, and that a connect given up on leave
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import signal
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
 
 from fastmcp import Client
 from mcp_types import TextContent
@@ -92,6 +93,37 @@ async def test_two_proxies_and_several_sessions_share_one_child_process(
     await until(
         lambda: not child_upstream.alive(started[-1]), "the child going with the connection"
     )
+
+
+async def test_many_sessions_across_two_proxies_call_one_child_at_once(
+    config_dir: ConfigDir,
+) -> None:
+    """The one connection an Upstream has carries every session's calls together: none waits
+    for another, and one child answers them all."""
+    config_dir.add_stdio_upstream("child", child_upstream.command(), child_upstream.args())
+    config_dir.add_proxy("child", "review")
+    paths = ["/child/mcp", "/child/review/mcp"] * 4
+
+    async with running_daemon(config_dir) as daemon, contextlib.AsyncExitStack() as sessions:
+        clients = [await sessions.enter_async_context(daemon.client(path)) for path in paths]
+        answers = await asyncio.gather(
+            *(client.call_tool("slow", {"seconds": 0.4}) for client in clients)
+        )
+    reports = [reported(answer.structured_content) for answer in answers]
+
+    assert len(reports) == len(paths)
+    assert len({report["pid"] for report in reports}) == 1, "the sessions reached more than one child"
+    assert max(report["started"] for report in reports) < min(
+        report["ended"] for report in reports
+    ), "the calls queued behind each other instead of overlapping"
+
+
+def reported(content: dict[str, Any] | None) -> dict[str, float]:
+    """What the child's ``slow`` tool answered, unwrapped from the result FastMCP wraps it in."""
+    assert content is not None
+    report = content.get("result", content)
+    assert isinstance(report, dict)
+    return {str(key): float(value) for key, value in cast("dict[str, Any]", report).items()}
 
 
 async def test_a_child_process_is_given_the_environment_the_upstream_file_asks_for(

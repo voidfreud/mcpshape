@@ -578,6 +578,38 @@ async def test_a_stdio_child_gets_a_safe_slice_of_the_environment_plus_what_it_i
         ).data == ""
 
 
+async def test_one_stdio_session_carries_calls_that_overlap() -> None:
+    """Why one child process can serve every Proxy and every Client session at once.
+
+    The stdio client sends each request as it comes, under its own JSON-RPC id, and the
+    server runs each request as a task of its own, a sync tool in a worker thread; so calls
+    made together on one session are in flight together and finish in about one call's time.
+    """
+    transport = StdioTransport(
+        command=child_upstream.command(),
+        args=child_upstream.args(),
+        env=child_upstream.env(),
+        keep_alive=False,
+    )
+    async with Client(transport) as client:
+        answers = await asyncio.gather(
+            *(client.call_tool("slow", {"seconds": 0.4}) for _ in range(8))
+        )
+    reports = [reported(answer.structured_content) for answer in answers]
+    assert len({report["pid"] for report in reports}) == 1
+    assert max(report["started"] for report in reports) < min(
+        report["ended"] for report in reports
+    ), "the calls queued instead of overlapping"
+
+
+def reported(content: dict[str, Any] | None) -> dict[str, float]:
+    """What the ``slow`` tool answered, unwrapped from the result FastMCP wraps it in."""
+    assert content is not None
+    report = content.get("result", content)
+    assert isinstance(report, dict)
+    return {str(key): float(value) for key, value in cast("dict[str, Any]", report).items()}
+
+
 async def test_a_client_raises_when_nothing_serves_the_url() -> None:
     """A connect that finds nothing raises, which is what a scan and a connect turn into a
     warning and an unavailable Upstream."""

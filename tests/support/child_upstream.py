@@ -98,6 +98,15 @@ def die() -> int:
 
 
 @child.tool
+def slow(seconds: float) -> dict[str, float]:
+    """Wait ``seconds``, then say when this call started and ended, on this process's clock,
+    and which process it was: whether calls made together overlap or queue is in the numbers."""
+    started = time.monotonic()
+    time.sleep(seconds)
+    return {"pid": float(os.getpid()), "started": started, "ended": time.monotonic()}
+
+
+@child.tool
 def env_value(name: str) -> str:
     """What this process's environment holds under ``name``, or an empty string."""
     return os.environ.get(name, "")
