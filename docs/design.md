@@ -154,7 +154,7 @@ boundary, and the Keeper's fault injection.
   code fails: the first confuses Clients, the second silently skips rewrites.
 - pip and pipx as documented install paths: uv only.
 - A Homebrew tap: its formula pins every dependency by hand and drifts from the lock file on
-  each release, and no tool regenerates it from the lock. Tried and withdrawn on 2026-09-09.
+  each release, and no tool regenerates it from the lock.
 - Merging Upstreams into one Proxy; see above.
 
 ## Parked
