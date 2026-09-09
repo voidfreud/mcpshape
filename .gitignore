@@ -11,9 +11,6 @@ build/
 .mypy_cache/
 .pyright/
 
-# Node (dashboard)
-node_modules/
-
 # OS / editors
 .DS_Store
 .idea/

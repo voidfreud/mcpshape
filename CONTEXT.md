@@ -19,7 +19,7 @@ An application that connects to a Proxy and lets a model use it, such as Claude 
 _Avoid_: app, host, harness, consumer
 
 **Client Profile**:
-What mcpshape knows about one kind of Client: its limits, where its configuration lives, what transports it accepts, and what conveniences it offers.
+What mcpshape knows about one kind of Client: its limits, where its configuration lives, what transports it accepts, and what conveniences it offers. Profile, for short.
 _Avoid_: integration, target, harness config
 
 **Catalog**:
@@ -49,6 +49,10 @@ _Avoid_: diff, change, delta, update
 **Daemon**:
 The single long-running mcpshape process.
 _Avoid_: server, service, agent, engine
+
+**Keeper**:
+The task the Daemon runs beside one Upstream's connection: the idle disconnect, the ping of a warm Upstream, and the retry when a backoff runs out.
+_Avoid_: supervisor, watchdog, monitor, reconnector
 
 **Exposed set**:
 What a Proxy advertises to Clients: the accepted Catalog after Overrides and Caps, plus its Virtual Tools. An item's exposed name is what a Client sees; its Catalog name is its identity everywhere else.

@@ -18,9 +18,10 @@ file; a remark in a session changes nothing.
 - **Frontier**: the tickets that can be landed now: open, `ready`, unblocked, unassigned, not a parent.
 - **Code**: anything under `src/` or `tests/`. **Rule files**: `CONTRIBUTING.md`, `CLAUDE.md`,
   everything under `.github/`, `release-please-config.json`, and `.release-please-manifest.json`.
+  `CONTEXT.md`, the design brief, the facts file, and the README are not rule files, so a wave
+  changes them together with its code.
 
-Names and wording, in tickets, pull requests, code, and every Markdown file but the transcripts
-under `docs/sessions/`, follow `CONTEXT.md`.
+Names and wording, in tickets, pull requests, code, and every Markdown file, follow `CONTEXT.md`.
 
 ## Tickets
 
@@ -63,27 +64,33 @@ under `docs/sessions/`, follow `CONTEXT.md`.
 2. **Branch** from `main`: `<type>/<slug>`, the type from the list below, the slug lowercase
    letters, digits, and hyphens, at most 40 characters. One branch per wave.
 3. **Implement** on the branch. No rule constrains the commits on the branch, their messages or their number; the
-   pull request is what lands. Before review, the commands CI's `test` job runs are green locally:
+   pull request is what lands. Before review, the commands CI's `test` job runs are green locally;
+   CI runs the same with `HYPOTHESIS_PROFILE=ci`, more examples:
    `uv lock --check && uv sync --locked && uv run ruff check . && uv run ruff format --check . && uv run pyright && uv run vulture src tests --min-confidence 80 && uv run pytest`
 4. **Review** on the branch, before the pull request opens, by a reviewer that did not write
    the code, on the whole diff:
    - spec: each ticket's acceptance criteria, met or not, with evidence; and nothing built that
      no ticket asked for;
-   - standards: this file, `CONTEXT.md` (terms and Avoid lists, in names and in text), the
-     design brief and the ADRs `CLAUDE.md` names, duplication;
+   - standards: this file, `CONTEXT.md` (terms and Avoid lists, in names and in text), and,
+     as `CLAUDE.md` names them, the design brief (a decision the diff breaks, or changes without
+     editing the brief), the facts file (a fact the diff rests on that it does not date), and
+     the README (a command the diff removed or changed); duplication;
    - rules, when a rule file changed: every rule once, no two in conflict, none ambiguous, none
-     unenforced that could be.
+     unenforced that could be, and the skills that execute this file still agree with it.
    Every finding is fixed on the branch or answered; none is deferred. The session landing the
    wave reads the riskiest file itself, whoever wrote it.
 5. **File follow-ups** for everything seen and not fixed.
-6. **Pull request**: title `<type>: <subject>`, at most 72 characters, no trailing period. Body
+6. **Pull request**: title `<type>: <subject>`, the type the branch's, at most 72 characters, no
+   trailing period. Body
    from the template, every section in order, then one `Closes #<n>` line per ticket; a wave that
    closes no ticket has none. Rule files and code never change in one pull request.
 7. **Checks**: wait for the CI run of the pushed head as its own step after the push has
    succeeded. A red check is fixed on the branch and pushed. When `main` has moved, the branch
    is brought up to date with `gh pr update-branch <n>`; nothing is ever force-pushed.
-8. **Merge** by squash once every check is green: `gh pr merge <n> --squash`. The squash
-   commit's subject is the title and its body is the pull request body. The branch is deleted.
+8. **Merge** by squash once every check is green, by the maintainer, or by the session once the
+   maintainer has said so, at the start of the wave or after its report: `gh pr merge <n> --squash`.
+   The squash commit's subject is the title and its body is the pull request body. The branch
+   is deleted.
 9. **Close**: the merge closes the tickets. If a parent's last sub-issue just closed, close the
    parent. Nothing else is written to any ticket.
 
@@ -125,15 +132,17 @@ workflow: a pull request it opened gets no checks, and a merge it performed runs
 - Nothing is done on GitHub outside the steps above. Anything else is asked first.
 - The skills `/ticket`, `/land`, `/review`, and `/scaffold` are the executable form of this
   file. They live in the maintainer's global skills directory, not in this repository, and hold
-  steps, not rules; where a skill and this file differ, this file wins and the skill is fixed.
+  steps, not rules; where a skill and this file differ, this file wins and the skill is fixed in
+  the same wave.
 
 ## Records
 
 The pull request is the record of a wave: what changed, how it was tested, what review found.
 GitHub links each closed ticket to it. Nothing is written a second time on the ticket or
-anywhere else. A dated fact is recorded in the document `CLAUDE.md` names for facts; a
-hard-to-reverse design decision is an ADR, where `CLAUDE.md` says they live. A tag `baseline-<date>`
-marks a state the maintainer wants to find again; a tag `vX.Y.Z` is a release.
+anywhere else. A dated fact is recorded in the facts file `CLAUDE.md` names; a decision that
+changes what the design brief holds is written into the brief by the wave that changes it.
+The README shows only what exists. A tag `baseline-<date>` marks a state the maintainer wants
+to find again; a tag `vX.Y.Z` is a release.
 
 ## Enforced
 
@@ -141,8 +150,9 @@ marks a state the maintainer wants to find again; a tag `vX.Y.Z` is a release.
 | --- | --- |
 | Pull requests only; squash only; linear history; every check green and up to date; no bypass | ruleset `protect-main` |
 | Squash subject is the title, body is the body; branch deleted on merge | repository settings |
-| Branch is `<type>/<slug>`; title is `type: subject`, at most 72 characters, no trailing period; a bot's pull request is exempt from the branch, body, and `Closes` checks | CI, job `rules` |
+| Branch is `<type>/<slug>`; title is `type: subject` with the branch's type, at most 72 characters, no trailing period; a bot's pull request is exempt from the branch, body, and `Closes` checks | CI, job `rules` |
 | Body has the template's sections in order; `Closes #<n>` when code changed; every `Closes` ticket is open, `ready`, assigned to the author, and not a parent; rule files and code never in one pull request; release-please's files written by release-please alone | CI, job `rules` |
+| Every command the README shows exists | CI, job `rules` |
 | Ticket sections and labels, checked on every open and edit, one comment until they pass | CI, workflow `Issue` |
 | Lint, format, types, tests, lock file, dead code | CI, job `test` |
 | Dependabot's minor and patch updates merge by themselves when green, and every open one is asked to rebase on each push to `main` | CI, workflow `Bots` |
