@@ -111,7 +111,13 @@ to date like any pull request.
   its checks rerun on the new `main`.
 - release-please keeps one release pull request open whenever an unreleased `feat`, `fix`,
   `perf`, or `revert` commit exists, holding the version bump and the changelog; commits of the
-  other types ship inside the next such release. The maintainer merges it, or tells a session
+  other types ship inside the next such release. The version is what those commits compute,
+  unless the maintainer names one with `release-as` in the release config, for that one release,
+  removed by the wave after. The changelog begins at the commit the config names as
+  `bootstrap-sha`, the workflow's first; what came before is in the tracker. The lock file
+  records the version, so once release-please has opened or updated its pull request, the
+  `Release` workflow refreshes the lock on that branch and pushes it with the bot token. The
+  maintainer merges the pull request, or tells a session
   to. The merge creates the tag `vX.Y.Z` and the GitHub release, and the `Publish` workflow
   ships that release to PyPI; a `Publish` run that failed is rerun from the Actions page.
   `CHANGELOG.md`, `.release-please-manifest.json`, and the version in `pyproject.toml` are
@@ -156,4 +162,4 @@ to find again; a tag `vX.Y.Z` is a release.
 | Ticket sections and labels, checked on every open and edit, one comment until they pass | CI, workflow `Issue` |
 | Lint, format, types, tests, lock file, dead code | CI, job `test` |
 | Dependabot's minor and patch updates merge by themselves when green, and every open one is asked to rebase on each push to `main` | CI, workflow `Bots` |
-| The release pull request exists; merging it tags, releases, and publishes | CI, workflows `Release` and `Publish` |
+| The release pull request exists and its lock file records its version; merging it tags, releases, and publishes | CI, workflows `Release` and `Publish` |
