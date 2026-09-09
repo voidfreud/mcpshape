@@ -13,7 +13,7 @@ jobs:
     timeout-minutes: 3
     steps:
       - name: Body sections and labels follow CONTRIBUTING.md
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         with:
           script: |
             const issue = context.payload.issue;
