@@ -65,7 +65,8 @@ Names and wording, in tickets, pull requests, code, and every Markdown file, fol
    letters, digits, and hyphens, at most 40 characters. One branch per wave.
 3. **Implement** on the branch. No rule constrains the commits on the branch, their messages or their number; the
    pull request is what lands. Before review, the commands CI's `test` job runs are green locally;
-   CI runs the same with `HYPOTHESIS_PROFILE=ci`, more examples:
+   CI runs the same, then the tests once more on Python 3.14, both with `HYPOTHESIS_PROFILE=ci`,
+   more examples:
    `uv lock --check && uv sync --locked && uv run ruff check . && uv run ruff format --check . && uv run pyright && uv run vulture src tests --min-confidence 80 && uv run pytest`
 4. **Review** on the branch, before the pull request opens, by a reviewer that did not write
    the code, on the whole diff:
@@ -83,7 +84,10 @@ Names and wording, in tickets, pull requests, code, and every Markdown file, fol
 6. **Pull request**: title `<type>: <subject>`, the type the branch's, at most 72 characters, no
    trailing period. Body
    from the template, every section in order, then one `Closes #<n>` line per ticket; a wave that
-   closes no ticket has none. Rule files and code never change in one pull request.
+   closes no ticket has none, and neither the title nor any other line puts a closing word before
+   a ticket reference, any `#<n>`, since the squash commit is the title and the body and GitHub
+   closes on that pattern wherever it stands. Rule files and code never change in one pull
+   request.
 7. **Checks**: wait for the CI run of the pushed head as its own step after the push has
    succeeded. A red check is fixed on the branch and pushed. When `main` has moved, the branch
    is brought up to date with `gh pr update-branch <n>`; a session never force-pushes.
@@ -101,29 +105,29 @@ Types: `build`, `chore`, `ci`, `docs`, `feat`, `fix`, `perf`, `refactor`, `rever
 
 Two bots open pull requests of their own. A bot's pull request is not a wave: nothing is
 claimed, branched, reviewed, or filed for it, and it closes no ticket. The `rules` job exempts
-its branch, `dependabot/*` or `release-please--*`, from the branch, type, body, `Closes`, and
-release-please-file checks and from nothing else; every other check applies, and it merges
-green and up to date like any pull request.
+its branch, `dependabot/*` or `release-please--*`, from the branch, type, body-section,
+closing-word, `Closes`, and release-please-file checks and from nothing else; every other check
+applies, and it merges green and up to date like any pull request.
 
 - Dependabot, weekly and grouped: a minor or patch update merges by itself once its checks are
   green; a major update opens as its own pull request and stays open until the maintainer
   decides. On every push to `main`, every open Dependabot pull request is asked to rebase, so
   its checks rerun on the new `main`.
-- release-please keeps one release pull request open whenever an unreleased `feat`, `fix`,
-  `perf`, or `revert` commit exists, holding the version bump and the changelog; commits of the
-  other types ship inside the next such release. The version is what those commits compute,
-  unless the maintainer names one: a rules wave sets `release-as` in the release config, and a
-  wave removes it once that release exists, or when the maintainer withdraws the name. The
-  changelog begins at the commit the config names as `bootstrap-sha`, the one that put the
-  workflow in this file, read only until the first release exists; what came before is in the
-  tracker. The lock file records the version, so once release-please has opened or updated its
-  pull request, the `Release` workflow refreshes the lock on that branch and pushes it with the
-  bot token, and the checks rerun. The maintainer merges the pull request, or tells a session
-  to. The merge creates the tag `vX.Y.Z` and the GitHub release, and the `Publish` workflow
-  ships that release to PyPI; a `Publish` run that failed is rerun from the Actions page.
-  `CHANGELOG.md`, `.release-please-manifest.json`, and the version in `pyproject.toml` are
-  written by release-please alone, and its two `autorelease:` labels are its own, on its pull
-  requests only.
+- release-please keeps one release pull request open whenever an unreleased commit of a type its
+  changelog shows exists, `feat`, `fix`, `perf`, `revert`, or `docs`, holding the version bump
+  and the changelog; commits of the other types ship inside the next such release. The version
+  is what those commits compute, unless the maintainer names one: a rules wave sets `release-as`
+  in the release config, and a wave removes it once that release exists, or when the maintainer
+  withdraws the name. The changelog begins at the commit the config names as `bootstrap-sha`,
+  the one that put the workflow in this file, read only until the first release exists; what
+  came before is in the tracker. The lock file records the version, so once release-please has
+  opened or updated its pull request, the `Release` workflow refreshes the lock on that branch
+  and pushes it with the bot token, and the checks rerun. The maintainer merges the pull
+  request, or tells a session to. The merge creates the tag `vX.Y.Z` and the GitHub release, and
+  the `Publish` workflow ships that release to PyPI; a `Publish` run that failed is rerun from
+  the Actions page. `CHANGELOG.md`, `.release-please-manifest.json`, and the version in
+  `pyproject.toml` are written by release-please alone, and its two `autorelease:` labels are
+  its own, on its pull requests only.
 
 The bots' workflows run with the `BOT_TOKEN` secret, a fine-grained token with contents and
 pull requests read and write, since anything done with GitHub's own token triggers no
@@ -157,11 +161,11 @@ to find again; a tag `vX.Y.Z` is a release.
 | --- | --- |
 | Pull requests only; squash only; linear history; every check green and up to date; no bypass | ruleset `protect-main` |
 | Squash subject is the title, body is the body; branch deleted on merge | repository settings |
-| Branch is `<type>/<slug>`; title is `type: subject` with the branch's type, at most 72 characters, no trailing period; a bot's pull request is exempt from the branch, type, body, `Closes`, and release-please-file checks | CI, job `rules` |
-| Body has the template's sections in order; `Closes #<n>` when code changed; every `Closes` ticket is open, `ready`, assigned to the author, and not a parent; rule files and code never in one pull request; release-please's files written by release-please alone | CI, job `rules` |
+| Branch is `<type>/<slug>`; title is `type: subject` with the branch's type, at most 72 characters, no trailing period; a bot's pull request is exempt from the branch, type, body-section, closing-word, `Closes`, and release-please-file checks | CI, job `rules` |
+| Body has the template's sections in order; `Closes #<n>` when code changed, and no closing word before a ticket reference in the title or elsewhere; every `Closes` ticket is open, `ready`, assigned to the author, and not a parent; rule files and code never in one pull request; release-please's files written by release-please alone | CI, job `rules` |
 | Every command the README shows exists | CI, job `rules` |
 | Ticket sections and labels, checked on every open and edit, one comment until they pass | CI, workflow `Issue` |
-| Lint, format, types, tests, lock file, dead code | CI, job `test` |
+| Lint, format, types, lock file, dead code; tests on Python 3.12 and 3.14 | CI, job `test` |
 | Dependabot's minor and patch updates merge by themselves when green, and every open one is asked to rebase on each push to `main` | CI, workflow `Bots` |
 | `release-as`, when set, names a version above the last release | CI, job `rules` |
 | The release pull request exists; merging it tags, releases, and publishes | CI, workflows `Release` and `Publish` |
