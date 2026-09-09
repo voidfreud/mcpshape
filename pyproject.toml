@@ -1,6 +1,6 @@
 [project]
 name = "mcpshape"
-version = "0.1.0"
+version = "0.1.1"
 description = "A local proxy that reshapes what MCP servers expose."
 readme = "README.md"
 license = "MIT"
