@@ -22,3 +22,39 @@ jobs:
       - run: uv build
       - name: Publish to PyPI through trusted publishing
         uses: pypa/gh-action-pypi-publish@release/v1
+  tap:
+    needs: pypi
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+    steps:
+      - name: The tap's formula names the release's source distribution on PyPI
+        if: env.BOT_TOKEN != ''
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ github.repository_owner }}/homebrew-mcpshape
+          token: ${{ secrets.BOT_TOKEN }}
+      - if: env.BOT_TOKEN != ''
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          version=${TAG#v}
+          for _ in $(seq 1 20); do
+            json=$(curl --fail --silent --show-error "https://pypi.org/pypi/mcpshape/$version/json") && break
+            sleep 15
+          done
+          [ -n "$json" ] || { echo "::error::PyPI does not list mcpshape $version"; exit 1; }
+          url=$(jq -r '.urls[] | select(.packagetype == "sdist") | .url' <<<"$json")
+          sha=$(jq -r '.urls[] | select(.packagetype == "sdist") | .digests.sha256' <<<"$json")
+          if [ -z "$url" ] || [ -z "$sha" ]; then echo "::error::PyPI lists no source distribution for mcpshape $version"; exit 1; fi
+          sed -i "s|^  url \".*\"$|  url \"$url\"|; s|^  sha256 \".*\"$|  sha256 \"$sha\"|" Formula/mcpshape.rb
+          if ! grep -q "^  url \"$url\"$" Formula/mcpshape.rb || ! grep -q "^  sha256 \"$sha\"$" Formula/mcpshape.rb; then
+            echo "::error::the formula's url and sha256 lines were not rewritten"; exit 1
+          fi
+          if ! git diff --quiet -- Formula/mcpshape.rb; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git commit -m "mcpshape $version" -- Formula/mcpshape.rb
+            git push
+          fi

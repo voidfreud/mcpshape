@@ -138,15 +138,19 @@ any pull request, which the workflows below keep it. They alone write to a bot's
   refreshes the lock on its branch, since the lock records the version, pushing with the bot
   token so the checks rerun. The maintainer merges the pull request, or tells a session to. The
   merge creates the tag `vX.Y.Z` and the GitHub release, and the `Publish` workflow ships that
-  release to PyPI; a `Publish` run that failed is rerun from the Actions page. `CHANGELOG.md`,
+  release to PyPI, then bumps the Homebrew tap's formula, in `voidfreud/homebrew-mcpshape`, to
+  it: the `url` and `sha256` of the source distribution as PyPI records them, pushed to the tap
+  with the bot token; the formula's resources change by hand, since a dependency change is a
+  lock change. A `Publish` run that failed is rerun from the Actions page. `CHANGELOG.md`,
   `.release-please-manifest.json`, and the version in `pyproject.toml` are written by
   release-please alone, and its two `autorelease:` labels are its own, on its pull requests
   only.
 
 The bots' workflows run with the `BOT_TOKEN` secret, a fine-grained token with contents and
-pull requests read and write, since anything done with GitHub's own token triggers no
-workflow: a pull request it opened gets no checks, and a merge it performed runs nothing on
-`main`. Without the secret the bots' workflows do nothing and fail nothing.
+pull requests read and write on this repository and on the tap, since anything done with
+GitHub's own token triggers no workflow: a pull request it opened gets no checks, and a merge
+it performed runs nothing on `main`. Without the secret the bots' workflows do nothing and
+fail nothing.
 
 ## Sessions and agents
 
@@ -183,3 +187,4 @@ to find again; a tag `vX.Y.Z` is a release.
 | Dependabot's minor and patch updates merge by themselves when green, and every open one is asked to rebase on each push to `main` | CI, workflow `Bots` |
 | `release-as`, when set, names a version above the last release | CI, job `rules` |
 | The release pull request exists and is brought up to date with `main` on every push to it; merging it tags, releases, and publishes | CI, workflows `Release` and `Publish` |
+| The tap's formula names the release `Publish` shipped | CI, workflow `Publish` |
