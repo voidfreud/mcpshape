@@ -1,8 +1,8 @@
 # Client and FastMCP facts
 
 Dated facts about Clients and about FastMCP that mcpshape's decisions rest on. This file is
-expected to change without touching the design brief or the ADRs. Client entries are the seed
-data for Client Profiles. Checked 2026-09-06/07 against primary documentation.
+expected to change without touching the design brief. Client entries are the seed data for
+Client Profiles. Checked 2026-09-06/07 against primary documentation.
 
 ## Clients
 
@@ -10,7 +10,9 @@ data for Client Profiles. Checked 2026-09-06/07 against primary documentation.
 - Streamable HTTP accepted by: Claude Code, Claude Desktop (Connectors UI only, not its config
   file), Cursor, Windsurf, VS Code, Gemini CLI, Codex CLI, Goose, JetBrains, Cline, Continue,
   OpenCode.
-- stdio only: Zed. Claude Desktop's config file. Both need the Shim to reach an HTTP server.
+- stdio only: Claude Desktop's config file, and Zed as far as confirmed: its docs also show a
+  remote entry taking `url`, unconfirmed against a second reading, so the Zed Profile writes
+  the Shim entry until that is settled. Both need the Shim to reach an HTTP server.
 - Remote HTTPS only: ChatGPT.
 
 ### Behavior
@@ -59,8 +61,7 @@ data for Client Profiles. Checked 2026-09-06/07 against primary documentation.
 - Codex CLI: `~/.codex/config.toml`, `[mcp_servers.<name>]`.
 - Goose: YAML `extensions:` block. Cline: `cline_mcp_settings.json`.
   Continue: `config.yaml`. OpenCode: `opencode.json`.
-- Checked 2026-09-08 for ticket #23; the first two are primary-doc facts, the last two are
-  mcpshape's own decisions, recorded here so the Profiles and the scan agree:
+- Checked 2026-09-08 for `upstream scan`:
   - Claude Code's `local` scope nests per-project servers in the same `~/.claude.json` as the
     `user` scope, under `projects.<absolute project dir>.mcpServers`, one map per project
     directory, sibling to the top-level `mcpServers` the `user` scope writes.
@@ -70,12 +71,6 @@ data for Client Profiles. Checked 2026-09-06/07 against primary documentation.
     help-center articles, or the enterprise-configuration article) documents a config file
     path for `claude_desktop_config.json` on Linux; only macOS's path is documented. Not added
     to the Claude Desktop Profile.
-  - Goose and Continue stay YAML-only: mcpshape carries no YAML dependency for a listing, so
-    their files are reported as found and unread, by name (decision recorded in each Profile's
-    `notes`).
-  - `discovery.py`'s `list` entry shape (`Profile.entry_shape = "list"`) is unreachable from
-    `upstream scan`: the only list-shaped Client, Continue, is YAML and so is never parsed.
-    Left as-is; it becomes reachable the day a JSON- or TOML-shaped list Client is added.
 
 ### Config file shapes (checked 2026-09-07, primary docs)
 What `proxy install` has to write. Where nothing is listed here, no primary source was found
@@ -84,9 +79,8 @@ and the Profile writes the common `mcpServers` + `{"type": "http", "url": ...}` 
   entry is `{"type": "http", "url": "..."}`.
   (code.visualstudio.com/docs/agents/reference/mcp-configuration)
 - Zed: a `context_servers` entry needs only `command`/`args`/`env`; no `source` field is
-  required. Its docs now also show a remote entry taking `url` (plus optional `headers`),
-  which contradicts "stdio only" above. Unconfirmed against a second reading, so the Zed
-  Profile still writes the shim entry; settle this before changing it.
+  required. The remote entry its docs show takes `url` plus optional `headers`; see
+  Transports for why the Profile does not write it yet.
   (zed.dev/docs/ai/mcp, and `docs/src/ai/mcp.md` in zed-industries/zed)
 - OpenCode: the top-level key of `opencode.json` is `mcp`; a remote entry is
   `{"type": "remote", "url": "...", "enabled": true}`. (opencode.ai/docs/mcp-servers/)
@@ -132,8 +126,7 @@ and the Profile writes the common `mcpServers` + `{"type": "http", "url": ...}` 
   app from an `httpx2.AsyncClient`, streaming responses, so a FastMCP `Client` can reach
   `http_app()` with no sockets via `httpx_client_factory`. The factory is called with
   `follow_redirects` on top of what `McpHttpClientFactory` declares.
-- Client transports: stdio, Streamable HTTP, SSE, in-memory. OAuth client built in; tokens
-  in-memory by default, persistence must be supplied.
+- Client transports: stdio, Streamable HTTP, SSE, in-memory.
 - Protocol is sessionless by default in 4.x; server-initiated sampling and roots are removed,
   elicitation is gated.
 - `ping` exists only in the legacy protocol era (checked 2026-09-07, 4.0.3). A plain `Client`
@@ -154,7 +147,7 @@ and the Profile writes the common `mcpServers` + `{"type": "http", "url": ...}` 
   cannot push the change to an idle Client.
 - What Hooks and Virtual Tools rest on (checked 2026-09-07, 4.0.3). `FunctionTool.from_function`
   builds a subclass instance (`cls(...)`) from a plain function: name, docstring as description,
-  input schema from the signature; `run_in_thread=False` runs a sync function inline. Its `run`
+  input schema from the signature. Its `run`
   routes the body's return through `convert_result`, so a subclass can accept its own result
   type. A FastMCP tool returning one value advertises an output schema marked
   `x-fastmcp-wrap-result` with the value under `result`, and the MCP client refuses a result

@@ -19,8 +19,7 @@ file; a remark in a session changes nothing.
 - **Code**: anything under `src/` or `tests/`. **Rule files**: `CONTRIBUTING.md`, `CLAUDE.md`,
   everything under `.github/`, `release-please-config.json`, and `.release-please-manifest.json`.
 
-Names and wording, in tickets, pull requests, code, and every Markdown file but the transcripts
-under `docs/sessions/`, follow `CONTEXT.md`.
+Names and wording, in tickets, pull requests, code, and every Markdown file, follow `CONTEXT.md`.
 
 ## Tickets
 
@@ -70,7 +69,7 @@ under `docs/sessions/`, follow `CONTEXT.md`.
    - spec: each ticket's acceptance criteria, met or not, with evidence; and nothing built that
      no ticket asked for;
    - standards: this file, `CONTEXT.md` (terms and Avoid lists, in names and in text), the
-     design brief and the ADRs `CLAUDE.md` names, duplication;
+     design brief, the facts file, and the README `CLAUDE.md` names, duplication;
    - rules, when a rule file changed: every rule once, no two in conflict, none ambiguous, none
      unenforced that could be.
    Every finding is fixed on the branch or answered; none is deferred. The session landing the
@@ -132,8 +131,9 @@ workflow: a pull request it opened gets no checks, and a merge it performed runs
 The pull request is the record of a wave: what changed, how it was tested, what review found.
 GitHub links each closed ticket to it. Nothing is written a second time on the ticket or
 anywhere else. A dated fact is recorded in the document `CLAUDE.md` names for facts; a
-hard-to-reverse design decision is an ADR, where `CLAUDE.md` says they live. A tag `baseline-<date>`
-marks a state the maintainer wants to find again; a tag `vX.Y.Z` is a release.
+decision that changes what the design brief holds is written there by the wave that changes
+it. A tag `baseline-<date>` marks a state the maintainer wants to find again; a tag `vX.Y.Z`
+is a release.
 
 ## Enforced
 

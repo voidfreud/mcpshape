@@ -1,12 +1,35 @@
 # mcpshape
 
-A local proxy that reshapes what MCP servers expose. The user guide is `docs/guide.md`;
-the design brief is `docs/DESIGN.md`; how work lands is `CONTRIBUTING.md`.
+Reshape what MCP servers expose before a model sees it.
 
-## Develop
+An MCP server as shipped offers every tool it has, described at whatever length its author
+chose, and most Clients take it whole or not at all. mcpshape is a local proxy between the
+servers you use and the Clients that use them. You add a server once as an Upstream, and
+mcpshape serves one or more Proxies for it, each a curated MCP server of its own: tools
+hidden, renamed, re-described, capped, rewritten in Python, or added, before a model sees
+them. Clients are pointed at the Proxy.
+
+## Install
+
+Releases go to PyPI:
 
 ```
-uv sync
+uv tool install mcpshape
 ```
 
-The checks to run, and the way from ticket to merge, are in `CONTRIBUTING.md`.
+Python 3.12 or newer, macOS or Linux. mcpshape makes no network call except to your
+Upstreams. From a checkout, `uv sync` and `uv run mcpshape`.
+
+## First steps
+
+```
+mcpshape add github --stdio 'npx -y @modelcontextprotocol/server-github'
+mcpshape upstream sync github
+mcpshape tool hide github/default create_gist
+mcpshape proxy install github/default --to claude-code
+mcpshape daemon up
+```
+
+Every command explains itself with an example: `mcpshape --help`, and `--help` on any command.
+
+How work lands is `CONTRIBUTING.md`.
