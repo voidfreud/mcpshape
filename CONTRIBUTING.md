@@ -77,7 +77,11 @@ Names and wording, in tickets, pull requests, code, and every Markdown file, fol
      editing the brief), the facts file (a fact the diff rests on that it does not date), and
      the README (a command the diff removed or changed); duplication;
    - rules, when a rule file changed: every rule once, no two in conflict, none ambiguous, none
-     unenforced that could be, and the skills that execute this file still agree with it.
+     unenforced that could be, and the skills that execute this file still agree with it;
+   - adversarial, when code changed: every way the diff can be made to do what a ticket or the
+     brief says it must not, each with the inputs or the sequence that does it, the criterion or
+     decision it contradicts, and the test that would pin it; a finding without that sequence is
+     not one, and a confirmed one lands with its test in the same wave.
    Every finding is fixed on the branch or answered; none is deferred. The session landing the
    wave reads the riskiest file itself, whoever wrote it.
 5. **File follow-ups** for everything seen and not fixed.
