@@ -19,7 +19,7 @@ file; a remark in a session changes nothing.
 - **Code**: anything under `src/` or `tests/`. **Rule files**: `CONTRIBUTING.md`, `CLAUDE.md`,
   everything under `.github/`, `release-please-config.json`, and `.release-please-manifest.json`.
   `CONTEXT.md`, the design brief, the facts file, and the README are not rule files, so a wave
-  changes them together with its code.
+  changes them together with its code, or with its rule files.
 
 Names and wording, in tickets, pull requests, code, and every Markdown file, follow `CONTEXT.md`.
 
@@ -138,19 +138,20 @@ any pull request, which the workflows below keep it. They alone write to a bot's
   refreshes the lock on its branch, since the lock records the version, pushing with the bot
   token so the checks rerun. The maintainer merges the pull request, or tells a session to. The
   merge creates the tag `vX.Y.Z` and the GitHub release, and the `Publish` workflow ships that
-  release to PyPI, then bumps the Homebrew tap's formula, in `voidfreud/homebrew-mcpshape`, to
-  it: the `url` and `sha256` of the source distribution as PyPI records them, pushed to the tap
-  with the bot token; the formula's resources change by hand, since a dependency change is a
-  lock change. A `Publish` run that failed is rerun from the Actions page. `CHANGELOG.md`,
+  release to PyPI, then bumps the formula of the Homebrew tap `voidfreud/homebrew-mcpshape` to
+  that release: the `url` and `sha256` of the source distribution as PyPI records them, pushed
+  to the tap with the bot token; the formula's resources are changed by hand, with the lock
+  change that causes them. The failed job of a `Publish` run is rerun from the Actions page,
+  since its upload does not repeat. `CHANGELOG.md`,
   `.release-please-manifest.json`, and the version in `pyproject.toml` are written by
   release-please alone, and its two `autorelease:` labels are its own, on its pull requests
   only.
 
-The bots' workflows run with the `BOT_TOKEN` secret, a fine-grained token with contents and
-pull requests read and write on this repository and on the tap, since anything done with
-GitHub's own token triggers no workflow: a pull request it opened gets no checks, and a merge
-it performed runs nothing on `main`. Without the secret the bots' workflows do nothing and
-fail nothing.
+The bots' workflows and the tap bump run with the `BOT_TOKEN` secret, a fine-grained token
+with contents and pull requests read and write on this repository and contents read and write
+on the tap, since anything done with GitHub's own token triggers no workflow: a pull request
+it opened gets no checks, and a merge it performed runs nothing on `main`. Without the secret
+the bots' workflows do nothing and fail nothing, and `Publish` ships to PyPI and skips the tap.
 
 ## Sessions and agents
 

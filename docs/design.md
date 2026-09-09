@@ -124,9 +124,8 @@ build step, read-only, fed by the management API alone.
 ### Engineering
 
 uv, ruff strict, pyright strict, pytest with Hypothesis; GitHub Actions on macOS and Linux;
-Python 3.12 or newer; semver; MIT; releases to PyPI, the Homebrew tap's formula bumped to
-each; `uv tool install` or `brew install` the install path. No telemetry, no update checks, no
-network call except to configured Upstreams.
+Python 3.12 or newer; semver; MIT; releases to PyPI; `uv tool install` or `brew install` the
+install path. No telemetry, no update checks, no network call except to configured Upstreams.
 
 Tests drive the system through one seam, `tests/support/seam.py`: a temp config directory,
 the Daemon app in-process, in-memory Upstreams, a FastMCP Client over ASGI, and the CLI

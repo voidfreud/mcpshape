@@ -7,6 +7,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   pypi:
     runs-on: ubuntu-latest
@@ -29,25 +33,25 @@ jobs:
     env:
       BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
     steps:
-      - name: The tap's formula names the release's source distribution on PyPI
-        if: env.BOT_TOKEN != ''
+      - if: env.BOT_TOKEN != ''
         uses: actions/checkout@v7
         with:
           repository: ${{ github.repository_owner }}/homebrew-mcpshape
           token: ${{ secrets.BOT_TOKEN }}
-      - if: env.BOT_TOKEN != ''
+      - name: The tap's formula names the release's source distribution on PyPI
+        if: env.BOT_TOKEN != ''
         env:
           TAG: ${{ github.event.release.tag_name }}
         run: |
           version=${TAG#v}
           for _ in $(seq 1 20); do
-            json=$(curl --fail --silent --show-error "https://pypi.org/pypi/mcpshape/$version/json") && break
+            sdist=$(curl --fail --silent --show-error "https://pypi.org/pypi/mcpshape/$version/json" | jq -r '.urls[] | select(.packagetype == "sdist") | "\(.url) \(.digests.sha256)"') && [ -n "$sdist" ] && break
             sleep 15
           done
-          [ -n "$json" ] || { echo "::error::PyPI does not list mcpshape $version"; exit 1; }
-          url=$(jq -r '.urls[] | select(.packagetype == "sdist") | .url' <<<"$json")
-          sha=$(jq -r '.urls[] | select(.packagetype == "sdist") | .digests.sha256' <<<"$json")
-          if [ -z "$url" ] || [ -z "$sha" ]; then echo "::error::PyPI lists no source distribution for mcpshape $version"; exit 1; fi
+          if [ -z "$sdist" ]; then
+            echo "::error::PyPI does not list a source distribution of mcpshape $version; rerun the failed job from the Actions page once it does"; exit 1
+          fi
+          read -r url sha <<<"$sdist"
           sed -i "s|^  url \".*\"$|  url \"$url\"|; s|^  sha256 \".*\"$|  sha256 \"$sha\"|" Formula/mcpshape.rb
           if ! grep -q "^  url \"$url\"$" Formula/mcpshape.rb || ! grep -q "^  sha256 \"$sha\"$" Formula/mcpshape.rb; then
             echo "::error::the formula's url and sha256 lines were not rewritten"; exit 1
