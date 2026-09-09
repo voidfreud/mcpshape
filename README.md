@@ -11,14 +11,15 @@ them. Clients are pointed at the Proxy.
 
 ## Install
 
-Python 3.12 or newer, macOS or Linux. From this repository:
+Python 3.12 or newer, macOS or Linux.
 
 ```
-uv tool install git+https://github.com/voidfreud/mcpshape
+uv tool install mcpshape
 ```
 
-From a checkout, `uv tool install .` does the same, and `uv sync` with `uv run mcpshape` runs
-it in place. mcpshape makes no network call except to your Upstreams.
+From this repository instead, `uv tool install git+https://github.com/voidfreud/mcpshape`; from
+a checkout, `uv tool install .`, and `uv sync` with `uv run mcpshape` runs it in place. mcpshape
+makes no network call except to your Upstreams.
 
 ## First steps
 
