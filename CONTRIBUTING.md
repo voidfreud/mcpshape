@@ -98,13 +98,17 @@ Names and wording, in tickets, pull requests, code, and every Markdown file, fol
      the README (a command the diff removed or changed); duplication;
    - rules, when a rule file changed: every rule once, no two in conflict, none ambiguous, none
      unenforced that could be, and the skills that execute this file still agree with it;
-   - adversarial, when code changed: every way the diff can be made to do what a ticket or the
-     brief says it must not, each with the inputs or the sequence that does it, the criterion or
-     decision it contradicts, and the test that would pin it; a finding without that sequence is
-     not one and is dropped, and a confirmed one, reproduced by the session, lands with its test
-     in the same wave, or as a follow-up when a ticket of the wave rules that out.
-   Every finding is fixed on the branch or answered; none is deferred. The session landing the
-   wave reads the riskiest file itself, whoever wrote it.
+   - adversarial, when code or a rule file changed: every way the diff can be made to do what a
+     ticket or the brief says it must not, or to break a workflow, a skill, or a rule it did not
+     mean to change, each with the inputs or the sequence that does it, the criterion or decision
+     it contradicts, and the test that would pin it, or for a rule file the check that shows it;
+     a finding without that sequence is not one and is dropped, and a confirmed one, reproduced
+     by the session, lands with its test in the same wave, or as a follow-up when a ticket of the
+     wave rules that out.
+   Every finding is fixed on the branch or answered; none is deferred. When the fixes changed the
+   diff, a reviewer that did not write them reviews the fixes once more, on the axes they touch,
+   and its findings are fixed or answered the same way; that second review is the last. The
+   session landing the wave reads the riskiest file itself, whoever wrote it.
 5. **File follow-ups** for everything seen and not fixed.
 6. **Pull request**: title `<type>: <subject>`, the type the branch's, at most 72 characters, no
    trailing period. Body
