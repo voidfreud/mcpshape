@@ -14,8 +14,8 @@ file; a remark in a session changes nothing.
   several only when they touch the same code and would conflict if landed apart.
 - **Landing**: taking a wave from claim through the closing of its tickets.
 - **Claim**: assigning a ticket to yourself. An open, unassigned ticket is unclaimed.
-- **Follow-up**: something seen while landing a wave that the wave does not fix, filed as a
-  ticket or added to the open ticket that covers it.
+- **Follow-up**: something seen while landing a wave that the wave does not fix, filed or added
+  to an open ticket as the Tickets rules say.
 - **Frontier**: the tickets that can be landed now: open, `ready`, unblocked, unassigned, not a parent.
 - **Code**: anything under `src/` or `tests/`. **Rule files**: `CONTRIBUTING.md`, `CLAUDE.md`,
   everything under `.github/`, `release-please-config.json`, and `.release-please-manifest.json`.
@@ -58,15 +58,15 @@ Names and wording, in tickets, pull requests, code, and every Markdown file, fol
   records it, and closed; or it is relabelled `ready` and rewritten to be landable.
 - A `wish` ticket is closed when it is declined or superseded, or relabelled when it gets a plan.
 - A ticket that duplicates another, in any state, is closed as a duplicate of the one that stays
-  when the maintainer decides so, once every detail and criterion it has that the other lacks
-  has been added to that one.
+  when the maintainer decides so and neither is claimed, once every detail and criterion it has
+  that the other lacks has been added to that one.
 - A claim is released by unassigning: when a ticket drops out of a wave, or when it is found
   wrong while landing, in which case it is also relabelled `decision` with a comment saying why.
 - A ticket assigned with no open pull request naming it is a stale claim; the next session asks
   the maintainer before taking it over.
-- Follow-ups are filed as tickets, or added to the open ticket that covers them, before the
-  wave's pull request merges, blockers linked. A
-  follow-up is never left as a comment, a TODO, or a memory.
+- Follow-ups are filed, or added to an open ticket, as the Tickets rules say, before the wave's
+  pull request merges, blockers linked. A follow-up is never left as a comment, a TODO, or a
+  memory.
 - A pull request from outside gets a ticket filed by the maintainer and assigned to its author;
   it then lands like any wave, or is closed with a comment saying why.
 
