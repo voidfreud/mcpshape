@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.3](https://github.com/voidfreud/mcpshape/compare/v0.1.2...v0.1.3) (2026-09-11)
+
+
+### Documentation
+
+* the README installs from PyPI alone, Homebrew withdrawn ([#118](https://github.com/voidfreud/mcpshape/issues/118)) ([f9fad58](https://github.com/voidfreud/mcpshape/commit/f9fad5847b777193eb4e85477aa6ccfc51cdc50d))
+
 ## [0.1.2](https://github.com/voidfreud/mcpshape/compare/v0.1.1...v0.1.2) (2026-09-09)
 
 
