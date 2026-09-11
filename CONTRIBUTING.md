@@ -14,7 +14,8 @@ file; a remark in a session changes nothing.
   several only when they touch the same code and would conflict if landed apart.
 - **Landing**: taking a wave from claim through the closing of its tickets.
 - **Claim**: assigning a ticket to yourself. An open, unassigned ticket is unclaimed.
-- **Follow-up**: a ticket filed for something seen while landing a wave that the wave does not fix.
+- **Follow-up**: something seen while landing a wave that the wave does not fix, filed or added
+  to an open ticket as the Tickets rules say.
 - **Frontier**: the tickets that can be landed now: open, `ready`, unblocked, unassigned, not a parent.
 - **Code**: anything under `src/` or `tests/`. **Rule files**: `CONTRIBUTING.md`, `CLAUDE.md`,
   everything under `.github/`, `release-please-config.json`, and `.release-please-manifest.json`.
@@ -39,28 +40,42 @@ Names and wording, in tickets, pull requests, code, and every Markdown file, fol
     For a parent, the feature and its plan.
   - `### Acceptance criteria`: checkboxes a reviewer can tick. For a parent, the one line
     `Every sub-issue closed.`; GitHub lists the sub-issues itself.
+- Before a ticket is filed, the open tickets are searched for one that already covers it. When
+  one does, what is new is added to it instead, unless it is claimed; then the new ticket is
+  filed and names it as related.
+- A ticket whose body names the same file, function, or command as another open ticket's, or
+  repeats one of its criteria, names that ticket on the last line of `### What`:
+  `Related: #<n> (<why>), #<m> (<why>)`. The other ticket names it back the same way.
+- A claimed ticket's body is changed only by its claimer, except for its `Related` line.
 - Blocking is GitHub's native blocked-by relation, added when the ticket is filed and shown on
   it. A ticket is unblocked when every blocker is closed. A follow-up that blocks a ticket of the
   wave being landed is fixed in that wave, or the ticket is dropped from the wave.
 - A milestone names the release a ticket is for. A ticket with no milestone is not scheduled.
 - A `ready` ticket is closed by the merge that lands it; a `ready` parent by the session that
-  lands its last sub-issue. Nothing else closes either, and a ticket closed any other way is
-  reopened.
+  lands its last sub-issue. Nothing else closes either, except as a duplicate, and a ticket
+  closed any other way is reopened.
 - A `decision` ticket is resolved by the maintainer's decision, written as a comment by whoever
   records it, and closed; or it is relabelled `ready` and rewritten to be landable.
 - A `wish` ticket is closed when it is declined or superseded, or relabelled when it gets a plan.
+- A ticket that duplicates another, in any state, is closed as a duplicate of the one that stays
+  when the maintainer decides so and neither is claimed, once every detail and criterion it has
+  that the other lacks has been added to that one.
 - A claim is released by unassigning: when a ticket drops out of a wave, or when it is found
   wrong while landing, in which case it is also relabelled `decision` with a comment saying why.
 - A ticket assigned with no open pull request naming it is a stale claim; the next session asks
   the maintainer before taking it over.
-- Follow-ups are filed as tickets before the wave's pull request merges, blockers linked. A
-  follow-up is never left as a comment, a TODO, or a memory.
+- Follow-ups are filed, or added to an open ticket, as the Tickets rules say, before the wave's
+  pull request merges, blockers linked. A follow-up is never left as a comment, a TODO, or a
+  memory.
 - A pull request from outside gets a ticket filed by the maintainer and assigned to its author;
   it then lands like any wave, or is closed with a comment saying why.
 
 ## Landing a wave
 
-1. **Claim** every ticket of the wave. This is the session's first write to GitHub.
+1. **Claim** every ticket of the wave. This is the session's first write to GitHub. Before it,
+   the session reads every open ticket named on a wave ticket's `Related` line, and proposes to
+   the maintainer that any of them on the frontier that would conflict with the wave if landed
+   apart joins it.
 2. **Branch** from `main`: `<type>/<slug>`, the type from the list below, the slug lowercase
    letters, digits, and hyphens, at most 40 characters. One branch per wave.
 3. **Implement** on the branch. No rule constrains the commits on the branch, their messages or their number; the
@@ -178,7 +193,7 @@ to find again; a tag `vX.Y.Z` is a release.
 | Branch is `<type>/<slug>`; title is `type: subject` with the branch's type, at most 72 characters, no trailing period; a bot's pull request is exempt from the branch, type, body-section, closing-word, `Closes`, and release-please-file checks | CI, job `rules` |
 | Body has the template's sections in order; `Closes #<n>` when code changed, and no closing word before a ticket reference in the title or elsewhere; every `Closes` ticket is open, `ready`, assigned to the author, and not a parent; rule files and code never in one pull request; release-please's files written by release-please alone | CI, job `rules` |
 | Every command the README shows exists | CI, job `rules` |
-| Ticket sections and labels, checked on every open and edit, one comment until they pass | CI, workflow `Issue` |
+| Ticket sections and labels, and the place and shape of a `Related` line, checked on every open and edit, one comment until they pass | CI, workflow `Issue` |
 | Lint, format, types, lock file, dead code; tests on Python 3.12 and 3.14; the package builds, its wheel installs, and `--help` runs on it; green having run nothing when nothing they test changed | CI, job `test` |
 | Dependabot's minor and patch updates merge by themselves when green, and every open one is asked to rebase on each push to `main` | CI, workflow `Bots` |
 | `release-as`, when set, names a version above the last release | CI, job `rules` |
