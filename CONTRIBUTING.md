@@ -39,24 +39,25 @@ Names and wording, in tickets, pull requests, code, and every Markdown file, fol
     For a parent, the feature and its plan.
   - `### Acceptance criteria`: checkboxes a reviewer can tick. For a parent, the one line
     `Every sub-issue closed.`; GitHub lists the sub-issues itself.
-- Before a ticket is filed, the open tickets are searched for one that already covers it; when
-  one does, what is new is added to that ticket instead of filing another.
-- A ticket that touches the same code as another open ticket, or shares a criterion with it,
-  names it on one line at the end of `### What`: `Related: #<n> (<why>)`, one entry per ticket.
-  The other ticket names it back the same way.
+- Before a ticket is filed, the open tickets are searched for one that already covers it. When
+  one does, what is new is added to it instead, unless it is claimed; then the new ticket is
+  filed and names it as related.
+- A ticket whose body names the same file, function, or command as another open ticket's, or
+  repeats one of its criteria, names that ticket on the last line of `### What`:
+  `Related: #<n> (<why>), #<m> (<why>)`. The other ticket names it back the same way.
 - Blocking is GitHub's native blocked-by relation, added when the ticket is filed and shown on
   it. A ticket is unblocked when every blocker is closed. A follow-up that blocks a ticket of the
   wave being landed is fixed in that wave, or the ticket is dropped from the wave.
 - A milestone names the release a ticket is for. A ticket with no milestone is not scheduled.
 - A `ready` ticket is closed by the merge that lands it; a `ready` parent by the session that
-  lands its last sub-issue. Nothing else closes either, and a ticket closed any other way is
-  reopened.
+  lands its last sub-issue. Nothing else closes either, except as a duplicate, and a ticket
+  closed any other way is reopened.
 - A `decision` ticket is resolved by the maintainer's decision, written as a comment by whoever
   records it, and closed; or it is relabelled `ready` and rewritten to be landable.
 - A `wish` ticket is closed when it is declined or superseded, or relabelled when it gets a plan.
-- A ticket that duplicates another is closed as a duplicate of the one that stays, by the
-  maintainer's decision, once every detail and criterion it has that the other lacks has been
-  added to that one; a `ready` one is relabelled `decision` first.
+- A ticket that duplicates another, in any state, is closed as a duplicate of the one that stays
+  when the maintainer decides so, once every detail and criterion it has that the other lacks
+  has been added to that one.
 - A claim is released by unassigning: when a ticket drops out of a wave, or when it is found
   wrong while landing, in which case it is also relabelled `decision` with a comment saying why.
 - A ticket assigned with no open pull request naming it is a stale claim; the next session asks
@@ -69,8 +70,9 @@ Names and wording, in tickets, pull requests, code, and every Markdown file, fol
 ## Landing a wave
 
 1. **Claim** every ticket of the wave. This is the session's first write to GitHub. Before it,
-   every open ticket named on a `Related` line of the wave's tickets is read; each joins the
-   wave when it can land with it, or the pull request's Summary says why it stays out.
+   the session reads every open ticket named on a wave ticket's `Related` line, and proposes to
+   the maintainer that any of them on the frontier that would conflict with the wave if landed
+   apart joins it.
 2. **Branch** from `main`: `<type>/<slug>`, the type from the list below, the slug lowercase
    letters, digits, and hyphens, at most 40 characters. One branch per wave.
 3. **Implement** on the branch. No rule constrains the commits on the branch, their messages or their number; the
@@ -85,9 +87,8 @@ Names and wording, in tickets, pull requests, code, and every Markdown file, fol
    `uv lock --check && uv sync --locked && uv run ruff check . && uv run ruff format --check . && uv run pyright && uv run vulture src tests --min-confidence 80 && uv run pytest`
 4. **Review** on the branch, before the pull request opens, by a reviewer that did not write
    the code, on the whole diff:
-   - spec: each ticket's acceptance criteria, met or not, with evidence; each ticket named on
-     their `Related` lines in the wave or given a reason to stay out; and nothing built that no
-     ticket or finding asked for;
+   - spec: each ticket's acceptance criteria, met or not, with evidence; and nothing built that
+     no ticket or finding asked for;
    - standards: this file, `CONTEXT.md` (terms and Avoid lists, in names and in text), and,
      as `CLAUDE.md` names them, the design brief (a decision the diff breaks, or changes without
      editing the brief), the facts file (a fact the diff rests on that it does not date), and
@@ -189,7 +190,7 @@ to find again; a tag `vX.Y.Z` is a release.
 | Branch is `<type>/<slug>`; title is `type: subject` with the branch's type, at most 72 characters, no trailing period; a bot's pull request is exempt from the branch, type, body-section, closing-word, `Closes`, and release-please-file checks | CI, job `rules` |
 | Body has the template's sections in order; `Closes #<n>` when code changed, and no closing word before a ticket reference in the title or elsewhere; every `Closes` ticket is open, `ready`, assigned to the author, and not a parent; rule files and code never in one pull request; release-please's files written by release-please alone | CI, job `rules` |
 | Every command the README shows exists | CI, job `rules` |
-| Ticket sections and labels, checked on every open and edit, one comment until they pass | CI, workflow `Issue` |
+| Ticket sections and labels, and the place and shape of a `Related` line, checked on every open and edit, one comment until they pass | CI, workflow `Issue` |
 | Lint, format, types, lock file, dead code; tests on Python 3.12 and 3.14; the package builds, its wheel installs, and `--help` runs on it; green having run nothing when nothing they test changed | CI, job `test` |
 | Dependabot's minor and patch updates merge by themselves when green, and every open one is asked to rebase on each push to `main` | CI, workflow `Bots` |
 | `release-as`, when set, names a version above the last release | CI, job `rules` |

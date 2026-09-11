@@ -25,6 +25,16 @@ jobs:
             if (seen.join(',') !== headings.join(',')) {
               problems.push(`the body needs the sections ${headings.map((h) => '`' + h + '`').join(', ')}, in that order`);
             }
+            const trimmed = lines.map((l) => l.trimEnd());
+            const related = trimmed.filter((l) => l.startsWith('Related:'));
+            if (related.length > 0) {
+              const end = trimmed.indexOf('### Acceptance criteria');
+              const last = trimmed.slice(0, end === -1 ? trimmed.length : end).filter((l) => l !== '').pop();
+              const shape = /^Related: #\d+ \([^()]+\)(, #\d+ \([^()]+\))*$/;
+              if (related.length !== 1 || related[0] !== last || !shape.test(related[0])) {
+                problems.push('at most one `Related:` line, the last line of `### What`, shaped `Related: #<n> (<why>), #<m> (<why>)`');
+              }
+            }
             const category = labels.filter((l) => ['bug', 'enhancement'].includes(l));
             if (category.length !== 1) problems.push('exactly one of the labels `bug`, `enhancement`');
             const state = labels.filter((l) => ['ready', 'decision', 'wish'].includes(l));
