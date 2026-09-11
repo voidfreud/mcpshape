@@ -39,6 +39,11 @@ Names and wording, in tickets, pull requests, code, and every Markdown file, fol
     For a parent, the feature and its plan.
   - `### Acceptance criteria`: checkboxes a reviewer can tick. For a parent, the one line
     `Every sub-issue closed.`; GitHub lists the sub-issues itself.
+- Before a ticket is filed, the open tickets are searched for one that already covers it; when
+  one does, what is new is added to that ticket instead of filing another.
+- A ticket that touches the same code as another open ticket, or shares a criterion with it,
+  names it on one line at the end of `### What`: `Related: #<n> (<why>)`, one entry per ticket.
+  The other ticket names it back the same way.
 - Blocking is GitHub's native blocked-by relation, added when the ticket is filed and shown on
   it. A ticket is unblocked when every blocker is closed. A follow-up that blocks a ticket of the
   wave being landed is fixed in that wave, or the ticket is dropped from the wave.
@@ -49,6 +54,9 @@ Names and wording, in tickets, pull requests, code, and every Markdown file, fol
 - A `decision` ticket is resolved by the maintainer's decision, written as a comment by whoever
   records it, and closed; or it is relabelled `ready` and rewritten to be landable.
 - A `wish` ticket is closed when it is declined or superseded, or relabelled when it gets a plan.
+- A ticket that duplicates another is closed as a duplicate of the one that stays, by the
+  maintainer's decision, once every detail and criterion it has that the other lacks has been
+  added to that one; a `ready` one is relabelled `decision` first.
 - A claim is released by unassigning: when a ticket drops out of a wave, or when it is found
   wrong while landing, in which case it is also relabelled `decision` with a comment saying why.
 - A ticket assigned with no open pull request naming it is a stale claim; the next session asks
@@ -60,7 +68,9 @@ Names and wording, in tickets, pull requests, code, and every Markdown file, fol
 
 ## Landing a wave
 
-1. **Claim** every ticket of the wave. This is the session's first write to GitHub.
+1. **Claim** every ticket of the wave. This is the session's first write to GitHub. Before it,
+   every open ticket named on a `Related` line of the wave's tickets is read; each joins the
+   wave when it can land with it, or the pull request's Summary says why it stays out.
 2. **Branch** from `main`: `<type>/<slug>`, the type from the list below, the slug lowercase
    letters, digits, and hyphens, at most 40 characters. One branch per wave.
 3. **Implement** on the branch. No rule constrains the commits on the branch, their messages or their number; the
@@ -75,8 +85,9 @@ Names and wording, in tickets, pull requests, code, and every Markdown file, fol
    `uv lock --check && uv sync --locked && uv run ruff check . && uv run ruff format --check . && uv run pyright && uv run vulture src tests --min-confidence 80 && uv run pytest`
 4. **Review** on the branch, before the pull request opens, by a reviewer that did not write
    the code, on the whole diff:
-   - spec: each ticket's acceptance criteria, met or not, with evidence; and nothing built that
-     no ticket or finding asked for;
+   - spec: each ticket's acceptance criteria, met or not, with evidence; each ticket named on
+     their `Related` lines in the wave or given a reason to stay out; and nothing built that no
+     ticket or finding asked for;
    - standards: this file, `CONTEXT.md` (terms and Avoid lists, in names and in text), and,
      as `CLAUDE.md` names them, the design brief (a decision the diff breaks, or changes without
      editing the brief), the facts file (a fact the diff rests on that it does not date), and
